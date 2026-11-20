@@ -558,8 +558,8 @@ func (m configModel) allSettingsLines(width int) ([]string, int) {
 				keyText = settingKeyStyle.Render(keyText)
 			}
 
-			// Value with source indicator (truncate long values so each row fits on one physical line)
-			valueText := item.value.Value
+			// Value with source indicator (flatten newlines and truncate long values so each row fits on one physical line)
+			valueText := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(item.value.Value)
 			sourceText := m.formatSourceArrow(item.value.Source)
 			if width > 0 {
 				keyWidth := lipgloss.Width(keyText)

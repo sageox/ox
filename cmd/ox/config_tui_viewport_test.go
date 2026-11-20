@@ -158,38 +158,56 @@ func TestEditView_MultiScopeSettingsRadioOptionsNearTop(t *testing.T) {
 }
 
 func TestMainView_CompactFooterWithLongSaveErrorAndLongValue(t *testing.T) {
-	dir := setupIsolatedUserConfig(t)
-	m, err := newConfigModel(dir)
-	require.NoError(t, err)
-
-	// Select attribution.pr (or fall back to last item) and give it a long value that would wrap without truncation
-	targetCursor := len(m.displayOrder) - 1
-	for pos, itemIdx := range m.displayOrder {
-		if m.items[itemIdx].setting.Key == "attribution.pr" {
-			targetCursor = pos
-			break
-		}
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{
+			name:  "long single-line value",
+			value: strings.Repeat("Co-Authored-By: SageOx ", 4),
+		},
+		{
+			name:  "multiline value",
+			value: "Co-Authored-By: SageOx\nLine 2\r\nLine 3\nLine 4\nLine 5\nLine 6",
+		},
 	}
-	selectedItem := &m.items[m.displayOrder[targetCursor]]
-	selectedItem.value.Value = strings.Repeat("Co-Authored-By: SageOx ", 4)
 
-	m.cursor = targetCursor
-	m.width = 80
-	m.height = 12
-	m.saveErr = "failed to write config file: permission denied while updating repository configuration on disk"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupIsolatedUserConfig(t)
+			m, err := newConfigModel(dir)
+			require.NoError(t, err)
 
-	view := m.mainView(80)
-	lines := strings.Split(view, "\n")
+			// Select attribution.pr (or fall back to last item)
+			targetCursor := len(m.displayOrder) - 1
+			for pos, itemIdx := range m.displayOrder {
+				if m.items[itemIdx].setting.Key == "attribution.pr" {
+					targetCursor = pos
+					break
+				}
+			}
+			selectedItem := &m.items[m.displayOrder[targetCursor]]
+			selectedItem.value.Value = tc.value
 
-	assert.LessOrEqual(t, len(lines), 12, "mainView lines should not exceed 12 rows")
-	assert.Contains(t, view, "q quit", "navigation hints must remain visible with a long wrapped save error")
+			m.cursor = targetCursor
+			m.width = 80
+			m.height = 12
+			m.saveErr = "failed to write config file: permission denied while updating repository configuration on disk"
 
-	hasSelectedRow := false
-	for _, line := range lines {
-		if strings.Contains(line, "> ") && strings.Contains(line, selectedItem.setting.Key) {
-			hasSelectedRow = true
-			break
-		}
+			view := m.mainView(80)
+			lines := strings.Split(view, "\n")
+
+			assert.LessOrEqual(t, len(lines), 12, "mainView lines should not exceed 12 rows")
+			assert.Contains(t, view, "q quit", "navigation hints must remain visible with a long wrapped save error")
+
+			hasSelectedRow := false
+			for _, line := range lines {
+				if strings.Contains(line, "> ") && strings.Contains(line, selectedItem.setting.Key) {
+					hasSelectedRow = true
+					break
+				}
+			}
+			assert.True(t, hasSelectedRow, "selected row '> %s' must remain visible", selectedItem.setting.Key)
+		})
 	}
-	assert.True(t, hasSelectedRow, "selected row '> %s' must remain visible", selectedItem.setting.Key)
 }
