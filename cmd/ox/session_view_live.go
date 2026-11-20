@@ -208,7 +208,7 @@ func newLiveViewClient(ctx context.Context, ref liveViewRef) (liveViewFetcher, s
 	if ref.Host != "" {
 		ep = liveStoredEndpoint(ref.Host)
 		if ep == "" {
-			return nil, "", fmt.Errorf("you are not logged in to %s; run `ox login` and retry", ref.Host)
+			return nil, "", fmt.Errorf("you are not logged in to %s; run `ox login` and retry", cli.SanitizeTerminalText(ref.Host))
 		}
 	} else if root := liveProjectRoot(); root != "" {
 		ep = endpoint.GetForProject(root)
@@ -216,7 +216,7 @@ func newLiveViewClient(ctx context.Context, ref liveViewRef) (liveViewFetcher, s
 		ep = endpoint.Get()
 	}
 	if _, err := liveViewEnsureToken(ctx, ep); err != nil {
-		return nil, "", fmt.Errorf("not logged in to %s (or the login expired); run `ox login` and retry", endpoint.NormalizeSlug(ep))
+		return nil, "", fmt.Errorf("not logged in to %s (or the login expired); run `ox login` and retry", cli.SanitizeTerminalText(endpoint.NormalizeSlug(ep)))
 	}
 	return &refreshingFetcher{ep: ep}, ep, nil
 }
@@ -643,8 +643,13 @@ func liveShowGuidance(view *api.AgentView, id, ep string) string {
 		sid = id
 	}
 	if p := weblink.IDTypePrefix(sid); p != "" {
+		// only a link that parseLiveViewRef accepts for this same session and
+		// host is suggested: localhost and self-hosted endpoints do not
+		// round-trip, so those keep the bare id
 		if link := weblink.ArtifactURL(ep, sid, "/c/", p); link != "" {
-			sid = link
+			if back, ok := parseLiveViewRef(link); ok && back.ID == sid && back.Host == endpoint.NormalizeSlug(ep) {
+				sid = link
+			}
 		}
 	}
 	switch {

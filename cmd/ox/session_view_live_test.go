@@ -859,3 +859,42 @@ func TestLiveShowGuidance_KeepsRequestEndpoint(t *testing.T) {
 		t.Fatalf("guidance = %q", got)
 	}
 }
+
+func TestLiveShowGuidance_OnlyRoundTrippingLinks(t *testing.T) {
+	view := &api.AgentView{SessionID: testSesID, Truncated: true, NextSince: "c1"}
+	for _, tc := range []struct {
+		name, ep string
+		wantLink bool
+	}{
+		{"prod", "https://sageox.ai", true},
+		{"test env", "https://test.sageox.ai", true},
+		{"localhost", "http://localhost:3000", false},
+		{"self-hosted", "https://sageox.example.com", false},
+		{"no endpoint", "", false},
+	} {
+		got := liveShowGuidance(view, testSesID, tc.ep)
+		hasLink := strings.Contains(got, "https://") && strings.Contains(got, "/c/"+testSesID)
+		if hasLink != tc.wantLink || !strings.Contains(got, "ox session view ") || !strings.Contains(got, testSesID) {
+			t.Errorf("%s: guidance = %q", tc.name, got)
+		}
+		if !tc.wantLink && !strings.Contains(got, "ox session view "+testSesID+" --since c1") {
+			t.Errorf("%s: want the bare id, got %q", tc.name, got)
+		}
+	}
+}
+
+func TestNewLiveViewClient_LoginErrorsAreSanitized(t *testing.T) {
+	orig := liveViewEnsureToken
+	t.Cleanup(func() { liveViewEnsureToken = orig })
+	liveViewEnsureToken = func(context.Context, string) (string, error) { return "", errors.New("no") }
+	t.Setenv("SAGEOX_ENDPOINT", "https://x.sageox.ai\x1b]0;pwned\x07")
+	t.Chdir(t.TempDir())
+	_, _, err := newLiveViewClient(context.Background(), liveViewRef{ID: testSesID})
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Fatalf("err = %q", err)
+	}
+	_, _, err = newLiveViewClient(context.Background(), liveViewRef{ID: testSesID, Host: "evil\x1b[2J.sageox.ai"})
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b") {
+		t.Fatalf("err = %q", err)
+	}
+}
