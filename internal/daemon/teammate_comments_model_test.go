@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,27 @@ import (
 //	(c) a note dropped unshown (opted out) is never acked;
 //	(d) an ack obligation is settled only by a 2xx or a permanent 4xx.
 
+// safeClock is a fake clock safe to share between the test and the goroutines
+// (IPC server, background drains) that read it.
+type safeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newSafeClock(t time.Time) *safeClock { return &safeClock{now: t} }
+
+func (c *safeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *safeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
 type noteModel struct {
 	t      *testing.T
 	e      *liveEnv
@@ -37,37 +60,45 @@ type noteModel struct {
 	store  *whisperstore.Store
 	ipc    *ipcfault.Server
 	client *Client
-	clock  time.Time
+	// shortClient is the hook whose read gives up while the daemon is held.
+	shortClient *Client
+	// clk is the one injected clock for the lease TTL and for the drains' backoff.
+	// The IPC server goroutine reads it while the test advances it, so it is
+	// synchronized: an unsynchronized time.Time here was a data race (CI, -race).
+	clk *safeClock
 	// legacy drives the pre-lease behavior (consume and ack inside take) so the
 	// test can be shown to catch it.
 	legacy bool
 
-	seed int64
-	step int
-	last string
-	next int
+	issued int // IPC requests the hook side has made
+	seed   int64
+	step   int
+	last   string
+	next   int
 
-	held        map[string]bool // queued on the server and not acked by it
-	inScope     map[string]bool // ox received it while opted in and it was not dropped
-	shown       map[string]int
-	dropped     map[string]bool // dropped unshown by an opt-out
-	optedOut    bool
-	closed      bool
-	permRefused map[string]bool
-	permCalls   int
+	held     map[string]bool // queued on the server and not acked by it
+	inScope  map[string]bool // ox received it while opted in and it was not dropped
+	shown    map[string]int
+	dropped  map[string]bool // dropped unshown by an opt-out
+	optedOut bool
+	closed   bool
 }
 
 func newNoteModel(t *testing.T, seed int64, legacy bool) *noteModel {
 	e, box, store := newCommentEnv(t, "agent-a")
 	m := &noteModel{
 		t: t, e: e, box: box, store: store, seed: seed, legacy: legacy,
-		clock: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-		held:  map[string]bool{}, inScope: map[string]bool{}, shown: map[string]int{},
-		dropped: map[string]bool{}, permRefused: map[string]bool{},
+		clk:  newSafeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)),
+		held: map[string]bool{}, inScope: map[string]bool{}, shown: map[string]int{},
+		dropped: map[string]bool{},
 	}
-	box.now = func() time.Time { return m.clock }
+	box.now = m.clk.Now
+	e.live.now = m.clk.Now
 	m.ipc = ipcfault.New(t, m.handle)
-	m.client = NewClientWithSocketAndTimeout(m.ipc.Path(), 150*time.Millisecond)
+	// healthy calls get a generous read timeout so a loaded machine never turns
+	// one into a fault; the hook that times out uses the short client below
+	m.client = NewClientWithSocketAndTimeout(m.ipc.Path(), 10*time.Second)
+	m.shortClient = NewClientWithSocketAndTimeout(m.ipc.Path(), 50*time.Millisecond)
 	return m
 }
 
@@ -148,7 +179,7 @@ func mustJSON(v any) []byte {
 
 func (m *noteModel) drain() {
 	m.e.spool(lineN(100 + m.step))
-	m.e.clock = m.e.clock.Add(time.Minute)
+	m.clk.Advance(time.Minute)
 	m.e.drainOnce()
 	m.e.srv.Calls()
 }
@@ -157,11 +188,20 @@ func (m *noteModel) drain() {
 // notes, then confirm. mode is how it dies.
 func (m *noteModel) hook(mode string) {
 	seq := int64(10 + m.step)
+	client := m.client
+	var release chan struct{}
 	if mode == "timeout" {
-		m.ipc.Inject(ipcfault.Fault{Delay: 400 * time.Millisecond}) // the take outlives the hook's read timeout
+		// the daemon holds the take until the hook's read has given up
+		release = make(chan struct{})
+		m.ipc.Inject(ipcfault.Fault{Hold: release})
+		client = m.shortClient
 	}
-	resp, err := m.client.TeammateCommentsTake("agent-a", m.e.conv(), seq)
-	m.ipc.Wait() // a take the hook abandoned still finishes in the daemon
+	resp, err := client.TeammateCommentsTake("agent-a", m.e.conv(), seq)
+	if release != nil {
+		close(release)
+	}
+	m.issued++
+	m.ipc.WaitServed(m.issued) // a take the hook abandoned still finishes in the daemon
 	if err != nil || resp == nil || len(resp.Entries) == 0 {
 		return
 	}
@@ -177,7 +217,8 @@ func (m *noteModel) hook(mode string) {
 		m.ipc.Inject(ipcfault.Fault{CloseMidResponse: true})
 	}
 	_ = m.client.TeammateCommentsConfirm("agent-a", resp.LeaseID, ids)
-	m.ipc.Wait()
+	m.issued++
+	m.ipc.WaitServed(m.issued)
 	m.e.live.Wait()
 }
 
@@ -206,21 +247,16 @@ func (m *noteModel) ackDrain() {
 	m.drain()
 }
 
-// notePermanentRefusals exempts every logged ack once the server has refused one
-// permanently: that refusal may have settled any batch that was owed.
-func (m *noteModel) notePermanentRefusals() {
-	permanent := 0
-	for _, c := range m.e.srv.Calls() {
-		if c.Method == http.MethodPost && strings.HasSuffix(c.Path, "/teammate-comments/acks") && c.Status == http.StatusBadRequest {
-			permanent++
+// settledByClient: the client saw a 2xx or a permanent 4xx for an ack request
+// naming id. A request whose answer was lost (a dead connection) settles nothing,
+// even though the server may have recorded it.
+func (m *noteModel) settledByClient(id string) bool {
+	for _, at := range m.e.srv.AckAttempts() {
+		if (at.Status == http.StatusOK || at.Status == http.StatusBadRequest) && slices.Contains(at.IDs, id) {
+			return true
 		}
 	}
-	if permanent > m.permCalls {
-		m.permCalls = permanent
-		for id := range m.logIDs("teammate-comment-acks") {
-			m.permRefused[id] = true
-		}
-	}
+	return false
 }
 
 func (m *noteModel) markScope() {
@@ -295,7 +331,7 @@ func (m *noteModel) do(r *rand.Rand) {
 		m.markScope()
 	default:
 		m.last = "30s pass"
-		m.clock = m.clock.Add(teammateLeaseTTL + time.Second)
+		m.clk.Advance(teammateLeaseTTL + time.Second)
 	}
 	// the server's own ack record settles a held note
 	for id := range m.held {
@@ -314,7 +350,6 @@ func (m *noteModel) fail(format string, args ...any) {
 func (m *noteModel) check() {
 	m.t.Helper()
 	m.e.live.Wait() // a confirm kicks a background drain; settle it before judging
-	m.notePermanentRefusals()
 	pending := map[string]bool{}
 	for _, id := range stillPending(m.t, m.store, "agent-a") {
 		pending[id] = true
@@ -339,8 +374,8 @@ func (m *noteModel) check() {
 		}
 	}
 	for id := range m.logIDs("teammate-comment-acks-sent") {
-		if _, ok := m.e.srv.DeliveredAtSeq(id); !ok && !m.permRefused[id] {
-			m.fail("(d) the ack for %s was settled without a 2xx or a permanent refusal", id)
+		if !m.settledByClient(id) {
+			m.fail("(d) the ack for %s was settled without the client seeing a 2xx or a permanent refusal", id)
 		}
 	}
 }
@@ -359,13 +394,13 @@ func runNoteModel(t *testing.T, seed int64, legacy bool, steps int) {
 		m.fail("close: %v", err)
 	}
 	for range 3 {
-		if err := livesession.FlushTeammateAcks(t.Context(), m.e.cfg, m.e.dir, 5*time.Second, time.Now()); err != nil {
+		if _, err := livesession.FlushTeammateAcks(t.Context(), m.e.cfg, m.e.dir, 5*time.Second, time.Now()); err != nil {
 			m.fail("flush: %v", err)
 		}
 	}
 	m.check()
 	for id, n := range m.shown {
-		if _, ok := m.e.srv.DeliveredAtSeq(id); !ok && !m.permRefused[id] && n == 1 {
+		if !m.settledByClient(id) && n == 1 {
 			m.fail("(d) note %s was shown but its receipt never reached the server after close", id)
 		}
 	}
@@ -397,7 +432,7 @@ func TestTeammateNoteShownOnTheNextToolCallAfterAHookReadTimeout(t *testing.T) {
 	if m.shown["tcm_1"] != 0 || ackLogExists(m.e.dir) {
 		t.Fatalf("shown=%d, acked=%v after a timed-out take; neither may happen", m.shown["tcm_1"], ackLogExists(m.e.dir))
 	}
-	m.clock = m.clock.Add(teammateLeaseTTL + time.Second)
+	m.clk.Advance(teammateLeaseTTL + time.Second)
 	m.step = 2
 	m.hook("write")
 	m.e.live.Wait()

@@ -72,6 +72,12 @@ type LiveSessions struct {
 	// onTeammateComments receives the notes a drain returned; nil drops them
 	// (the server re-sends every undelivered one on the next append).
 	onTeammateComments func(ctx context.Context, dir string, st livesession.State, comments []sessionstream.TeammateComment)
+	// flushAcks, ackFlushBudget and ackFlushStart drive the closed sessions'
+	// receipt retries (flushOwedAcks); tests replace the first two.
+	flushAcks        func(ctx context.Context, cfg livesession.Config, dir string, budget time.Duration, now time.Time) (bool, error)
+	ackFlushBudget   time.Duration
+	ackFlushStart    int
+	ackFlushFailures sync.Map
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
 
@@ -187,6 +193,7 @@ func (l *LiveSessions) refreshRulesOnce(ctx context.Context) {
 // abort deletes.
 func (l *LiveSessions) Tick(ctx context.Context) {
 	seen := map[string]livesession.State{}
+	var closed []string
 	entries, err := os.ReadDir(l.sessionsDir)
 	if err == nil {
 		for _, e := range entries {
@@ -201,7 +208,7 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 				seen[dir] = st
 				l.request(ctx, dir)
 			case st.Status == livesession.StatusClosed:
-				l.flushOwedAcks(ctx, dir)
+				closed = append(closed, dir)
 			}
 		}
 	}
@@ -214,18 +221,65 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 	} else if n > 0 {
 		l.logger.InfoContext(ctx, "live_pending_deletes_confirmed", "confirmed", n)
 	}
+	// last, and bounded: a receipt for a finished session never delays live work
+	l.flushOwedAcks(ctx, closed)
 }
 
-// flushOwedAcks retries the delivery receipts a closed stream still owes (the
+const (
+	// liveAckFlushBudget is the whole tick's allowance for closed sessions'
+	// receipt retries, however many sessions owe one.
+	liveAckFlushBudget = 20 * time.Second
+	// liveAckFlushMax is how many sessions with receipts owed one tick works.
+	liveAckFlushMax = 4
+)
+
+// flushOwedAcks retries the delivery receipts closed streams still owe (the
 // sweep skips closed streams, so without this a receipt that failed around the
-// close would never reach the server). Bounded to a day by livesession.
-func (l *LiveSessions) flushOwedAcks(ctx context.Context, dir string) {
-	if l.endpoint == "" || !livesession.TeammateAcksOwed(dir) {
+// close would never reach the server). It runs after everything live in the
+// tick, under one budget, for at most liveAckFlushMax sessions per tick; the
+// starting point rotates, so a dead server cannot pin the same sessions first.
+// Each receipt is retried for a day (livesession).
+func (l *LiveSessions) flushOwedAcks(ctx context.Context, dirs []string) {
+	if len(dirs) == 0 {
 		return
 	}
-	if err := livesession.FlushTeammateAcks(ctx, l.config(l.endpoint), dir, liveDrainBudget, l.now()); err != nil {
-		l.logger.DebugContext(ctx, "live_teammate_acks_flush_failed", "session", filepath.Base(dir), "error", err)
+	budget := l.ackFlushBudget
+	if budget <= 0 {
+		budget = liveAckFlushBudget
 	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	flush := l.flushAcks
+	if flush == nil {
+		flush = livesession.FlushTeammateAcks
+	}
+	start := l.ackFlushStart % len(dirs)
+	l.ackFlushStart++
+	attempts := 0
+	for i := range dirs {
+		if attempts >= liveAckFlushMax || ctx.Err() != nil {
+			return
+		}
+		dir := dirs[(start+i)%len(dirs)]
+		attempted, err := flush(ctx, l.config(l.endpoint), dir, liveDrainBudget, l.now())
+		if attempted {
+			attempts++
+		}
+		if err != nil {
+			l.reportAckFlushFailure(ctx, dir, err)
+		}
+	}
+}
+
+// reportAckFlushFailure logs a flush failure once per session and error: a
+// folder whose receipt log is oversized or unreadable fails the same way every
+// tick, and one line is the signal.
+func (l *LiveSessions) reportAckFlushFailure(ctx context.Context, dir string, err error) {
+	key := dir + "\x00" + err.Error()
+	if _, logged := l.ackFlushFailures.LoadOrStore(key, true); logged {
+		return
+	}
+	l.logger.WarnContext(ctx, "live_teammate_acks_flush_failed", "session", filepath.Base(dir), "error", err)
 }
 
 // trackSessionDirs reports, once, a streaming session whose folder vanished,

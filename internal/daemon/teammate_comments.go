@@ -65,6 +65,10 @@ type TeammateCommentsConfirmPayload struct {
 // or died) expires and its notes are pending again.
 const teammateLeaseTTL = 30 * time.Second
 
+// teammateLeaseForget is how long past its expiry a lease is remembered for a
+// late confirm before it is dropped to bound memory.
+const teammateLeaseForget = 10 * time.Minute
+
 // noteLease is one take's hold on notes: nothing is acked or deleted until it
 // is confirmed.
 type noteLease struct {
@@ -138,6 +142,9 @@ func (b *teammateCommentInbox) receive(ctx context.Context, dir string, st lives
 		b.logger.DebugContext(ctx, "teammate_comment_no_recipient", "session", st.SessionID, "count", len(comments))
 		return
 	}
+	b.retryShown(ctx, reg, b.live(), func() ([]whisperstore.WhisperEntry, error) {
+		return reg.PeekShownTeammateComments(agentID, teammateCommentPeekLimit)
+	})
 	for _, c := range comments[:min(len(comments), sessionstream.MaxTeammateCommentsPerAppend)] {
 		meta := map[string]string{
 			tcMetaCommentID: c.ID, tcMetaAuthorName: c.AuthorName,
@@ -164,19 +171,40 @@ func (b *teammateCommentInbox) receive(ctx context.Context, dir string, st lives
 
 func (b *teammateCommentInbox) isEnabled() bool { return b.enabled == nil || b.enabled() }
 
-// leaseHolder is the unexpired lease holding comment id, or "". mu held.
+// leaseHolder is the unexpired lease holding comment id, or "". mu held. An
+// expired lease is skipped, not discarded: its owner may still confirm late, and
+// only a lease that actually takes its notes supersedes it (supersede).
 func (b *teammateCommentInbox) leaseHolder(id string) string {
 	now := b.now()
 	for leaseID, l := range b.leases {
-		if now.After(l.expires) {
-			delete(b.leases, leaseID)
-			continue
-		}
-		if slices.Contains(l.ids, id) {
+		if !now.After(l.expires) && slices.Contains(l.ids, id) {
 			return leaseID
 		}
 	}
 	return ""
+}
+
+// heldByOtherThan is the unexpired lease other than self holding id, or "".
+func (b *teammateCommentInbox) heldByOtherThan(id, self string) string {
+	if h := b.leaseHolder(id); h != self {
+		return h
+	}
+	return ""
+}
+
+// supersede takes ids away from every other lease: a new lease now holds them, so
+// the old lease's late confirm must not consume or ack them. A lease left with
+// no notes is forgotten, as is one long expired. mu held.
+func (b *teammateCommentInbox) supersede(except string, ids []string) {
+	now := b.now()
+	for leaseID, l := range b.leases {
+		if leaseID != except {
+			l.ids = slices.DeleteFunc(l.ids, func(id string) bool { return slices.Contains(ids, id) })
+		}
+		if len(l.ids) == 0 || now.After(l.expires.Add(teammateLeaseForget)) {
+			delete(b.leases, leaseID)
+		}
+	}
 }
 
 // lease holds the agent's notes for its current conversation, at most
@@ -199,6 +227,9 @@ func (b *teammateCommentInbox) lease(ctx context.Context, p TeammateCommentsTake
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.retryShown(ctx, reg, live, func() ([]whisperstore.WhisperEntry, error) {
+		return reg.PeekShownTeammateComments(p.AgentID, teammateCommentPeekLimit)
+	})
 	waiting, err := reg.PeekTeammateComments(p.AgentID, teammateCommentPeekLimit)
 	if err != nil {
 		return TeammateCommentsTakeResponse{}, fmt.Errorf("take teammate comments: %w", err)
@@ -245,16 +276,23 @@ func (b *teammateCommentInbox) lease(ctx context.Context, p TeammateCommentsTake
 	}
 	id := uuid.NewString()
 	b.leases[id] = l
+	b.supersede(id, l.ids)
 	return TeammateCommentsTakeResponse{LeaseID: id, Entries: shown}, nil
 }
 
-// confirm commits a lease: the hook wrote the notes it names. Only now are the
-// notes deleted and their delivery acks logged, in that order, so a failed
-// delete leaves no sendable ack for a note that stays pending. A confirm after
-// the lease expired still counts when no other lease took the notes since (the
-// hook did show them); one a second hook has since leased is refused, so the
-// second hook's confirm alone acks them. A note that left the inbox meanwhile
-// (retracted, purged) is never acked.
+// confirm commits a lease: the hook wrote the notes it names. A note goes
+// pending -> leased -> shown (receipt owed) -> done:
+//
+//  1. mark the notes shown (with the seq they were shown at): from here they are
+//     never offered again, whatever else fails. If this fails nothing was acked
+//     and the notes stay leased (they expire and are shown again);
+//  2. log each receipt in its session folder;
+//  3. only after a receipt is durably logged, delete its note.
+//
+// A receipt that cannot be logged leaves its note shown, and retryShown logs it
+// on a later take or drain. A confirm after the lease expired still counts when
+// no other lease took the notes since (the hook did show them). A note that
+// left the inbox meanwhile (retracted, purged) is never acked.
 func (b *teammateCommentInbox) confirm(ctx context.Context, p TeammateCommentsConfirmPayload) error {
 	reg, live := b.registry(), b.live()
 	if reg == nil {
@@ -266,38 +304,76 @@ func (b *teammateCommentInbox) confirm(ctx context.Context, p TeammateCommentsCo
 	if l == nil || l.agentID != p.AgentID {
 		return errors.New("unknown or already confirmed teammate comments lease")
 	}
-	delete(b.leases, p.LeaseID)
 	pending, err := reg.PeekTeammateComments(l.agentID, teammateCommentPeekLimit*2)
 	if err != nil {
 		return fmt.Errorf("confirm teammate comments: %w", err)
 	}
 	var settle []string
 	for _, e := range pending {
-		if slices.Contains(l.ids, e.ID) && slices.Contains(p.CommentIDs, e.ID) && b.leaseHolder(e.ID) == "" {
+		if slices.Contains(l.ids, e.ID) && slices.Contains(p.CommentIDs, e.ID) && b.heldByOtherThan(e.ID, p.LeaseID) == "" {
 			settle = append(settle, e.ID)
 		}
 	}
 	if len(settle) == 0 {
+		delete(b.leases, p.LeaseID)
 		return nil
 	}
-	if err := reg.DeleteTeammateComments(settle...); err != nil {
-		// no ack was written: the notes stay pending and are shown again
-		b.logger.WarnContext(ctx, "teammate_comment_consume_failed", "error", err)
-		return fmt.Errorf("consume teammate comments: %w", err)
+	if err := reg.MarkTeammateCommentsShown(l.seq, settle...); err != nil {
+		b.logger.WarnContext(ctx, "teammate_comment_mark_shown_failed", "error", err)
+		return fmt.Errorf("mark teammate comments shown: %w", err)
 	}
+	delete(b.leases, p.LeaseID)
+	b.logReceipts(ctx, reg, live, l.seq, l.dirs, settle)
+	return nil
+}
+
+// logReceipts logs the receipt of each shown note in its folder, then deletes
+// the notes whose receipt was recorded. mu held.
+func (b *teammateCommentInbox) logReceipts(ctx context.Context, reg *WhisperRegistry, live *LiveSessions, seq int64, dirs map[string]string, ids []string) {
+	var done []string
 	kicked := map[string]bool{}
-	for _, id := range settle {
-		dir := l.dirs[id]
-		if err := livesession.RecordTeammateCommentAck(dir, id, l.seq); err != nil {
+	for _, id := range ids {
+		dir := dirs[id]
+		if err := livesession.RecordTeammateCommentAck(dir, id, seq); err != nil {
+			// the note stays shown: it is never offered again, and retryShown
+			// logs the receipt when the folder is writable again
 			b.logger.WarnContext(ctx, "teammate_comment_ack_log_failed", "comment_id", id, "error", err)
 			continue
 		}
+		done = append(done, id)
 		if !kicked[dir] && live != nil {
 			kicked[dir] = true
 			live.request(ctx, dir)
 		}
 	}
-	return nil
+	if err := reg.DeleteTeammateComments(done...); err != nil {
+		// the receipts are logged, so the delete can wait: the notes stay shown
+		b.logger.WarnContext(ctx, "teammate_comment_consume_failed", "error", err)
+	}
+}
+
+// retryShown logs the receipts of notes that were shown but whose receipt could
+// not be logged then, and deletes them once it is. mu held.
+func (b *teammateCommentInbox) retryShown(ctx context.Context, reg *WhisperRegistry, live *LiveSessions, peek func() ([]whisperstore.WhisperEntry, error)) {
+	shown, err := peek()
+	if err != nil || len(shown) == 0 {
+		if err != nil {
+			b.logger.WarnContext(ctx, "teammate_comment_shown_peek_failed", "error", err)
+		}
+		return
+	}
+	for _, e := range shown {
+		seq, perr := strconv.ParseInt(e.Metadata["shown_seq"], 10, 64)
+		dir, ok := "", false
+		if live != nil {
+			dir, ok = live.trusted(e.Metadata[tcMetaSessionDir])
+		}
+		if perr != nil || seq < 1 || !ok {
+			b.logger.WarnContext(ctx, "teammate_comment_shown_unrecoverable", "comment_id", e.ID)
+			continue
+		}
+		b.logReceipts(ctx, reg, live, seq, map[string]string{e.ID: dir}, []string{e.ID})
+	}
 }
 
 // purgeSession drops every note held for the stream a stopped recording wrote,
@@ -318,6 +394,11 @@ func (b *teammateCommentInbox) purgeSession(ctx context.Context, sessionName str
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// a receipt still owed is logged before the stream's folder stops being
+	// swept; only then are the rest of its notes dropped
+	b.retryShown(ctx, reg, live, func() ([]whisperstore.WhisperEntry, error) {
+		return reg.ShownTeammateCommentsForConversation(st.ConversationID, teammateCommentPeekLimit)
+	})
 	n, err := reg.RetainTeammateComments(st.ConversationID, nil)
 	if err != nil {
 		b.logger.WarnContext(ctx, "teammate_comment_purge_failed", "session", sessionName, "error", err)

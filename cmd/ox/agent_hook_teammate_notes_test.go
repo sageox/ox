@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -376,3 +378,73 @@ func TestAfterToolTeammateNotesOffByUserConfig(t *testing.T) {
 	h.run(t, "claude-code", &agentx.HookInput{ToolName: "Bash"})
 	assert.Empty(t, h.takes, "session.teammate_notes=off must stop the take")
 }
+
+// R6: when OX_TEAMMATE_NOTES overrides the stored setting, `ox config get` must
+// report the value in effect and say where it came from.
+func TestConfigReportsTheTeammateNotesEnvOverride(t *testing.T) {
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	cv, err := ResolveConfigValue("session.teammate_notes", "")
+	require.NoError(t, err)
+	assert.Equal(t, "on", cv.Value)
+	assert.Equal(t, ConfigLevelDefault, cv.Source)
+
+	t.Setenv("OX_TEAMMATE_NOTES", "off")
+	cv, err = ResolveConfigValue("session.teammate_notes", "")
+	require.NoError(t, err)
+	assert.Equal(t, "off", cv.Value, "the environment override is in effect")
+	assert.Equal(t, ConfigLevelEnv, cv.Source)
+
+	require.NoError(t, SetConfigValue("session.teammate_notes", "on", ConfigLevelUser, ""))
+	cv, err = ResolveConfigValue("session.teammate_notes", "")
+	require.NoError(t, err)
+	assert.Equal(t, "off", cv.Value, "the env var beats a stored 'on'")
+	assert.Equal(t, "on", cv.UserVal)
+}
+
+// R5: user-facing settings text calls the recipient an AI coworker (AGENTS.md).
+func TestTeammateNotesSettingTextSaysAICoworker(t *testing.T) {
+	setting := GetSetting("session.teammate_notes")
+	require.NotNil(t, setting)
+	for _, text := range []string{setting.Description, setting.LongDescription} {
+		assert.NotContains(t, strings.ToLower(text), " agent", "settings copy must say AI coworker: %q", text)
+	}
+	assert.Contains(t, setting.Description, "AI coworker")
+}
+
+// R7: the order is the contract. A writer that fails must stop the confirm (the
+// notes were not shown), and on success the confirm only runs once the envelope
+// is already written.
+func TestEmitTeammateNotesConfirmsOnlyAfterTheEnvelopeIsWritten(t *testing.T) {
+	t.Run("failing writer: confirm never runs", func(t *testing.T) {
+		h := newTeammateHook(t, true)
+		h.addEntries(t)
+		h.run(t, "claude-code", &agentx.HookInput{ToolName: "Bash"}) // captures: the recording now has entries
+		h.takes = nil
+		h.notes = []whisperstore.WhisperEntry{teammateEntry("tcm_1", "Person A", "x", nil)}
+		delivered := emitTeammateNotes(brokenPipeWriter{}, h.root, h.agentID)
+		assert.Equal(t, 1, len(h.takes), "setup: the notes were taken, so only the failed write can explain no confirm")
+		assert.False(t, delivered)
+		assert.Empty(t, h.confirms, "a note was confirmed although the envelope was never written")
+	})
+	t.Run("success: the envelope is written before the confirm", func(t *testing.T) {
+		h := newTeammateHook(t, true)
+		h.addEntries(t)
+		h.run(t, "claude-code", &agentx.HookInput{ToolName: "Bash"})
+		h.takes = nil
+		h.notes = []whisperstore.WhisperEntry{teammateEntry("tcm_1", "Person A", "x", nil)}
+		var out bytes.Buffer
+		var written string
+		teammateConfirmFn = func(_, _ string, _ []string) error {
+			written = out.String() // what had reached the writer when confirm ran
+			return nil
+		}
+		require.True(t, emitTeammateNotes(&out, h.root, h.agentID))
+		assert.Contains(t, written, "Note from a teammate", "confirm ran before the envelope was written")
+	})
+}
+
+type brokenPipeWriter struct{}
+
+func (brokenPipeWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }

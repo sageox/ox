@@ -339,6 +339,37 @@ func (r *WhisperRegistry) PeekTeammateComments(agentID string, limit int) ([]whi
 	return r.ledgerStore.PeekTeammateComments(agentID, limit)
 }
 
+// PeekShownTeammateComments returns the shown notes whose receipt is owed.
+func (r *WhisperRegistry) PeekShownTeammateComments(agentID string, limit int) ([]whisperstore.WhisperEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil, nil
+	}
+	return r.ledgerStore.PeekShownTeammateComments(agentID, limit)
+}
+
+// ShownTeammateCommentsForConversation returns a conversation's shown notes
+// whose receipt is owed.
+func (r *WhisperRegistry) ShownTeammateCommentsForConversation(conversationID string, limit int) ([]whisperstore.WhisperEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil, nil
+	}
+	return r.ledgerStore.ShownTeammateCommentsForConversation(conversationID, limit)
+}
+
+// MarkTeammateCommentsShown records that the hook wrote these notes.
+func (r *WhisperRegistry) MarkTeammateCommentsShown(seq int64, ids ...string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil
+	}
+	return r.ledgerStore.MarkTeammateCommentsShown(seq, ids...)
+}
+
 // DeleteTeammateComments removes the named notes.
 func (r *WhisperRegistry) DeleteTeammateComments(ids ...string) error {
 	r.mu.RLock()
