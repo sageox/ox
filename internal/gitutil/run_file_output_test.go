@@ -25,7 +25,8 @@ func TestRunGitFileOutput(t *testing.T) {
 	// the error carries git's own message, as RunGit's does: push retries
 	// classify a failure by it (non-fast-forward, missing LFS objects, 403)
 	repo := t.TempDir()
-	require.NoError(t, exec.Command("git", "init", "-q", repo).Run())
+	_, err = RunGit(context.Background(), "", "init", "-q", repo)
+	require.NoError(t, err)
 	output, err = RunGitFileOutput(context.Background(), repo, "rev-parse", "--verify", "no-such-ref")
 	require.Error(t, err)
 	assert.Contains(t, output, "fatal")
