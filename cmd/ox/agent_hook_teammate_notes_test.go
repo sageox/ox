@@ -385,6 +385,7 @@ func TestConfigReportsTheTeammateNotesEnvOverride(t *testing.T) {
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	t.Setenv("OX_TEAMMATE_NOTES", "") // an inherited override must not decide the default
 	cv, err := ResolveConfigValue("session.teammate_notes", "")
 	require.NoError(t, err)
 	assert.Equal(t, "on", cv.Value)

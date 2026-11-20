@@ -74,9 +74,12 @@ type LiveSessions struct {
 	onTeammateComments func(ctx context.Context, dir string, st livesession.State, comments []sessionstream.TeammateComment)
 	// flushAcks, ackFlushBudget and ackFlushStart drive the closed sessions'
 	// receipt retries (flushOwedAcks); tests replace the first two.
-	flushAcks        func(ctx context.Context, cfg livesession.Config, dir string, budget time.Duration, now time.Time) (bool, error)
-	ackFlushBudget   time.Duration
-	ackFlushStart    int
+	flushAcks      func(ctx context.Context, cfg livesession.Config, dir string, budget time.Duration, now time.Time) (bool, error)
+	ackFlushBudget time.Duration
+	ackFlushStart  int
+	// drainShown logs the receipts of notes already shown (local work, no
+	// network) so the flush below can send them; set by the daemon.
+	drainShown       func(ctx context.Context)
 	ackFlushFailures sync.Map
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
@@ -240,6 +243,9 @@ const (
 // starting point rotates, so a dead server cannot pin the same sessions first.
 // Each receipt is retried for a day (livesession).
 func (l *LiveSessions) flushOwedAcks(ctx context.Context, dirs []string) {
+	if l.drainShown != nil {
+		l.drainShown(ctx)
+	}
 	if len(dirs) == 0 {
 		return
 	}
@@ -363,6 +369,11 @@ func (l *LiveSessions) Spooled(ctx context.Context, sessionDir string) {
 
 // Wait blocks until in-flight drains finish (shutdown and tests).
 func (l *LiveSessions) Wait() { l.wg.Wait() }
+
+// receiptsDir is the machine-local folder of one conversation's receipt logs.
+func (l *LiveSessions) receiptsDir(conversationID string) (string, error) {
+	return livesession.ReceiptsDir(l.config(l.endpoint), conversationID)
+}
 
 func (l *LiveSessions) trusted(path string) (string, bool) {
 	dir := canonicalDir(path)

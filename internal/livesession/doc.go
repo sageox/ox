@@ -30,16 +30,15 @@
 //	                     never removed
 //	spool-lost-declared  how many of those bytes gap lines already declared; the
 //	                     next write or the close declares the rest
-//	teammate-comment-acks       one JSON line per teammate comment shown to the agent
-//	                     ({"id","delivered_at_seq"}); append-only, sent to the
-//	                     server during a drain
-//	teammate-comment-acks-sent  ids of those acks the server settled; each is sent once
-//	teammate-comment-resends    ids of shown notes the server listed again; their ack is
-//	                     owed again until a 2xx or a permanent refusal
 //	withheld-notice-owed the person may still be owed the notice that the stream
 //	                     withheld a secret; the next session start or stop says it
 //
-// None of them may be copied into the Ledger (IsLocalFile). Abort's
+// None of them may be copied into the Ledger (IsLocalFile). Teammate-note
+// receipts (which notes the agent was shown, which receipts are settled or owed
+// again) are NOT kept in the session folder: it is part of a pulled Ledger
+// checkout, where anyone who can write the Ledger could plant a log and forge a
+// delivery. They live under the data dir keyed by conversation id (ReceiptsDir);
+// receipt files found in the folder are ignored. Abort's
 // pending-deletes queue lives outside the session folder, in the data dir, so
 // removing the folder never loses a delete. So does live-secret-rules.toml, the
 // last upstream secret catalog the daemon's refresh validated.

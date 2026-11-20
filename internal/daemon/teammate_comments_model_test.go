@@ -156,8 +156,8 @@ func (m *noteModel) legacyTake(p TeammateCommentsTakePayload) ([]whisperstore.Wh
 			settled = append(settled, e.ID)
 			continue
 		}
-		dir, ok := m.e.live.trusted(e.Metadata[tcMetaSessionDir])
-		if !ok || livesession.RecordTeammateCommentAck(dir, e.ID, p.DeliveredAtSeq) != nil {
+		_, ok := m.e.live.trusted(e.Metadata[tcMetaSessionDir])
+		if !ok || livesession.RecordTeammateCommentAck(m.e.rdir(), e.ID, p.DeliveredAtSeq) != nil {
 			continue
 		}
 		settled = append(settled, e.ID)
@@ -224,7 +224,7 @@ func (m *noteModel) hook(mode string) {
 
 func (m *noteModel) logIDs(name string) map[string]bool {
 	out := map[string]bool{}
-	b, err := os.ReadFile(filepath.Join(m.e.dir, name))
+	b, err := os.ReadFile(filepath.Join(m.e.rdir(), name))
 	if err != nil {
 		return out
 	}
@@ -429,8 +429,8 @@ func TestTeammateNoteShownOnTheNextToolCallAfterAHookReadTimeout(t *testing.T) {
 	m.drain()
 	m.step = 1
 	m.hook("timeout") // delayed past the hook's read timeout: nothing shown
-	if m.shown["tcm_1"] != 0 || ackLogExists(m.e.dir) {
-		t.Fatalf("shown=%d, acked=%v after a timed-out take; neither may happen", m.shown["tcm_1"], ackLogExists(m.e.dir))
+	if m.shown["tcm_1"] != 0 || ackLogExists(m.e) {
+		t.Fatalf("shown=%d, acked=%v after a timed-out take; neither may happen", m.shown["tcm_1"], ackLogExists(m.e))
 	}
 	m.clk.Advance(teammateLeaseTTL + time.Second)
 	m.step = 2
