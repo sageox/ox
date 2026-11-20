@@ -118,6 +118,9 @@ const (
 	MsgTypeLiveSessionDrain  = "live_session_drain"  // one-way, drain a session's live spool to the server
 )
 
+// MsgTypeTeammateCommentsTake takes (once) the teammate notes waiting for an agent.
+const MsgTypeTeammateCommentsTake = "teammate_comments_take"
+
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
 //
 // We use NDJSON (one JSON object per line) instead of length-prefix framing because:
@@ -788,6 +791,7 @@ type DaemonService interface {
 	SessionWatchStart(payload SessionWatchStartPayload)
 	SessionWatchStop(payload SessionWatchStopPayload)
 	LiveSessionDrain(payload LiveSessionDrainPayload)
+	TeammateCommentsTake(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)
 
 	// fire-and-forget operations
 	Activity()
@@ -836,6 +840,8 @@ type CallbackService struct {
 	onWhispers          func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
 	onWhisperHistory    func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 	onSettingsGet       func() *flags.CLISettingsResponse
+
+	onTeammateCommentsTake func(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)
 }
 
 func (c *CallbackService) Sync() error {
@@ -1064,6 +1070,16 @@ func (c *CallbackService) LiveSessionDrain(payload LiveSessionDrainPayload) {
 	if fn != nil {
 		fn(payload)
 	}
+}
+
+func (c *CallbackService) TeammateCommentsTake(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error) {
+	c.mu.Lock()
+	fn := c.onTeammateCommentsTake
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(payload)
+	}
+	return nil, nil
 }
 
 func (c *CallbackService) Activity() {
@@ -1363,6 +1379,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeSessionWatchStart, handleSessionWatchStart)
 	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
 	router.Register(MsgTypeLiveSessionDrain, handleLiveSessionDrain)
+	router.Register(MsgTypeTeammateCommentsTake, handleTeammateCommentsTake)
 	router.Register(MsgTypeSettingsGet, handleSettingsGet)
 	router.Register(MsgTypeSessionUploaded, handleSessionUploaded)
 
@@ -1475,6 +1492,15 @@ func (s *Server) SetLiveSessionDrainHandler(fn func(payload LiveSessionDrainPayl
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onLiveSessionDrain = fn
+}
+
+// SetTeammateCommentsTakeHandler sets the handler that takes an agent's
+// waiting teammate notes (once) and logs their delivery acks.
+func (s *Server) SetTeammateCommentsTakeHandler(fn func(payload TeammateCommentsTakePayload) ([]whisperstore.WhisperEntry, error)) {
+	svc := s.mustCallbackService("SetTeammateCommentsTakeHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTeammateCommentsTake = fn
 }
 
 // SetMurmurHandler sets the handler for murmur write+commit messages.
@@ -2641,6 +2667,29 @@ func (c *Client) LiveSessionDrain(payload LiveSessionDrainPayload) error {
 		Type:    MsgTypeLiveSessionDrain,
 		Payload: payloadBytes,
 	})
+}
+
+// TeammateCommentsTake takes the teammate notes waiting for agentID. They are
+// returned once: the daemon deletes them and logs a delivery ack at
+// deliveredAtSeq (the recording's entry count after the hook captured the tool
+// call). Callers fail open: a slow or absent daemon means no notes this call.
+func (c *Client) TeammateCommentsTake(agentID, conversationID string, deliveredAtSeq int64) (*TeammateCommentsTakeResponse, error) {
+	payload, err := json.Marshal(TeammateCommentsTakePayload{AgentID: agentID, ConversationID: conversationID, DeliveredAtSeq: deliveredAtSeq})
+	if err != nil {
+		return nil, fmt.Errorf("marshal teammate_comments_take payload: %w", err)
+	}
+	resp, err := c.sendMessage(Message{Type: MsgTypeTeammateCommentsTake, Payload: payload})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result TeammateCommentsTakeResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal teammate comments: %w", err)
+	}
+	return &result, nil
 }
 
 // Murmur sends a murmur write+commit request to the daemon (fire-and-forget).

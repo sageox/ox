@@ -30,6 +30,10 @@
 //	                     never removed
 //	spool-lost-declared  how many of those bytes gap lines already declared; the
 //	                     next write or the close declares the rest
+//	teammate-comment-acks       one JSON line per teammate comment shown to the agent
+//	                     ({"id","delivered_at_seq"}); append-only, sent to the
+//	                     server during a drain
+//	teammate-comment-acks-sent  ids of those acks the server settled; each is sent once
 //	withheld-notice-owed the person may still be owed the notice that the stream
 //	                     withheld a secret; the next session start or stop says it
 //

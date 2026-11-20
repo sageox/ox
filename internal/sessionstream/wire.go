@@ -98,6 +98,11 @@ const (
 	ReasonRateLimited = "rate_limited"
 	// ReasonUnauthenticated: no valid login token (action reauth).
 	ReasonUnauthenticated = "unauthenticated"
+
+	// ReasonSessionNameTaken answers an open whose session name this repo
+	// already has under another owner's conversation. Action stop: a session
+	// name belongs to one person per repo, and retrying cannot change that.
+	ReasonSessionNameTaken = "session_name_taken"
 )
 
 // Line types the server and twin recognize inside a session stream. The stream
@@ -176,10 +181,54 @@ type OpenSessionResponse struct {
 // AppendResponse answers a stored append. StoredThrough drives resends;
 // PublishedThrough is status only and never gates freeing local bytes.
 type AppendResponse struct {
-	StoredThrough    int64  `json:"stored_through"`
-	PublishedThrough int64  `json:"published_through"`
-	PrefixSHA256     string `json:"prefix_sha256"`
+	StoredThrough    int64             `json:"stored_through"`
+	PublishedThrough int64             `json:"published_through"`
+	PrefixSHA256     string            `json:"prefix_sha256"`
+	TeammateComments []TeammateComment `json:"teammate_comments,omitempty"`
+	// TeammateCommentsListed: the server determined this conversation's
+	// pending notes for this answer, so TeammateComments is the whole list
+	// (empty included, as when the owner opted out). False when it did not
+	// look or the lookup failed: a client keeps what it holds.
+	TeammateCommentsListed bool `json:"teammate_comments_listed,omitempty"`
 }
+
+// MaxTeammateCommentRunes caps a teammate comment's body, counted in
+// characters (runes), not bytes.
+const MaxTeammateCommentRunes = 2000
+
+// MaxTeammateCommentsPerAppend caps AppendResponse.TeammateComments.
+const MaxTeammateCommentsPerAppend = 5
+
+// MaxTeammateCommentAcks caps AckTeammateCommentsRequest.Acks.
+const MaxTeammateCommentAcks = 20
+
+// TeammateComment is a note a teammate watching a live session sent to its
+// agent. It is untrusted text from someone who is not the agent's user.
+type TeammateComment struct {
+	ID         string    `json:"id"`
+	AuthorName string    `json:"author_name"`
+	Body       string    `json:"body"`
+	AnchorSeq  *int64    `json:"anchor_seq,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type TeammateCommentAck struct {
+	ID             string `json:"id"`
+	DeliveredAtSeq int64  `json:"delivered_at_seq"`
+}
+
+type AckTeammateCommentsRequest struct {
+	LayerID string               `json:"layer_id"`
+	Acks    []TeammateCommentAck `json:"acks"`
+}
+
+type AckTeammateCommentsResponse struct {
+	// Recorded counts acks newly recorded; a repeat records 0 and still succeeds.
+	Recorded int `json:"recorded"`
+}
+
+// TeammateCommentAcksPath records deliveries (POST, signed like an append).
+func TeammateCommentAcksPath(cnv string) string { return SessionPath(cnv) + "/teammate-comments/acks" }
 
 // CloseRequest ends a session. StoredThrough and StreamSHA256 let the server
 // refuse to finalize across a gap or a divergent stream.

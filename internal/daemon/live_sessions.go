@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionstream"
 )
 
 // Real-time session streaming, daemon side (ADR-247, shadow phase). Hooks only
@@ -68,6 +69,9 @@ type LiveSessions struct {
 	// refreshRules fetches the current secret rules and persists them for every
 	// publishing process; tests replace it.
 	refreshRules func(context.Context) error
+	// onTeammateComments receives the notes a drain returned; nil drops them
+	// (the server re-sends every undelivered one on the next append).
+	onTeammateComments func(ctx context.Context, dir string, st livesession.State, comments []sessionstream.TeammateComment)
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
 
@@ -391,6 +395,9 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		return
 	}
 	res, err := l.attempt(ctx, dir, st)
+	if res.TeammateCommentsListed && l.onTeammateComments != nil {
+		l.onTeammateComments(ctx, dir, st, res.TeammateComments)
+	}
 	switch {
 	case errors.Is(err, livesession.ErrKeyConflict):
 		log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")

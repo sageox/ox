@@ -227,6 +227,21 @@ func handleLiveSessionDrain(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{SkipDefault: true}
 }
 
+func handleTeammateCommentsTake(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload TeammateCommentsTakePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)}}
+	}
+	entries, err := s.service.TeammateCommentsTake(payload)
+	if err != nil {
+		return HandlerResult{Response: &Response{Success: false, Error: fmt.Sprintf("take teammate comments: %v", err)}}
+	}
+	if entries == nil {
+		entries = []whisperstore.WhisperEntry{}
+	}
+	return HandlerResult{Response: marshalResponse(TeammateCommentsTakeResponse{Entries: entries})}
+}
+
 func handleGetErrors(s *Server, _ Message, _ net.Conn) HandlerResult {
 	errs := s.service.GetErrors()
 	if errs != nil {
