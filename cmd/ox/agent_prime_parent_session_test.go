@@ -270,3 +270,29 @@ func TestAPausedParentsPauseHoldsDownTheChainUntilUnpaused(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: /clear removes the root's recording state before the
+// next prime recreates it. A chain whose pause required that state read as
+// released in the gap, so an agent launched then recorded unsuspended while
+// the person's pause and the root's agent process were both still there.
+func TestARootsPauseHoldsThroughItsClearHandoff(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	enableRecordingWithoutLedgerClone(t)
+	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+
+	t.Setenv("SAGEOX_AGENT_ID", "OxParent")
+	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+	child := startSessionRecordingUnlocked(projectRoot, "OxChild", "claude-code", inheritedParentOf(projectRoot, "OxChild"), "", "child-session", nil)
+	require.NotNil(t, child)
+	require.False(t, child.Recording, "harness: a paused parent's child skips recording")
+
+	// the root runs /clear: its recording state is gone until its next prime;
+	// its pause marker and its agent process remain
+	require.NoError(t, session.ClearRecordingStateForAgent(projectRoot, "OxParent"))
+	t.Setenv("SAGEOX_AGENT_ID", "OxChild")
+	grandchild := startSessionRecording(projectRoot, "OxGrandchild", "claude-code", inheritedParentOf(projectRoot, "OxGrandchild"), "", "grandchild-session")
+
+	require.NotNil(t, grandchild)
+	assert.False(t, grandchild.Recording, "an agent launched during the root's /clear handoff recorded")
+}
