@@ -791,7 +791,9 @@ func TestLiveConversationShow_EnvelopeMetadata(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.TokenEstimate <= 0 || !strings.Contains(env.Guidance, "--since c9") {
+	// the shared newLiveViewCmd endpoint is https://sageox.ai; the guidance must
+	// carry the request endpoint, not a bare id
+	if env.TokenEstimate <= 0 || !strings.Contains(env.Guidance, "ox session view https://sageox.ai/c/"+testSesID+" --since c9") {
 		t.Fatalf("env = %+v", env)
 	}
 }
@@ -830,7 +832,7 @@ func (f fakeFetcher) GetSessionAgentView(context.Context, string, api.SessionAge
 	return f()
 }
 
-func TestLiveProjectRoot_RequiresSageoxDir(t *testing.T) {
+func TestLiveProjectRoot_RequiresInitializedConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	if got := liveProjectRoot(); got != "" {
@@ -839,7 +841,21 @@ func TestLiveProjectRoot_RequiresSageoxDir(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, ".sageox"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if got := liveProjectRoot(); got != "" {
+		t.Fatalf("empty .sageox must not count as a project: root = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".sageox", "config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if got := liveProjectRoot(); got == "" {
-		t.Fatal("project not detected")
+		t.Fatal("initialized project not detected")
+	}
+}
+
+func TestLiveShowGuidance_KeepsRequestEndpoint(t *testing.T) {
+	view := &api.AgentView{SessionID: testSesID, Truncated: true, NextSince: "c1"}
+	got := liveShowGuidance(view, testSesID, "https://test.sageox.ai")
+	if !strings.Contains(got, "https://test.sageox.ai/c/"+testSesID+" --since c1") || strings.Contains(got, "https://sageox.ai/") {
+		t.Fatalf("guidance = %q", got)
 	}
 }

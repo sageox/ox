@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -142,7 +141,8 @@ func liveProjectRoot() string {
 	if err != nil || root == "" {
 		return ""
 	}
-	if info, err := os.Stat(filepath.Join(root, ".sageox")); err != nil || !info.IsDir() {
+	// an empty .sageox directory is not a project: require its config file
+	if !config.IsInitialized(root) {
 		return ""
 	}
 	return root
@@ -615,7 +615,7 @@ func runLiveConversationShow(cmd *cobra.Command, ref liveViewRef, format string)
 	liveViewTrace(projectRoot, view, ref.ID, ep)
 	data := &liveShowData{SessionID: view.SessionID, ConversationID: view.ConversationID, Title: view.Title, Status: view.Status, Live: view.Live,
 		TurnCount: view.TurnCount, NextSince: view.NextSince, Truncated: view.Truncated, Layers: view.Layers, Markdown: view.Markdown}
-	env := liveSuccessEnvelope(data, liveShowGuidance(view, ref.ID))
+	env := liveSuccessEnvelope(data, liveShowGuidance(view, ref.ID, ep))
 	return finishConversationEnvelope(w, format, env, func(out io.Writer, e *read.Envelope) {
 		fmt.Fprintln(out, safeLiveText(strings.TrimRight(view.Markdown, "\n")))
 	})
@@ -633,10 +633,19 @@ func liveSuccessEnvelope(data any, guidance string) *read.Envelope {
 }
 
 // liveShowGuidance names the next step for a content read.
-func liveShowGuidance(view *api.AgentView, id string) string {
+//
+// The suggested target is the endpoint-qualified /c/ link, not the bare id, so
+// continuing a read from another environment (say test.sageox.ai) stays there
+// instead of falling back to the project's endpoint.
+func liveShowGuidance(view *api.AgentView, id, ep string) string {
 	sid := view.SessionID
 	if sid == "" {
 		sid = id
+	}
+	if p := weblink.IDTypePrefix(sid); p != "" {
+		if link := weblink.ArtifactURL(ep, sid, "/c/", p); link != "" {
+			sid = link
+		}
 	}
 	switch {
 	case view.Truncated && view.NextSince != "":
