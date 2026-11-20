@@ -539,3 +539,40 @@ func TestFlushReadsReceiptsOfTheStreamTheLockAuthorized(t *testing.T) {
 		t.Fatalf("%d ack requests: the old conversation's receipts were sent to another conversation", n)
 	}
 }
+
+// A receipt log that cannot be read must not stop the drain, and the note the
+// server lists is still handed over (the daemon's stored-once mark stops a
+// second display).
+func TestDrainWithAnUnreadableReceiptLogStillHandsOverTheListedNote(t *testing.T) {
+	e := newEnv(t)
+	if err := os.Mkdir(filepath.Join(e.rdir(t), "teammate-comment-acks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.QueueTeammateComment(comment("tcm_1", "x"))
+	e.spool(withPrompt(lines(0, 3)))
+	res := e.mustDrain()
+	if len(res.TeammateComments) != 1 {
+		t.Fatalf("comments = %v", res.TeammateComments)
+	}
+}
+
+// A shown note listed again whose resend cannot be recorded is still never shown
+// again; an empty id and a repeated id in one list are ignored.
+func TestDrainDropsShownEmptyAndRepeatedNotes(t *testing.T) {
+	e := newEnv(t)
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_shown", 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(e.rdir(t), "teammate-comment-resends"), 0o700); err != nil { // resends unwritable
+		t.Fatal(err)
+	}
+	e.srv.QueueTeammateComment(comment("tcm_shown", "old"))
+	e.srv.QueueTeammateComment(comment("", "no id"))
+	e.srv.QueueTeammateComment(comment("tcm_new", "new"))
+	e.srv.QueueTeammateComment(comment("tcm_new", "new again"))
+	e.spool(withPrompt(lines(0, 3)))
+	res := e.mustDrain()
+	if len(res.TeammateComments) != 1 || res.TeammateComments[0].ID != "tcm_new" || res.TeammateComments[0].Body != "new" {
+		t.Fatalf("comments = %+v; want only tcm_new once", res.TeammateComments)
+	}
+}
