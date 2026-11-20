@@ -78,7 +78,7 @@ func TestCursorPrimeInheritedPauseIsDurableBeforeCapture(t *testing.T) {
 	for _, fromClear := range []bool{false, true} {
 		t.Run(map[bool]string{false: "restart", true: "clear"}[fromClear], func(t *testing.T) {
 			f := cursorAutoRecordingFixture(t)
-			require.NoError(t, session.MarkExplicitPause(f.root, "Oxprime", 7))
+			require.NoError(t, session.MarkExplicitPause(f.root, "Oxprime", 7, session.PauseAnchor{}))
 			if fromClear {
 				t.Setenv(envClearNotice, `{"session_name":"prior-paused-session","was_suspended":true}`)
 			}
