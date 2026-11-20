@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -673,13 +674,41 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 // oldest first, without removing them. An empty agentID matches nothing: a note
 // is only ever addressed to a named agent.
 func (s *Store) PeekTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
+	return s.peekTeammateComments(agentID, limit, false)
+}
+
+// PeekShownTeammateComments returns the notes already shown whose receipt is
+// still owed (see MarkTeammateCommentsShown), oldest first.
+func (s *Store) PeekShownTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
+	return s.peekTeammateComments(agentID, limit, true)
+}
+
+func (s *Store) peekTeammateComments(agentID string, limit int, shown bool) ([]WhisperEntry, error) {
 	if agentID == "" || limit <= 0 {
 		return nil, nil
 	}
+	op := "!="
+	if shown {
+		op = "="
+	}
+	return s.queryTeammateComments(`source = ? AND agent_id = ? AND COALESCE(json_extract(metadata, '$.state'), '') `+op+` 'shown'`,
+		[]any{SourceTeammateComment, agentID}, limit)
+}
+
+// ShownTeammateCommentsForConversation returns the shown notes of one
+// conversation whose receipt is still owed, oldest first.
+func (s *Store) ShownTeammateCommentsForConversation(conversationID string, limit int) ([]WhisperEntry, error) {
+	if conversationID == "" || limit <= 0 {
+		return nil, nil
+	}
+	return s.queryTeammateComments(`source = ? AND json_extract(metadata, '$.conversation_id') = ? AND json_extract(metadata, '$.state') = 'shown'`,
+		[]any{SourceTeammateComment, conversationID}, limit)
+}
+
+func (s *Store) queryTeammateComments(where string, args []any, limit int) ([]WhisperEntry, error) {
 	rows, err := s.db.Load().Query(`SELECT id, scope, type, source, topic, content, importance, created_at,
 		agent_id, principal_id, principal_type, team_id, metadata
-		FROM whispers WHERE source = ? AND agent_id = ?
-		ORDER BY created_at, id LIMIT ?`, SourceTeammateComment, agentID, limit)
+		FROM whispers WHERE `+where+` ORDER BY created_at, id LIMIT ?`, append(args, limit)...) //nolint:gosec // G202 - where is built from literals in this file
 	if err != nil {
 		return nil, fmt.Errorf("query teammate comments: %w", err)
 	}
@@ -708,6 +737,28 @@ func (s *Store) PeekTeammateComments(agentID string, limit int) ([]WhisperEntry,
 		return nil, fmt.Errorf("iterate teammate comments: %w", err)
 	}
 	return entries, nil
+}
+
+// MarkTeammateCommentsShown moves notes from pending to "shown, receipt owed":
+// the hook wrote them, so they must never be offered again, but the row stays
+// (with the seq they were shown at) until the receipt is durably recorded and
+// the caller deletes it.
+func (s *Store) MarkTeammateCommentsShown(seq int64, ids ...string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Load().Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec(`UPDATE whispers SET metadata = json_set(COALESCE(metadata, '{}'), '$.state', 'shown', '$.shown_seq', ?)
+			WHERE id = ? AND source = ?`, strconv.FormatInt(seq, 10), id, SourceTeammateComment); err != nil {
+			return fmt.Errorf("mark teammate comment %s shown: %w", id, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // DeleteTeammateComments removes the named teammate comments (only that source).
@@ -755,7 +806,8 @@ func (s *Store) RetainTeammateComments(conversationID string, keep []string) (in
 	if conversationID == "" {
 		return 0, nil
 	}
-	where := `source = ? AND json_extract(metadata, '$.conversation_id') = ?`
+	// shown notes are never dropped here: their receipt is still owed
+	where := `source = ? AND json_extract(metadata, '$.conversation_id') = ? AND COALESCE(json_extract(metadata, '$.state'), '') != 'shown'`
 	args := []any{SourceTeammateComment, conversationID}
 	if len(keep) > 0 {
 		where += ` AND id NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + `)`

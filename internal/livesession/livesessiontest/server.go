@@ -49,6 +49,15 @@ type Closed struct {
 	StoredAtClose int64
 }
 
+// AckAttempt is one ack request as its caller experienced it: Status is the
+// answer the client received, 0 when the connection died first (whether or not
+// the server had recorded the acks). A client may settle an ack only on a 2xx or
+// a permanent 4xx, so tests judge settlement by this, not by what was recorded.
+type AckAttempt struct {
+	IDs    []string
+	Status int
+}
+
 type layerState struct{ cur sessionstream.Cursor }
 
 type conversation struct {
@@ -101,6 +110,7 @@ type Server struct {
 	ackRefusals                 int
 	ackDropBefore, ackDropAfter int
 	ackIgnored                  int
+	ackAttempts                 []AckAttempt
 	listFails                   bool
 	nameTaken                   bool
 	ackBodies                   []sessionstream.AckTeammateCommentsRequest
@@ -395,7 +405,23 @@ func (s *Server) undelivered() []sessionstream.TeammateComment {
 }
 
 // ackTeammateComments records the first ack per comment id, as api-go does.
-func (s *Server) ackTeammateComments(r *http.Request, body []byte, _ *Call) reply {
+func (s *Server) ackTeammateComments(r *http.Request, body []byte, c *Call) reply {
+	rep := s.ackTeammateCommentsReply(r, body, c)
+	var req sessionstream.AckTeammateCommentsRequest
+	if json.Unmarshal(body, &req) == nil {
+		at := AckAttempt{Status: rep.status}
+		if rep.drop {
+			at.Status = 0 // the caller never heard an answer
+		}
+		for _, a := range req.Acks {
+			at.IDs = append(at.IDs, a.ID)
+		}
+		s.ackAttempts = append(s.ackAttempts, at)
+	}
+	return rep
+}
+
+func (s *Server) ackTeammateCommentsReply(r *http.Request, body []byte, _ *Call) reply {
 	var req sessionstream.AckTeammateCommentsRequest
 	if json.Unmarshal(body, &req) != nil || len(req.Acks) == 0 || len(req.Acks) > sessionstream.MaxTeammateCommentAcks {
 		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)

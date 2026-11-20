@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -260,14 +261,14 @@ func TestFlushAfterCloseDeliversAnAckTheCloseCouldNot(t *testing.T) {
 	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
 		t.Fatalf("close = %+v, %v", res, err)
 	}
-	if !livesession.TeammateAcksOwed(e.dir) {
+	if !acksOwed(t, e) {
 		t.Fatal("setup: the refused ack is no longer owed")
 	}
-	if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 || livesession.TeammateAcksOwed(e.dir) {
-		t.Fatalf("flush delivered %d, %v; owed=%v", seq, ok, livesession.TeammateAcksOwed(e.dir))
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 || acksOwed(t, e) {
+		t.Fatalf("flush delivered %d, %v; owed=%v", seq, ok, acksOwed(t, e))
 	}
 }
 
@@ -287,19 +288,116 @@ func TestFlushGivesUpAfterADayAndLogsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	soon := time.Now().Add(time.Hour)
-	if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, soon); err != nil || !livesession.TeammateAcksOwed(e.dir) {
-		t.Fatalf("an hour of failures gave up (owed=%v, err=%v)", livesession.TeammateAcksOwed(e.dir), err)
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, soon); err != nil || !acksOwed(t, e) {
+		t.Fatalf("an hour of failures gave up (owed=%v, err=%v)", acksOwed(t, e), err)
 	}
 	late := time.Now().Add(25 * time.Hour)
 	for range 3 {
-		if err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, late); err != nil {
+		if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, late); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if livesession.TeammateAcksOwed(e.dir) {
+	if acksOwed(t, e) {
 		t.Fatal("still owed after 24 hours")
 	}
 	if n := strings.Count(logs.String(), "live_teammate_acks_given_up"); n != 1 {
 		t.Fatalf("give-up logged %d times, want once", n)
+	}
+}
+
+func acksOwed(t *testing.T, e *env) bool {
+	t.Helper()
+	owed, err := livesession.TeammateAcksOwed(t.Context(), e.cfg, e.dir)
+	if err != nil {
+		t.Fatalf("owed: %v", err)
+	}
+	return owed
+}
+
+func closedEnvWithAck(t *testing.T) *env {
+	t.Helper()
+	e := newEnv(t)
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	if err := livesession.RecordTeammateCommentAck(e.dir, "tcm_1", 5); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
+	if _, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// Failure prevented (CIcL): the retry period measured from the delivery log's
+// last write, so a note acknowledged long ago and listed again today was given
+// up on the first failed resend. Each receipt counts from when IT began to be owed.
+func TestFlushRetryPeriodStartsWhenTheResendBegins(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(lines(0, 3)))
+	e.mustDrain()
+	old := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	logged := `{"id":"tcm_1","delivered_at_seq":5,"at":"` + old + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-acks"), []byte(logged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-acks-sent"), []byte("tcm_1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// the server lists it again now: a new obligation begins now
+	resend := "tcm_1\t" + strconv.FormatInt(time.Now().Unix(), 10) + "\n"
+	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-resends"), []byte(resend), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.RefuseAcks(100, http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry)
+	if _, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !acksOwed(t, e) {
+		t.Fatal("a resend that began just now was given up because the old delivery was a day old")
+	}
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now().Add(25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if acksOwed(t, e) {
+		t.Fatal("the resend was not given up 25 hours after it began")
+	}
+}
+
+// Failure prevented (R4): a receipt log from someone else read before the stream
+// was authorized, or parsed without bound. Authorization comes first; past the
+// bound a log is refused, with an error, never partly trusted.
+func TestFlushAuthorizesBeforeReadingAndBoundsTheLog(t *testing.T) {
+	e := closedEnvWithAck(t)
+	huge := bytes.Repeat([]byte(`{"id":"x","delivered_at_seq":1}`+"\n"), 20000)
+	if err := os.WriteFile(filepath.Join(e.dir, "teammate-comment-resends"), huge, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stranger := e.cfg
+	stranger.DataDir = t.TempDir() // this machine never minted the stream
+	if _, err := livesession.FlushTeammateAcks(t.Context(), stranger, e.dir, testBudget, time.Now()); !errors.Is(err, livesession.ErrUntrustedState) {
+		t.Fatalf("unminted stream: err = %v; want ErrUntrustedState before any log is read", err)
+	}
+	if _, err := livesession.TeammateAcksOwed(t.Context(), stranger, e.dir); !errors.Is(err, livesession.ErrUntrustedState) {
+		t.Fatalf("TeammateAcksOwed on an unminted stream: err = %v", err)
+	}
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); !errors.Is(err, livesession.ErrAckLogTooLarge) {
+		t.Fatalf("oversized log: err = %v; want ErrAckLogTooLarge", err)
+	}
+}
+
+// Failure prevented (CIb-): an unreadable receipt log reading as "nothing owed".
+func TestAnUnreadableReceiptLogIsAnErrorNotAnEmptyQueue(t *testing.T) {
+	e := closedEnvWithAck(t)
+	if err := os.Mkdir(filepath.Join(e.dir, "teammate-comment-resends"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owed, err := livesession.TeammateAcksOwed(t.Context(), e.cfg, e.dir)
+	if err == nil || owed {
+		t.Fatalf("owed = %v, err = %v; an unreadable log must be reported", owed, err)
 	}
 }

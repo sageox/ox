@@ -23,6 +23,9 @@ type Fault struct {
 	// lock does; a client whose read timeout is shorter gives up and goes away.
 	// The request is still handled afterwards: the daemon cannot know.
 	Delay time.Duration
+	// Hold blocks the request until the channel is closed: a daemon stuck behind
+	// a lock for exactly as long as the test decides, with no wall-clock guess.
+	Hold <-chan struct{}
 	// Drop closes the connection without handling the request.
 	Drop bool
 	// CloseMidResponse handles the request, then closes the connection without
@@ -40,7 +43,8 @@ type Server struct {
 	faults   []Fault
 	requests int
 	wg       sync.WaitGroup // the accept loop
-	reqs     sync.WaitGroup // requests being served
+	done     int            // requests fully served, faults included
+	doneCond *sync.Cond     // signaled when done grows
 }
 
 // New starts a server answering every request line with handler's reply line.
@@ -52,6 +56,7 @@ func New(t testing.TB, handler func(request []byte) []byte) *Server {
 		t.Fatal(err)
 	}
 	s := &Server{path: filepath.Join(dir, "d.sock"), handler: handler}
+	s.doneCond = sync.NewCond(&s.mu)
 	if s.ln, err = net.Listen("unix", s.path); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +65,6 @@ func New(t testing.TB, handler func(request []byte) []byte) *Server {
 	t.Cleanup(func() {
 		_ = s.ln.Close()
 		s.wg.Wait()
-		s.reqs.Wait()
 		_ = os.RemoveAll(dir)
 	})
 	return s
@@ -83,9 +87,17 @@ func (s *Server) Requests() int {
 	return s.requests
 }
 
-// Wait blocks until every in-flight request has been handled, including ones
-// whose client already gave up.
-func (s *Server) Wait() { s.reqs.Wait() }
+// WaitServed blocks until n requests have been fully served, including ones
+// whose client already gave up. Waiting for a count the test knows it issued is
+// what makes this deterministic: a request a client abandoned may not have been
+// accepted yet, so "nothing is in flight" proves nothing.
+func (s *Server) WaitServed(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.done < n {
+		s.doneCond.Wait()
+	}
+}
 
 func (s *Server) accept() {
 	defer s.wg.Done()
@@ -94,13 +106,17 @@ func (s *Server) accept() {
 		if err != nil {
 			return
 		}
-		s.reqs.Add(1)
 		go s.serve(conn)
 	}
 }
 
 func (s *Server) serve(conn net.Conn) {
-	defer s.reqs.Done()
+	defer func() {
+		s.mu.Lock()
+		s.done++
+		s.doneCond.Broadcast()
+		s.mu.Unlock()
+	}()
 	defer conn.Close()
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
@@ -115,6 +131,9 @@ func (s *Server) serve(conn net.Conn) {
 	s.mu.Unlock()
 	if f.Drop {
 		return
+	}
+	if f.Hold != nil {
+		<-f.Hold
 	}
 	if f.Delay > 0 {
 		time.Sleep(f.Delay)

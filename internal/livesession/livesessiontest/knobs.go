@@ -353,3 +353,10 @@ func (s *Server) DropAcksBeforeRecording(n int) { s.set(func() { s.ackDropBefore
 // DropAcksAfterRecording records the next n acks, then closes the connection
 // without an answer: the caller must treat the ack as unsent and send it again.
 func (s *Server) DropAcksAfterRecording(n int) { s.set(func() { s.ackDropAfter = n }) }
+
+// AckAttempts are the ack requests received, in order, as their callers saw them.
+func (s *Server) AckAttempts() []AckAttempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AckAttempt(nil), s.ackAttempts...)
+}

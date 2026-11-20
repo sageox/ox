@@ -486,9 +486,9 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Key:         "session.teammate_notes",
 		Label:       "Teammate notes",
 		Category:    "Sessions",
-		Description: "Let a teammate watching your live session send your agent a note.",
+		Description: "Let a teammate watching your live session send your AI coworker a note.",
 		LongDescription: `Controls whether notes from a teammate watching your live session reach
-your agent at its next step.
+your AI coworker at its next step.
 
   on  - Deliver notes the session owner enabled on SageOx (default). Each note
         is labeled as coming from a teammate, not from you.
@@ -981,6 +981,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 
 	case "session.teammate_notes":
+		// OX_TEAMMATE_NOTES beats the stored setting at runtime
+		// (config.TeammateNotesEnabled): display must agree, or 'ox config get'
+		// shows "on" while notes are being dropped.
+		if envMode := os.Getenv(config.EnvTeammateNotes); envMode != "" {
+			cv.EnvVal = config.NormalizeTeammateNotes(envMode)
+		}
 		if userCfg != nil && userCfg.SessionTeammateNotes != "" {
 			cv.UserVal = config.NormalizeTeammateNotes(userCfg.SessionTeammateNotes)
 		}
@@ -1093,8 +1099,8 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	}
 
 	// determine effective value and source (Env > User > Repo > Team > Default).
-	// EnvVal is only ever populated for session_publishing/session_recording
-	// (see their cases above) — every other setting falls through untouched.
+	// EnvVal is only ever populated for session_publishing, session_recording
+	// and session.teammate_notes (see their cases above) — every other setting falls through untouched.
 	if cv.EnvVal != "" {
 		cv.Value = cv.EnvVal
 		cv.Source = ConfigLevelEnv

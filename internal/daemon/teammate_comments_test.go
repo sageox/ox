@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/sessionstream"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -468,38 +471,136 @@ func TestTeammateCommentConfirmAfterExpiry(t *testing.T) {
 	})
 }
 
-// Failure prevented (N1): a failed delete after the acks were logged, leaving a
-// sendable ack for a note the hook never got. Delete first; no ack on failure.
-func TestTeammateCommentFailedDeleteSendsNoAck(t *testing.T) {
-	e, box, store := newCommentEnv(t, "agent-a")
-	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
-	e.drainOnce()
-	l, _ := box.lease(t.Context(), e.payload(5))
-
+func blockSQL(t *testing.T, store *whisperstore.Store, event string) func() {
+	t.Helper()
 	other, err := sql.Open("sqlite", store.DBPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
-	if _, err := other.Exec(`CREATE TRIGGER no_delete BEFORE DELETE ON whispers BEGIN SELECT RAISE(ABORT, 'delete refused'); END`); err != nil {
+	t.Cleanup(func() { _ = other.Close() })
+	if _, err := other.Exec(`CREATE TRIGGER block_` + event + ` BEFORE ` + event + ` ON whispers BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
 		t.Fatal(err)
 	}
+	return func() {
+		if _, err := other.Exec(`DROP TRIGGER block_` + event); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Failure prevented (N1): a note acked although it could not even be marked
+// shown. The mark comes first; if it fails nothing is acked and the note stays
+// leased, so it is offered again once the lease expires.
+func TestTeammateCommentFailedMarkSendsNoAck(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	box.now = func() time.Time { return clock }
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	l, _ := box.lease(t.Context(), e.payload(5))
+	unblock := blockSQL(t, store, "UPDATE")
 	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}); err == nil {
-		t.Fatal("confirm reported success although the delete failed")
+		t.Fatal("confirm reported success although the note could not be marked shown")
 	}
 	e.live.Wait()
 	if ackLogExists(e.dir) {
-		t.Fatal("an ack was logged for a note whose delete failed")
+		t.Fatal("an ack was logged for a note that was not marked shown")
 	}
-	e.drainOnce()
-	if _, ok := e.srv.DeliveredAtSeq("tcm_1"); ok {
-		t.Fatal("the server was told a note was delivered when it stayed pending")
-	}
-	if _, err := other.Exec(`DROP TRIGGER no_delete`); err != nil {
-		t.Fatal(err)
-	}
+	unblock()
+	clock = clock.Add(teammateLeaseTTL + time.Second)
 	if got, _ := box.take(t.Context(), e.payload(6)); len(got) != 1 {
 		t.Fatalf("the note could not reach a later hook: %v", got)
+	}
+}
+
+// R2: a failed delete after the receipt was logged is harmless. The note is
+// shown (never offered again), the receipt is out, and the row goes away on the
+// next attempt.
+func TestTeammateCommentFailedDeleteAfterReceiptNeverReshows(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	l, _ := box.lease(t.Context(), e.payload(5))
+	unblock := blockSQL(t, store, "DELETE")
+	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+		t.Fatalf("confirm = %v; the receipt is logged, so the delete can wait", err)
+	}
+	e.live.Wait()
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 {
+		t.Fatalf("delivered_at_seq = %d, %v; want the receipt out at seq 5", seq, ok)
+	}
+	if got, _ := box.lease(t.Context(), e.payload(6)); len(got.Entries) != 0 {
+		t.Fatalf("a shown note was offered again: %v", got.Entries)
+	}
+	unblock()
+	if got, _ := box.lease(t.Context(), e.payload(7)); len(got.Entries) != 0 {
+		t.Fatal("a shown note was offered again after the delete recovered")
+	}
+	if rows, _ := store.PeekShownTeammateComments("agent-a", 5); len(rows) != 0 {
+		t.Fatalf("shown rows left after the retry: %d", len(rows))
+	}
+}
+
+// Failure prevented (R2): the ack log became unwritable after the lease, so
+// confirm deleted the note and returned success with no receipt to retry; the
+// session then closed and the teammate never saw "delivered". Now the note
+// stays shown, is never offered again, and its receipt is logged (before the
+// stop-time purge) as soon as the folder is writable.
+func TestTeammateCommentReceiptSurvivesAnUnwritableLogAndTheClose(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	l, _ := box.lease(t.Context(), e.payload(5))
+	log := filepath.Join(e.dir, "teammate-comment-acks")
+	if err := os.Remove(log); err != nil { // the probe created it empty
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(log, 0o700); err != nil { // now unwritable
+		t.Fatal(err)
+	}
+	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: l.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+		t.Fatalf("confirm = %v", err)
+	}
+	if rows, _ := store.PeekShownTeammateComments("agent-a", 5); len(rows) != 1 {
+		t.Fatalf("shown rows = %d; the note must wait for its receipt", len(rows))
+	}
+	if got, _ := box.lease(t.Context(), e.payload(6)); len(got.Entries) != 0 {
+		t.Fatal("a shown note was offered again")
+	}
+	if err := os.Remove(log); err != nil {
+		t.Fatal(err)
+	}
+	// the owner stops the session: the receipt is logged before the purge, then closed
+	svc := &daemonServiceImpl{d: &Daemon{logger: slog.Default(), ctx: t.Context(), teammateComments: box}}
+	svc.SessionFinalize(SessionFinalizeIPCPayload{SessionName: filepath.Base(e.dir)})
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", 5*time.Second); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
+	}
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 {
+		t.Fatalf("delivered_at_seq = %d, %v; the receipt must survive the failure and the close", seq, ok)
+	}
+}
+
+// Failure prevented (CIbp): agent B's take discarding agent A's expired lease,
+// so A's late confirm failed although no lease had replaced it.
+func TestTeammateCommentLateConfirmSurvivesAnotherAgentsTake(t *testing.T) {
+	e, box, store := newCommentEnv(t, "agent-a")
+	clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	box.now = func() time.Time { return clock }
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	a, _ := box.lease(t.Context(), e.payload(5))
+	addPending(t, store, "tcm_b", "agent-b", map[string]string{"session_dir": e.dir, "conversation_id": e.conv()})
+	clock = clock.Add(2 * teammateLeaseTTL)
+	if got, _ := box.lease(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-b", ConversationID: e.conv(), DeliveredAtSeq: 6}); len(got.Entries) != 1 {
+		t.Fatalf("agent-b lease = %v", got.Entries)
+	}
+	if err := box.confirm(t.Context(), TeammateCommentsConfirmPayload{AgentID: "agent-a", LeaseID: a.LeaseID, CommentIDs: []string{"tcm_1"}}); err != nil {
+		t.Fatalf("a late confirm nobody superseded was refused: %v", err)
+	}
+	e.live.Wait()
+	if seq, ok := e.srv.DeliveredAtSeq("tcm_1"); !ok || seq != 5 {
+		t.Fatalf("delivered_at_seq = %d, %v; want 5", seq, ok)
 	}
 }
 
@@ -529,5 +630,78 @@ func TestTeammateCommentsOffDropsNotesUnshownAndUnacked(t *testing.T) {
 	e.drainOnce()
 	if got, _ := box.take(t.Context(), e.payload(6)); len(got) != 1 {
 		t.Fatalf("take after switching back on = %v", got)
+	}
+}
+
+func addClosedSessionDirs(t *testing.T, e *liveEnv, n int) []string {
+	t.Helper()
+	var dirs []string
+	for i := range n {
+		dir := filepath.Join(e.sessionsDir, fmt.Sprintf("2026-03-0%dT10-00-person-a-Oxc%d", i+1, i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(livesession.State{ConversationID: fmt.Sprintf("cnv_c%d", i), Status: livesession.StatusClosed})
+		if err := os.WriteFile(filepath.Join(dir, "stream-state.json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, canonicalDir(dir))
+	}
+	return dirs
+}
+
+// Failure prevented (R3): closed sessions' receipt retries run inline in the tick,
+// before live work, each with its own timeout, so a dead server stalled every
+// active session behind them. Now live work is scheduled first, the flushes
+// share one budget, and one tick works at most four sessions.
+func TestTickFlushesClosedSessionsLastAndBounded(t *testing.T) {
+	e := newLiveEnv(t)
+	closed := addClosedSessionDirs(t, e, 6)
+	e.spool(lineN(1) + lineN(2)) // the active session has bytes to send
+	var calls []string
+	e.live.flushAcks = func(ctx context.Context, _ livesession.Config, dir string, _ time.Duration, _ time.Time) (bool, error) {
+		if len(calls) == 0 {
+			// the active session's drain must be able to finish while the first
+			// flush is still "on the network": only possible if it was scheduled first
+			deadline := time.After(20 * time.Second)
+			for e.stored() == "" {
+				select {
+				case <-deadline:
+					t.Error("the active session's drain never ran: the flush blocked it")
+					return true, nil
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+		}
+		calls = append(calls, dir)
+		return true, nil
+	}
+	e.live.Tick(t.Context())
+	e.live.Wait()
+	if len(calls) != liveAckFlushMax {
+		t.Fatalf("flushed %d sessions in one tick, want the cap %d (of %d closed)", len(calls), liveAckFlushMax, len(closed))
+	}
+	first := calls[0]
+	calls = nil
+	e.live.Tick(t.Context())
+	if len(calls) == 0 || calls[0] == first {
+		t.Fatalf("the next tick started at %v again; the starting point must rotate", calls)
+	}
+}
+
+// One shared budget: once it is spent, no further session is flushed this tick.
+func TestTickFlushBudgetIsSharedAcrossSessions(t *testing.T) {
+	e := newLiveEnv(t)
+	addClosedSessionDirs(t, e, 3)
+	e.live.ackFlushBudget = 50 * time.Millisecond
+	calls := 0
+	e.live.flushAcks = func(ctx context.Context, _ livesession.Config, _ string, _ time.Duration, _ time.Time) (bool, error) {
+		calls++
+		<-ctx.Done() // a dead server: the flush uses all the time it is given
+		return true, ctx.Err()
+	}
+	e.live.Tick(t.Context())
+	if calls != 1 {
+		t.Fatalf("%d flushes ran; the first exhausted the tick's budget, so the rest must wait for the next tick", calls)
 	}
 }
