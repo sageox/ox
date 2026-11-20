@@ -753,6 +753,7 @@ func loggedReceiptIDs(t *testing.T, e *liveEnv) map[string]bool {
 // rest stayed owed for good once the stream stopped.
 func TestPurgeDrainsEveryOwedReceiptNotJustTheFirstPage(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
+	t.Cleanup(e.live.Wait)
 	ids := addShownRows(t, e, store, 45)
 	box.purgeSession(t.Context(), filepath.Base(e.dir))
 	got := loggedReceiptIDs(t, e)
@@ -766,19 +767,22 @@ func TestPurgeDrainsEveryOwedReceiptNotJustTheFirstPage(t *testing.T) {
 	}
 }
 
-// And with no stop signal at all, the closed-session sweep drains them.
+// And with no stop signal at all, the closed-session sweep drains them and the
+// production send path delivers every one to the server.
 func TestTickDrainsOwedReceiptsOfAClosedSessionBeyondTheFirstPage(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
+	t.Cleanup(e.live.Wait)
 	e.live.drainShown = box.drainAllShown
-	e.live.flushAcks = func(context.Context, livesession.Config, string, time.Duration, time.Time) (bool, error) {
-		return false, nil
+	e.drainOnce() // opens the stream
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", 5*time.Second); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
 	}
 	ids := addShownRows(t, e, store, 45)
-	e.live.flushOwedAcks(t.Context(), nil)
-	got := loggedReceiptIDs(t, e)
+	e.live.Tick(t.Context())
+	e.live.Wait()
 	for _, id := range ids {
-		if !got[id] {
-			t.Fatalf("the sweep left the receipt of %s owed (%d of %d logged)", id, len(got), len(ids))
+		if _, ok := e.srv.DeliveredAtSeq(id); !ok {
+			t.Fatalf("the receipt of %s never reached the server through Tick", id)
 		}
 	}
 }
