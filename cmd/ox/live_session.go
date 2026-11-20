@@ -150,9 +150,11 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
 	defer cancel()
 	log := slog.With("session_id", state.SessionID)
+	parent, continuedFrom := liveSessionLinks(state)
 	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{
 		SessionID: state.SessionID, SessionName: session.GetSessionName(state.SessionPath),
 		RepoID: repoID, Agent: agent, StartedAt: state.StartedAt,
+		ParentSessionID: parent, ContinuedFromSessionID: continuedFrom,
 	}); err != nil {
 		log.Warn("live_session_prepare_failed", "error", err)
 		return
@@ -163,6 +165,22 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	}
 	log.Info("live_session_prepared")
 	liveKickDaemon(state.SessionPath)
+}
+
+// liveSessionLinks are the links a recording's stream opens with: the ses_ id
+// of the recording whose shell launched this agent, as captured when that
+// parent was chosen, and of the earlier recording this one continues. An id
+// that is not a ses_ id, or that names this recording itself, is left out.
+func liveSessionLinks(state *session.RecordingState) (parent, continuedFrom string) {
+	return ownSessionLink(state, state.ParentSessionID), ownSessionLink(state, state.ContinuedFromSessionID)
+}
+
+// ownSessionLink is id when it is a ses_ id naming another recording, else "".
+func ownSessionLink(state *session.RecordingState, id string) string {
+	if id == state.SessionID || !sessionid.IsValidSessionID(id) {
+		return ""
+	}
+	return id
 }
 
 // closeSupersededLiveStreams requests the close of every stream an earlier

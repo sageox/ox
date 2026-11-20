@@ -152,7 +152,7 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 
 	// Disabled via the real command: the gate creates no recording.
 	oxConfigSetRepo(t, "session_recording", "disabled")
-	assert.Nil(t, startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", ""),
+	assert.Nil(t, startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", ""),
 		"session_recording=disabled must not start a recording")
 	st, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 	require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 
 	// Auto via the real command: the gate creates a recording with a transcript.
 	oxConfigSetRepo(t, "session_recording", "auto")
-	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", "")
+	status := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", "")
 	require.NotNil(t, status, "session_recording=auto must start a recording")
 	assert.True(t, status.Recording, "auto must actually record")
 	st2, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
@@ -190,7 +190,7 @@ func TestConfigE2E_ResumeLinksNewRecordingToPriorSession(t *testing.T) {
 	)
 	t.Cleanup(func() { _ = DeleteSessionMarker(agentSessionID) })
 
-	firstStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", agentSessionID)
+	firstStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", agentSessionID)
 	require.NotNil(t, firstStatus)
 	first, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestConfigE2E_ResumeLinksNewRecordingToPriorSession(t *testing.T) {
 	resumedMarker, err := ReadSessionMarker(agentSessionID)
 	require.NoError(t, err)
 	continuedFrom := recordingSessionIDFromMarker(resumedMarker)
-	secondStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", "", continuedFrom, agentSessionID)
+	secondStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, continuedFrom, agentSessionID)
 	require.NotNil(t, secondStatus)
 	second, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 	require.NoError(t, err)
@@ -241,14 +241,14 @@ func TestConfigE2E_CodexReprimePreservesPendingStop(t *testing.T) {
 	oxConfigSetRepo(t, "session_recording", "auto")
 	provisionDefaultLedger(t)
 	const agentID = "OxCodexStop"
-	require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", "codex-stop-retry"))
+	require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", "codex-stop-retry"))
 	state, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.NoError(t, session.MarkExplicitStop(f.projectRoot, agentID))
 
 	for range 2 {
-		require.Nil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", "codex-stop-retry"))
+		require.Nil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", "codex-stop-retry"))
 		require.True(t, session.HasExplicitStop(f.projectRoot, agentID), "pending stop must remain durable across re-prime")
 		current, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 		require.NoError(t, err)
@@ -257,7 +257,7 @@ func TestConfigE2E_CodexReprimePreservesPendingStop(t *testing.T) {
 	}
 
 	require.NoError(t, session.ClearRecordingStateForAgent(f.projectRoot, agentID))
-	require.Nil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", "codex-stop-retry"))
+	require.Nil(t, startSessionRecording(f.projectRoot, agentID, "codex", inheritedParent{}, "", "codex-stop-retry"))
 	require.False(t, session.HasExplicitStop(f.projectRoot, agentID), "completed stop retains its existing one-prime skip")
 }
 

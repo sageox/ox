@@ -231,6 +231,17 @@ func (s *Server) ClosedWith(cnv string) (Closed, bool) {
 	return Closed{}, false
 }
 
+// OpenedWith returns the newest open request the server accepted for cnv, as
+// it decoded it from the wire.
+func (s *Server) OpenedWith(cnv string) (sessionstream.OpenSessionRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.convs[cnv]; c != nil && c.opened.LayerID != "" {
+		return c.opened, true
+	}
+	return sessionstream.OpenSessionRequest{}, false
+}
+
 // IsDeleted reports whether cnv was deleted on the server.
 func (s *Server) IsDeleted(cnv string) bool {
 	s.mu.Lock()
