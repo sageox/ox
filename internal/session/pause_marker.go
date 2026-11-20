@@ -57,23 +57,29 @@ func (p pauseMarkerPayload) anchor() PauseAnchor {
 // explicitly paused recording. Survives /clear so new post-/clear sessions
 // can inherit the paused state.
 //
-// The marker also records the agent's process when its recording names one, so
-// an agent launched while /clear has removed the recording state can still
-// tell that this paused agent runs (PausedRootAnchor).
-func MarkExplicitPause(projectRoot, agentID string, seq int) error {
-	payload := pauseMarkerPayload{Seq: seq, At: time.Now().UTC()}
-	if state, err := LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil {
-		// a process that ended, or whose PID now names another process, is
-		// not the paused agent; anchoring on it would hold a pause nobody set
-		pid, start := state.ParentPID, state.ParentStartTime
-		if pid > 0 && proc.IsAlive(pid) && !proc.IsReused(pid, start) {
-			if start == 0 {
-				start = ProcessAnchorOf(pid).Start
-			}
-			payload.PersonPID, payload.PersonPIDStart = pid, start
-		}
+// process is the paused agent's own process, from PersonProcessOf on the
+// recording state read before the pause (a zero anchor when none is known). It
+// is passed in, never reloaded here: /clear may remove the state between the
+// pause and this write, and the marker must still say the agent runs, so an
+// agent launched in that gap is paused too (PausedRootAnchor).
+func MarkExplicitPause(projectRoot, agentID string, seq int, process PauseAnchor) error {
+	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{
+		Seq: seq, At: time.Now().UTC(), PersonPID: process.PID, PersonPIDStart: process.Start,
+	})
+}
+
+// PersonProcessOf is the process anchor of the agent a recording belongs to, or
+// a zero anchor when none is known. A process that ended, or whose PID now
+// names another process, is not the agent; anchoring on it would hold a pause
+// nobody set.
+func PersonProcessOf(state *RecordingState) PauseAnchor {
+	if state == nil || state.ParentPID <= 0 || !proc.IsAlive(state.ParentPID) || proc.IsReused(state.ParentPID, state.ParentStartTime) {
+		return PauseAnchor{}
 	}
-	return writePauseMarker(projectRoot, agentID, payload)
+	if state.ParentStartTime != 0 {
+		return PauseAnchor{PID: state.ParentPID, Start: state.ParentStartTime}
+	}
+	return ProcessAnchorOf(state.ParentPID)
 }
 
 // PausedRootAnchor reports whether agentID is an agent a person paused whose

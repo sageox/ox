@@ -130,7 +130,9 @@ func runPauseChainCell(t *testing.T, cell matrixCell) {
 		rootPID = rootProc.Process.Pid
 	}
 	createActiveRecordingWithPID(t, projectRoot, repoID, "OxRoot", rootPID)
-	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxRoot", 1))
+	rootState, err := session.LoadRecordingStateForAgent(projectRoot, "OxRoot")
+	require.NoError(t, err)
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxRoot", 1, session.PersonProcessOf(rootState)))
 
 	launch := func(launcherID, agentID, agentType string) *sessionStatus {
 		t.Helper()

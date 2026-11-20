@@ -95,7 +95,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 	}
 
 	// write per-agent marker so /clear inheritance and cross-process detection work.
-	if err := session.MarkExplicitPause(projectRoot, inst.AgentID, seq); err != nil {
+	if err := session.MarkExplicitPause(projectRoot, inst.AgentID, seq, session.PersonProcessOf(state)); err != nil {
 		return fmt.Errorf("recording suspended but marker write failed: %w", err)
 	}
 
