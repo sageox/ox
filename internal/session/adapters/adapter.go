@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
@@ -91,6 +92,11 @@ type RawEntry struct {
 
 	// Raw contains the original data for debugging and auditing
 	Raw json.RawMessage
+
+	// Media is set only on role="media" entries: a pasted image. Its Data is
+	// already staged on disk and cleared by the time a RawEntry leaves the
+	// adapter layer.
+	Media *adapterprotocol.MediaRef
 }
 
 // SessionMetadata contains metadata extracted from agent session files.

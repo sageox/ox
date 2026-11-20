@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/internal/envutil"
+	"github.com/sageox/ox/internal/mediapool"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 	"github.com/sageox/ox/pkg/ndjson"
@@ -802,9 +804,34 @@ func protocolToInternal(entries []adapterprotocol.RawEntry) []RawEntry {
 			ToolOutput: e.ToolOutput,
 			IsError:    e.IsError,
 			CallID:     e.CallID,
+			Media:      stageMedia(e.Media),
 		}
 	}
 	return result
+}
+
+// stageMedia moves a pasted image's bytes out of the entry and onto disk, where
+// the live session drain finds them by digest. The returned ref carries no
+// bytes, so they flow no further than here. An image that cannot be staged
+// becomes a skipped one, so the stream declares a gap instead of citing bytes
+// that never reach the server.
+func stageMedia(m *adapterprotocol.MediaRef) *adapterprotocol.MediaRef {
+	if m == nil {
+		return nil
+	}
+	ref := *m
+	ref.Data = nil
+	if m.Skipped != "" || len(m.Data) == 0 {
+		if ref.Skipped == "" {
+			ref.Skipped = adapterprotocol.MediaSkippedMalformed
+		}
+		return &ref
+	}
+	if err := mediapool.Put("", m.SHA256, m.Data); err != nil {
+		slog.Warn("media_stage_failed", "sha256", m.SHA256, "size", m.Size, "error", err)
+		ref.Skipped = adapterprotocol.MediaSkippedMalformed
+	}
+	return &ref
 }
 
 // Close shuts down any serve-mode process.

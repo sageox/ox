@@ -54,6 +54,9 @@ const (
 	// vWithhold: the publication scan refused the batch at acked; the drain
 	// replaces it in the spool with one gap line (withhold).
 	vWithhold
+	// vRespool: media lines at acked became gap lines in the spool; the next
+	// pump reads the rewritten one.
+	vRespool
 )
 
 // session is one locked view of a session dir during a call.
@@ -68,6 +71,9 @@ type session struct {
 	// rules is the persisted secret-rules delta, loaded on the first scan.
 	rules       *secretguard.RuleSet
 	rulesLoaded bool
+	// mediaStored holds the digests this call already stored, so a batch resent
+	// after a stalled append does not declare its images again.
+	mediaStored map[string]bool
 }
 
 func (s *session) spoolPath() string { return filepath.Join(s.dir, spoolFileName) }
@@ -167,6 +173,8 @@ func (s *session) drain(ctx context.Context, res *DrainResult) error {
 			if err := s.withhold(ctx); err != nil {
 				return err
 			}
+		case vRespool:
+			// pump has closed the spool and sendBatch rewrote it
 		case vNewLayer:
 			if restarts >= maxRestarts {
 				return errors.New("live stream refused after restarting on a new layer")
@@ -239,6 +247,19 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 		return vWithhold, nil
 	}
 	batch := capLines(window, s.batchLimit())
+	sendable, respool, err := s.prepareMedia(ctx, batch)
+	if errors.Is(err, errStreamEnded) {
+		return vStop, nil
+	}
+	if err != nil {
+		return vStop, fmt.Errorf("media at offset %d: %w", s.st.Acked, err)
+	}
+	if respool {
+		if err := replaceSpoolRange(ctx, s.dir, s.st.Acked, int64(len(batch)), sendable); err != nil {
+			return vStop, fmt.Errorf("declare media gap at offset %d: %w", s.st.Acked, err)
+		}
+		return vRespool, nil
+	}
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {
 		return s.onRefusal(ctx, err, f, h, window, len(batch), end, res)

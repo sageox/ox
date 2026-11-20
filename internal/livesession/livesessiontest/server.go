@@ -98,6 +98,8 @@ type Server struct {
 	hangAppendsOver  int
 
 	inflight, maxInflight int
+
+	media *mediaState
 }
 
 // New starts a fake server and registers its cleanup.
@@ -114,6 +116,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("DELETE "+sessionstream.PathSessions+"/{cnv}", s.route(s.remove))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/close", s.route(s.closeSession))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/layers/{layer}/lines", s.route(s.appendLines))
+	s.registerMedia(mux)
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	return s

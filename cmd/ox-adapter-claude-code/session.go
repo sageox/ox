@@ -12,6 +12,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -399,6 +402,9 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		entries = append(entries, adapterruntime.UserEntry(ts, content))
 	}
 
+	// pasted screenshots follow the turn's text, so a viewer places them at it
+	entries = append(entries, extractImages(raw, ts)...)
+
 	// extract tool_result blocks from user content arrays
 	entries = append(entries, extractToolResults(raw, ts)...)
 
@@ -406,6 +412,59 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		return nil, nil
 	}
 	return entries, nil
+}
+
+// extractImages returns one media entry per base64 image block in a user
+// message: a screenshot pasted into the prompt. Bytes are carried once, to the
+// daemon, which stages them for upload; they are never part of any text entry.
+// An image over the size cap or of a type the live session does not accept is
+// returned as a skipped entry, so the loss is declared downstream.
+func extractImages(raw *claudeCodeEntry, ts time.Time) []adapterprotocol.RawEntry {
+	if raw.Message == nil {
+		return nil
+	}
+	content, ok := raw.Message.Content.([]interface{})
+	if !ok {
+		return nil
+	}
+	var entries []adapterprotocol.RawEntry
+	for position, item := range content {
+		block, ok := item.(map[string]interface{})
+		if !ok || block["type"] != "image" {
+			continue
+		}
+		source, _ := block["source"].(map[string]interface{})
+		if kind, _ := source["type"].(string); kind != "base64" {
+			continue // a URL source carries no bytes to upload
+		}
+		mime, _ := source["media_type"].(string)
+		encoded, _ := source["data"].(string)
+		entries = append(entries, adapterruntime.MediaEntry(ts, imageRef(position, mime, encoded)))
+	}
+	return entries
+}
+
+// imageRef validates one pasted image against the live session's limits.
+func imageRef(position int, mime, encoded string) adapterprotocol.MediaRef {
+	ref := adapterprotocol.MediaRef{Position: position, MIME: mime}
+	if !adapterprotocol.AllowedMediaMIME(mime) {
+		ref.Skipped = adapterprotocol.MediaSkippedUnsupportedType
+		return ref
+	}
+	// checked before decoding so a huge block is never expanded
+	if int64(base64.StdEncoding.DecodedLen(len(encoded))) > adapterprotocol.MaxMediaBytes {
+		ref.Skipped = adapterprotocol.MediaSkippedTooLarge
+		ref.Size = int64(base64.StdEncoding.DecodedLen(len(encoded)))
+		return ref
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 {
+		ref.Skipped = adapterprotocol.MediaSkippedMalformed
+		return ref
+	}
+	sum := sha256.Sum256(data)
+	ref.SHA256, ref.Size, ref.Data = hex.EncodeToString(sum[:]), int64(len(data)), data
+	return ref
 }
 
 // extractToolResults extracts tool_result content blocks from a user message.

@@ -84,6 +84,9 @@ const (
 	RoleAssistant = "assistant"
 	RoleSystem    = "system"
 	RoleTool      = "tool"
+	// RoleMedia marks an entry carrying a pasted image (RawEntry.Media). It has
+	// no Content: the bytes travel out of band, never in the text stream.
+	RoleMedia = "media"
 )
 
 // --- One-shot response types ---
@@ -379,6 +382,8 @@ type RawEntry struct {
 	ToolOutput string `json:"tool_output,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
 	CallID     string `json:"call_id,omitempty"`
+	// Media is set only on RoleMedia entries.
+	Media *MediaRef `json:"media,omitempty"`
 }
 
 // SessionMetadata contains metadata extracted from agent session files.

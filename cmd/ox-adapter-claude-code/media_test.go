@@ -1,0 +1,123 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
+)
+
+// userLine is the shape Claude Code writes when a screenshot is pasted with a
+// prompt: the message content is an array of blocks, image blocks base64.
+func userLine(t *testing.T, blocks ...map[string]any) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"type": "user", "timestamp": "2026-03-04T13:41:10.123Z", "version": "2.1.0", "uuid": "u1",
+		"message": map[string]any{"role": "user", "content": blocks},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func imageBlock(mime string, data []byte) map[string]any {
+	return map[string]any{"type": "image", "source": map[string]any{
+		"type": "base64", "media_type": mime, "data": base64.StdEncoding.EncodeToString(data),
+	}}
+}
+
+func textBlock(s string) map[string]any { return map[string]any{"type": "text", "text": s} }
+
+func TestParseLineKeepsPastedImageAfterItsTurnText(t *testing.T) {
+	img := []byte("\x89PNG\r\n\x1a\nfake-pixels")
+	sum := sha256.Sum256(img)
+
+	entries, err := parseLine(userLine(t, imageBlock("image/png", img), textBlock("why is this button misaligned?")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want text then media", len(entries))
+	}
+	if entries[0].Role != adapterprotocol.RoleUser || entries[0].Content != "why is this button misaligned?" {
+		t.Fatalf("first entry = %+v", entries[0])
+	}
+	m := entries[1]
+	if m.Role != adapterprotocol.RoleMedia || m.Content != "" || m.Media == nil {
+		t.Fatalf("second entry = %+v", m)
+	}
+	if m.Media.SHA256 != hex.EncodeToString(sum[:]) || m.Media.MIME != "image/png" || m.Media.Size != int64(len(img)) {
+		t.Fatalf("media ref = %+v", m.Media)
+	}
+	if m.Media.Position != 0 || string(m.Media.Data) != string(img) || m.Media.Skipped != "" {
+		t.Fatalf("media position/data = %+v", m.Media)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("media entry invalid: %v", err)
+	}
+	// the image bytes are base64 in the transcript only; the text entry has none
+	if strings.Contains(entries[0].Content, "iVBOR") {
+		t.Fatalf("image data leaked into text")
+	}
+}
+
+func TestParseLineImageOnlyTurnStillYieldsMedia(t *testing.T) {
+	entries, err := parseLine(userLine(t, imageBlock("image/jpeg", []byte("jpeg-bytes"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Role != adapterprotocol.RoleMedia {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
+
+func TestParseLineKeepsImageOrderAndBlockPosition(t *testing.T) {
+	entries, err := parseLine(userLine(t, textBlock("two screenshots"), imageBlock("image/png", []byte("one")), imageBlock("image/webp", []byte("two"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 || entries[1].Media.Position != 1 || entries[2].Media.Position != 2 || entries[2].Media.MIME != "image/webp" {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
+
+func TestParseLineSkipsImageItCannotCarryWithAReason(t *testing.T) {
+	entries, err := parseLine(userLine(t, textBlock("diagram"), imageBlock("image/svg+xml", []byte("<svg/>"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entries[1].Media
+	if m == nil || m.Skipped != adapterprotocol.MediaSkippedUnsupportedType || len(m.Data) != 0 {
+		t.Fatalf("skipped ref = %+v", m)
+	}
+}
+
+func TestImageRefOverSizeCapIsSkippedWithoutDecoding(t *testing.T) {
+	huge := strings.Repeat("A", int(adapterprotocol.MaxMediaBytes)*4/3+16)
+	ref := imageRef(0, "image/png", huge)
+	if ref.Skipped != adapterprotocol.MediaSkippedTooLarge || len(ref.Data) != 0 || ref.Size <= adapterprotocol.MaxMediaBytes {
+		t.Fatalf("ref = skipped %q size %d data %d", ref.Skipped, ref.Size, len(ref.Data))
+	}
+}
+
+func TestImageRefMalformedBase64IsSkipped(t *testing.T) {
+	if ref := imageRef(0, "image/png", "!!!not base64!!!"); ref.Skipped != adapterprotocol.MediaSkippedMalformed {
+		t.Fatalf("ref = %+v", ref)
+	}
+}
+
+func TestParseLineIgnoresURLImageSource(t *testing.T) {
+	block := map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.test/a.png"}}
+	entries, err := parseLine(userLine(t, textBlock("see link"), block))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
