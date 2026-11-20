@@ -390,11 +390,14 @@ func (m configModel) mainView(width int) string {
 		help = successStyle.Render("✓ saved") + "  " + help
 	}
 
+	renderedHelp := helpStyle.Render(help)
+	helpHeight := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(renderedHelp))
+
 	// Calculate available vertical rows for the settings list
-	maxListRows, showDetail := m.maxSettingsListRows(innerWidth, detailPanel)
+	maxListRows, showDetail := m.maxSettingsListRows(innerWidth, detailPanel, helpHeight)
 
 	// Build settings list section (windowed if maxListRows > 0)
-	settingsList := m.buildSettingsListWithLimit(maxListRows)
+	settingsList := m.buildSettingsListWithLimit(innerWidth, maxListRows)
 
 	var content string
 	if showDetail {
@@ -402,12 +405,12 @@ func (m configModel) mainView(width int) string {
 			settingsList,
 			divider,
 			detailPanel,
-			helpStyle.Render(help),
+			renderedHelp,
 		)
 	} else {
 		content = fmt.Sprintf("%s\n\n%s",
 			settingsList,
-			helpStyle.Render(help),
+			renderedHelp,
 		)
 	}
 
@@ -432,19 +435,22 @@ func (m configModel) mainView(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m configModel) maxSettingsListRows(innerWidth int, detailPanel string) (maxRows int, showDetail bool) {
+func (m configModel) maxSettingsListRows(innerWidth int, detailPanel string, helpHeight int) (maxRows int, showDetail bool) {
 	if m.height <= 0 {
 		return 0, true
 	}
+	if helpHeight < 1 {
+		helpHeight = 1
+	}
 	detailHeight := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(detailPanel))
-	// Frame borders (2) + divider (1) + blank before help (1) + help (1) + layout padding (2) + detail panel
-	nonListRows := 2 + 1 + 1 + 1 + 2 + detailHeight
+	// Frame borders (2) + divider (1) + blank before help (1) + help + layout padding (2) + detail panel
+	nonListRows := 2 + 1 + 1 + helpHeight + 2 + detailHeight
 	if avail := m.height - nonListRows; avail >= 4 {
 		return avail, true
 	}
 	// Not enough vertical space for both the detail panel and a usable list:
-	// omit the detail panel and divider, keeping frame borders (2) + blank (1) + help (1).
-	avail := m.height - 4
+	// omit the detail panel and divider, keeping frame borders (2) + blank (1) + help.
+	avail := m.height - (2 + 1 + helpHeight)
 	if avail < 1 {
 		avail = 1
 	}
@@ -455,13 +461,13 @@ func (m configModel) buildSettingsList(width int) string {
 	maxRows := 0
 	if m.height > 0 {
 		detailPanel := m.buildDetailPanel(width)
-		maxRows, _ = m.maxSettingsListRows(width, detailPanel)
+		maxRows, _ = m.maxSettingsListRows(width, detailPanel, 1)
 	}
-	return m.buildSettingsListWithLimit(maxRows)
+	return m.buildSettingsListWithLimit(width, maxRows)
 }
 
-func (m configModel) buildSettingsListWithLimit(maxRows int) string {
-	lines, selectedLine := m.allSettingsLines()
+func (m configModel) buildSettingsListWithLimit(width int, maxRows int) string {
+	lines, selectedLine := m.allSettingsLines(width)
 	if len(lines) == 0 {
 		return ""
 	}
@@ -518,7 +524,7 @@ func (m configModel) buildSettingsListWithLimit(maxRows int) string {
 	return strings.Join(visible, "\n")
 }
 
-func (m configModel) allSettingsLines() ([]string, int) {
+func (m configModel) allSettingsLines(width int) ([]string, int) {
 	var lines []string
 	selectedLine := -1
 	displayPos := 0
@@ -552,9 +558,23 @@ func (m configModel) allSettingsLines() ([]string, int) {
 				keyText = settingKeyStyle.Render(keyText)
 			}
 
-			// Value with source indicator
+			// Value with source indicator (truncate long values so each row fits on one physical line)
 			valueText := item.value.Value
 			sourceText := m.formatSourceArrow(item.value.Source)
+			if width > 0 {
+				keyWidth := lipgloss.Width(keyText)
+				if keyWidth < 26 {
+					keyWidth = 26
+				}
+				maxValWidth := width - (2 + keyWidth + 1 + 1 + lipgloss.Width(sourceText))
+				if maxValWidth >= 4 && lipgloss.Width(valueText) > maxValWidth {
+					runes := []rune(valueText)
+					for len(runes) > 0 && lipgloss.Width(string(runes)) > maxValWidth-1 {
+						runes = runes[:len(runes)-1]
+					}
+					valueText = string(runes) + "…"
+				}
+			}
 
 			var styledValue string
 			if item.value.Source == ConfigLevelDefault {
@@ -565,6 +585,9 @@ func (m configModel) allSettingsLines() ([]string, int) {
 
 			// Format: cursor + key (padded) + value + source
 			row := fmt.Sprintf("%s%-26s %s %s", cursor, keyText, styledValue, sourceText)
+			if width > 0 {
+				row = lipgloss.NewStyle().MaxWidth(width).Render(row)
+			}
 			if isSelected {
 				selectedLine = len(lines)
 			}

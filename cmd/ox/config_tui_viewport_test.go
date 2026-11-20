@@ -55,8 +55,8 @@ func TestMainView_ViewportClampingKeepsCursorVisible(t *testing.T) {
 				assert.Contains(t, view, "q quit", "help bar must remain visible")
 
 				// Check scroll indicators when list exceeds available rows
-				allLines, _ := m.allSettingsLines()
-				maxRows, _ := m.maxSettingsListRows(80-4, m.buildDetailPanel(80-4))
+				allLines, _ := m.allSettingsLines(80 - 4)
+				maxRows, _ := m.maxSettingsListRows(80-4, m.buildDetailPanel(80-4), 1)
 				if maxRows > 0 && len(allLines) > maxRows {
 					if tc.wantUpMore {
 						assert.Contains(t, view, "↑ more", "expected scroll up indicator")
@@ -155,4 +155,41 @@ func TestEditView_MultiScopeSettingsRadioOptionsNearTop(t *testing.T) {
 		})
 	}
 	require.Greater(t, tested, 0, "expected at least one multi-scope setting with radio options")
+}
+
+func TestMainView_CompactFooterWithLongSaveErrorAndLongValue(t *testing.T) {
+	dir := setupIsolatedUserConfig(t)
+	m, err := newConfigModel(dir)
+	require.NoError(t, err)
+
+	// Select attribution.pr (or fall back to last item) and give it a long value that would wrap without truncation
+	targetCursor := len(m.displayOrder) - 1
+	for pos, itemIdx := range m.displayOrder {
+		if m.items[itemIdx].setting.Key == "attribution.pr" {
+			targetCursor = pos
+			break
+		}
+	}
+	selectedItem := &m.items[m.displayOrder[targetCursor]]
+	selectedItem.value.Value = strings.Repeat("Co-Authored-By: SageOx ", 4)
+
+	m.cursor = targetCursor
+	m.width = 80
+	m.height = 12
+	m.saveErr = "failed to write config file: permission denied while updating repository configuration on disk"
+
+	view := m.mainView(80)
+	lines := strings.Split(view, "\n")
+
+	assert.LessOrEqual(t, len(lines), 12, "mainView lines should not exceed 12 rows")
+	assert.Contains(t, view, "q quit", "navigation hints must remain visible with a long wrapped save error")
+
+	hasSelectedRow := false
+	for _, line := range lines {
+		if strings.Contains(line, "> ") && strings.Contains(line, selectedItem.setting.Key) {
+			hasSelectedRow = true
+			break
+		}
+	}
+	assert.True(t, hasSelectedRow, "selected row '> %s' must remain visible", selectedItem.setting.Key)
 }
