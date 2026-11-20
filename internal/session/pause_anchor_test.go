@@ -1,10 +1,12 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/proc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +20,16 @@ func pausedRoot(t *testing.T, projectRoot, agentID string, pid int) {
 	t.Helper()
 	_, err := StartRecording(projectRoot, StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "person-a", ParentPID: pid})
 	require.NoError(t, err)
-	require.NoError(t, MarkExplicitPause(projectRoot, agentID, 1))
+	pauseRecorded(t, projectRoot, agentID)
+}
+
+// pauseRecorded pauses agentID the way a person does: the process comes from
+// the recording state read before the pause.
+func pauseRecorded(t *testing.T, projectRoot, agentID string) {
+	t.Helper()
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NoError(t, MarkExplicitPause(projectRoot, agentID, 1, PersonProcessOf(state)))
 }
 
 // The rule a launch chain's inherited pause holds by. Failure prevented: a
@@ -38,10 +49,10 @@ func TestInheritedPauseHoldsExactlyWhileTheRootsPersonSetPauseDoes(t *testing.T)
 		{"a Cursor root, which names no process, holds by its state", func(t *testing.T, root string) { pausedRoot(t, root, "OxRoot", 0) },
 			PauseAnchor{RootAgentID: "OxRoot"}, true},
 		{"the root's state is gone during /clear but its process runs", func(t *testing.T, root string) {
-			require.NoError(t, MarkExplicitPause(root, "OxRoot", 1))
+			require.NoError(t, MarkExplicitPause(root, "OxRoot", 1, PauseAnchor{}))
 		}, PauseAnchor{RootAgentID: "OxRoot", RootPID: other}, true},
 		{"the root's state is gone and its process ended", func(t *testing.T, root string) {
-			require.NoError(t, MarkExplicitPause(root, "OxRoot", 1))
+			require.NoError(t, MarkExplicitPause(root, "OxRoot", 1, PauseAnchor{}))
 		}, PauseAnchor{RootAgentID: "OxRoot", RootPID: deadPID}, false},
 		{"the person resumed the root, though a process up the chain runs", func(t *testing.T, root string) {
 			_, err := StartRecording(root, StartRecordingOptions{AgentID: "OxRoot", AdapterName: "claude-code", Username: "person-a", ParentPID: other})
@@ -71,7 +82,7 @@ func TestInheritedPauseHoldsExactlyWhileTheRootsPersonSetPauseDoes(t *testing.T)
 // legacy marker or a missing one.
 func TestOnlyAnInheritedMarkerIsHeldAsInherited(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
-	require.NoError(t, MarkExplicitPause(projectRoot, "OxPerson", 1))
+	require.NoError(t, MarkExplicitPause(projectRoot, "OxPerson", 1, PauseAnchor{}))
 	legacy := filepath.Join(resolveSessionsWritePath(projectRoot), explicitPauseMarker+".OxLegacy")
 	require.NoError(t, os.WriteFile(legacy, []byte("paused"), 0o600))
 
@@ -100,7 +111,7 @@ func TestMarkInheritedPauseRefusesAPauseWithNoAnchor(t *testing.T) {
 func TestLaunchedPauseAnchorPassesTheRootDownTheChain(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 	parent, child := os.Getppid(), os.Getpid()
-	require.NoError(t, MarkExplicitPause(projectRoot, "OxRoot", 1))
+	require.NoError(t, MarkExplicitPause(projectRoot, "OxRoot", 1, PauseAnchor{}))
 
 	fromRoot := LaunchedPauseAnchor(projectRoot, "OxRoot", parent)
 	assert.Equal(t, "OxRoot", fromRoot.RootAgentID, "a person-paused launcher is the root")
@@ -117,4 +128,119 @@ func TestLaunchedPauseAnchorPassesTheRootDownTheChain(t *testing.T) {
 	assert.Equal(t, parent, ownProcess.RootPID)
 
 	assert.Equal(t, PauseAnchor{}, ProcessAnchorOf(0), "no process names no anchor")
+}
+
+// A person's pause names the paused agent's process, so a child launched while
+// that agent's recording state is briefly gone (/clear) still finds the root
+// paused. Failure prevented: the direct child of a paused root recording in
+// the /clear gap; and an old marker, or a root that has exited, still holding.
+func TestPausedRootAnchorHoldsOnlyWhileThePausedProcessRuns(t *testing.T) {
+	self := os.Getpid()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, projectRoot string)
+		want  bool
+	}{
+		{"a person paused a running agent", func(t *testing.T, root string) { pausedRoot(t, root, "OxRoot", self) }, true},
+		{"the paused agent has exited", func(t *testing.T, root string) { pausedRoot(t, root, "OxRoot", deadPID) }, false},
+		{"a marker from before processes were recorded", func(t *testing.T, root string) {
+			require.NoError(t, writePauseMarker(root, "OxRoot", pauseMarkerPayload{Seq: 1}))
+		}, false},
+		{"an inherited marker is not a person's pause", func(t *testing.T, root string) {
+			own := ProcessAnchorOf(self)
+			require.NoError(t, writePauseMarker(root, "OxRoot", pauseMarkerPayload{Seq: 1, PID: own.PID, PIDStart: own.Start}))
+		}, false},
+		{"nothing is paused", func(t *testing.T, root string) {}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot := newPauseMarkerProject(t)
+			tc.setup(t, projectRoot)
+			anchor, held := PausedRootAnchor(projectRoot, "OxRoot")
+			assert.Equal(t, tc.want, held)
+			if held {
+				assert.Equal(t, self, anchor.PID)
+			}
+		})
+	}
+}
+
+// Failure prevented: a leftover recording whose PID the OS handed to another
+// process made the pause save the replacement's start time, so the pause held
+// for as long as that stranger ran. A pause records the paused agent's process
+// only when it is still that process.
+func TestPauseOnARecordingWhosePIDWasReusedAnchorsNothing(t *testing.T) {
+	projectRoot := newPauseMarkerProject(t)
+	_, err := StartRecording(projectRoot, StartRecordingOptions{AgentID: "OxRoot", AdapterName: "claude-code", Username: "person-a", ParentPID: os.Getpid()})
+	require.NoError(t, err)
+	require.NoError(t, UpdateRecordingStateForAgent(projectRoot, "OxRoot", func(s *RecordingState) { s.ParentStartTime = 1 }))
+	pauseRecorded(t, projectRoot, "OxRoot")
+
+	_, held := PausedRootAnchor(projectRoot, "OxRoot")
+	assert.False(t, held, "a reused PID anchored a pause")
+}
+
+// Failure prevented: a person-set pause stored its process under pid, which an
+// older ox reads as an inherited pause and keeps holding after the root resumes.
+func TestPersonPauseStoresItsProcessUnderKeysOlderReadersIgnore(t *testing.T) {
+	projectRoot := newPauseMarkerProject(t)
+	pausedRoot(t, projectRoot, "OxRoot", os.Getpid())
+
+	data, err := os.ReadFile(filepath.Join(resolveSessionsWritePath(projectRoot), explicitPauseMarker+".OxRoot"))
+	require.NoError(t, err)
+	var keys map[string]any
+	require.NoError(t, json.Unmarshal(data, &keys))
+	assert.NotContains(t, keys, "pid")
+	assert.NotContains(t, keys, "pid_start")
+	assert.Contains(t, keys, "person_pid")
+}
+
+// Failure prevented: the chain's anchor re-sampled the PID's start time after
+// it was validated, so a PID reused in between was recorded as the root.
+func TestLaunchedPauseAnchorKeepsTheValidatedStartTime(t *testing.T) {
+	projectRoot := newPauseMarkerProject(t)
+	anchor := LaunchedPauseAnchorFrom(projectRoot, "OxRoot", PauseAnchor{PID: os.Getpid(), Start: 12345})
+	assert.Equal(t, int64(12345), anchor.RootStart)
+	assert.Equal(t, int64(12345), anchor.Start)
+}
+
+// Failure prevented: the marker reloaded the recording state to find the
+// paused process, and /clear removing that state between the pause and the
+// marker write left a marker naming no process, so an agent launched in the
+// gap recorded. The process comes from the state read before the pause.
+func TestPauseMarkerHoldsTheProcessWhenClearRemovesTheStateFirst(t *testing.T) {
+	projectRoot := newPauseMarkerProject(t)
+	_, err := StartRecording(projectRoot, StartRecordingOptions{AgentID: "OxRoot", AdapterName: "claude-code", Username: "person-a", ParentPID: os.Getpid()})
+	require.NoError(t, err)
+	state, err := LoadRecordingStateForAgent(projectRoot, "OxRoot")
+	require.NoError(t, err)
+
+	// /clear lands between the pause transition and the marker write
+	require.NoError(t, ClearRecordingStateForAgent(projectRoot, "OxRoot"))
+	require.NoError(t, MarkExplicitPause(projectRoot, "OxRoot", 1, PersonProcessOf(state)))
+
+	anchor, held := PausedRootAnchor(projectRoot, "OxRoot")
+	assert.True(t, held, "the marker lost the paused process")
+	assert.Equal(t, os.Getpid(), anchor.PID)
+}
+
+// What a pause may record of a recording's process: only one that still is it.
+func TestPersonProcessOfNamesOnlyTheRecordedProcess(t *testing.T) {
+	assert.Equal(t, PauseAnchor{}, PersonProcessOf(nil))
+	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{}), "no process recorded")
+	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{ParentPID: deadPID}))
+}
+
+// Start-time checks need a platform that reports process start times; where it
+// doesn't (Windows, FreeBSD), PersonProcessOf keeps a PID-only anchor and reuse
+// cannot be detected, so there is nothing to assert.
+func TestPersonProcessOfRejectsAReusedProcessAndKeepsTheRecordedStart(t *testing.T) {
+	self := os.Getpid()
+	if _, ok := proc.StartTime(self); !ok {
+		t.Skip("this platform reports no process start times, so PID reuse cannot be detected")
+	}
+	live := ProcessAnchorOf(self)
+	assert.Equal(t, PauseAnchor{}, PersonProcessOf(&RecordingState{ParentPID: self, ParentStartTime: 1}), "reused PID")
+	assert.Equal(t, live, PersonProcessOf(&RecordingState{ParentPID: self}), "start time sampled when none was recorded")
+	assert.Equal(t, live, PersonProcessOf(&RecordingState{ParentPID: self, ParentStartTime: live.Start}), "recorded start time kept")
 }
