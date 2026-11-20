@@ -198,8 +198,7 @@ func TestAPauseReachesEveryAgentDownTheLaunchChain(t *testing.T) {
 			state, err := session.LoadRecordingStateForAgent(projectRoot, "OxGrandchild")
 			require.NoError(t, err)
 			assert.Nil(t, state)
-			_, held := session.InheritedPauseHolder(projectRoot, "OxGrandchild")
-			assert.True(t, held, "the grandchild must hold the pause for agents it launches")
+			assert.True(t, session.InheritedPauseHeld(projectRoot, "OxGrandchild", 0), "the grandchild must hold the pause for agents it launches")
 		})
 	}
 }
@@ -210,7 +209,7 @@ func TestAPauseReachesEveryAgentDownTheLaunchChain(t *testing.T) {
 func TestAnEndedLaunchersPauseReachesNobody(t *testing.T) {
 	projectRoot, _ := setupTestProject(t)
 	enableRecordingWithoutLedgerClone(t)
-	require.NoError(t, session.MarkInheritedPause(projectRoot, "OxEnded", session.PauseHolder{PID: 999999999}))
+	require.NoError(t, session.MarkInheritedPause(projectRoot, "OxEnded", session.PauseAnchor{PID: 999999999, RootAgentID: "OxEndedRoot"}))
 	t.Setenv("SAGEOX_AGENT_ID", "OxEnded")
 	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
 
@@ -222,4 +221,52 @@ func TestAnEndedLaunchersPauseReachesNobody(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, later)
 	assert.False(t, later.IsSuspended())
+}
+
+// Failure prevented: a Cursor recording stores no agent process (ParentPID 0),
+// so a paused Cursor parent passed its skipped Cursor child no process to hold
+// the pause, and an agent that child launched recorded while the person's
+// pause was still in effect. And the reverse: a chain anchored on a running
+// parent process stayed paused after the person resumed the root. A pause
+// that names its root holds exactly while the root's person-set pause does.
+func TestAPausedParentsPauseHoldsDownTheChainUntilUnpaused(t *testing.T) {
+	cases := []struct {
+		name       string
+		parentPID  int
+		childAgent string
+	}{
+		// a Cursor recording names no agent process
+		{"cursor parent and child", 0, "cursor"},
+		{"claude-code parent and child", os.Getppid(), "claude-code"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			enableRecordingWithoutLedgerClone(t)
+			createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", tc.parentPID)
+			require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+
+			t.Setenv("SAGEOX_AGENT_ID", "OxParent")
+			t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+			child := startSessionRecordingUnlocked(projectRoot, "OxChild", tc.childAgent, inheritedParentOf(projectRoot, "OxChild"), "", "child-conversation", nil)
+			require.NotNil(t, child)
+			require.False(t, child.Recording, "harness: a paused parent's child skips recording")
+
+			launch := func(agentID string) *sessionStatus {
+				t.Helper()
+				t.Setenv("SAGEOX_AGENT_ID", "OxChild")
+				t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
+				return startSessionRecording(projectRoot, agentID, "claude-code", inheritedParentOf(projectRoot, agentID), "", agentID+"-session")
+			}
+			paused := launch("OxGrandchild")
+			require.NotNil(t, paused)
+			assert.False(t, paused.Recording, "the grandchild of a paused parent recorded")
+
+			// the person resumes the root: the whole chain is released
+			require.True(t, session.ClearExplicitPause(projectRoot, "OxParent"))
+			resumed := launch("OxLaterGrandchild")
+			require.NotNil(t, resumed)
+			assert.True(t, resumed.Recording, "a grandchild launched after the root resumed stayed paused")
+		})
+	}
 }

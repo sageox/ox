@@ -29,11 +29,20 @@ const explicitPauseMarker = ".session_paused"
 type pauseMarkerPayload struct {
 	Seq int       `json:"seq"`
 	At  time.Time `json:"at"`
-	// PID and PIDStart name the agent process holding a pause it inherited
-	// from the agent that launched it (MarkInheritedPause); zero for a pause
-	// a person asked for.
-	PID      int   `json:"pid,omitempty"`
-	PIDStart int64 `json:"pid_start,omitempty"`
+	// PID, PIDStart and RootAgentID are the anchors of a pause inherited from
+	// the agent that launched this one (MarkInheritedPause, PauseAnchor); all
+	// empty for a pause a person asked for.
+	PID         int    `json:"pid,omitempty"`
+	PIDStart    int64  `json:"pid_start,omitempty"`
+	RootAgentID string `json:"root_agent_id,omitempty"`
+}
+
+// inherited reports whether the marker records a pause inherited down a
+// launch chain rather than one a person asked for.
+func (p pauseMarkerPayload) inherited() bool { return p.PID > 0 || p.RootAgentID != "" }
+
+func (p pauseMarkerPayload) anchor() PauseAnchor {
+	return PauseAnchor{PID: p.PID, Start: p.PIDStart, RootAgentID: p.RootAgentID}
 }
 
 // MarkExplicitPause writes a per-agent breadcrumb indicating the user
@@ -43,49 +52,92 @@ func MarkExplicitPause(projectRoot, agentID string, seq int) error {
 	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{Seq: seq, At: time.Now().UTC()})
 }
 
-// PauseHolder names the agent process an inherited pause lasts for.
-type PauseHolder struct {
-	PID int
-	// Start is proc.StartTime(PID); 0 when unknown, which leaves liveness on
-	// the PID alone.
+// PauseAnchor is what a pause inherited down a launch chain lasts for. A
+// root anchor, when present, decides alone: the pause holds exactly while the
+// root's does, so resuming the root, or the root ending, releases the whole
+// chain. The process anchor only decides for a marker with no root (a legacy
+// marker). A chain whose anchor has ended never blocks a later agent.
+type PauseAnchor struct {
+	// PID and Start: the nearest agent process up the chain that is known.
+	// Without a root, it holds while that process runs and its PID was not
+	// reused. Start is proc.StartTime(PID); 0 when unknown, which leaves
+	// liveness on the PID alone. 0 PID when no agent in the chain names one
+	// (Cursor records none: its GUI process is shared by every conversation).
+	PID   int
 	Start int64
+	// RootAgentID: the agent whose recording a person paused. It holds while
+	// that recording exists and its person-set pause is still in place.
+	RootAgentID string
 }
 
-// PauseHolderOf is pid as a PauseHolder, with its start time when the
+// ProcessAnchorOf is a process anchor on pid, with its start time when the
 // platform can tell it (Linux and macOS).
-func PauseHolderOf(pid int) PauseHolder {
+func ProcessAnchorOf(pid int) PauseAnchor {
+	if pid <= 0 {
+		return PauseAnchor{}
+	}
 	start, _ := proc.StartTime(pid)
-	return PauseHolder{PID: pid, Start: start}
+	return PauseAnchor{PID: pid, Start: start}
 }
 
-// Live reports whether the holder still runs, and is the same process.
-func (h PauseHolder) Live() bool {
-	return h.PID > 0 && proc.IsAlive(h.PID) && !proc.IsReused(h.PID, h.Start)
+// holds reports whether the pause still holds: by its root when it names
+// one, else by its process. A process anchor on self is this agent's own
+// process, not a launcher's, and does not count.
+func (a PauseAnchor) holds(projectRoot string, self int) bool {
+	if a.RootAgentID != "" {
+		return personPausedRecording(projectRoot, a.RootAgentID)
+	}
+	return a.PID > 0 && a.PID != self && proc.IsAlive(a.PID) && !proc.IsReused(a.PID, a.Start)
+}
+
+// personPausedRecording reports whether agentID's recording exists and a
+// person's pause on it (not an inherited one) is still in place.
+func personPausedRecording(projectRoot, agentID string) bool {
+	p, found := readPauseMarker(projectRoot, agentID)
+	if !found || p.inherited() {
+		return false
+	}
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	return err == nil && state != nil && state.IsAgentAlive()
+}
+
+// LaunchedPauseAnchor is the anchor a pause on launcher passes to an agent it
+// launched: launcher's own agent process (processPID, its recording's, when
+// known) or else the process its own inherited pause names; and the root its
+// inherited pause names, or launcher itself when a person paused it.
+func LaunchedPauseAnchor(projectRoot, launcher string, processPID int) PauseAnchor {
+	anchor := PauseAnchor{RootAgentID: launcher}
+	if p, found := readPauseMarker(projectRoot, launcher); found && p.inherited() {
+		anchor = p.anchor()
+	}
+	if own := ProcessAnchorOf(processPID); own.PID > 0 {
+		anchor.PID, anchor.Start = own.PID, own.Start
+	}
+	return anchor
 }
 
 // MarkInheritedPause writes agentID's pause marker for a pause it inherited
-// from the paused agent that launched it, naming the process the pause lasts
-// for: the agent's own process, or for one that cannot name its own (Cursor's
-// GUI process is shared by every conversation) the process holding the pause
-// it inherited. An agent this one launches in turn finds the marker through
-// the SAGEOX_AGENT_ID it inherits, and is paused too while the holder runs
-// (InheritedPauseHolder): a pause reaches every agent down the launch chain.
-func MarkInheritedPause(projectRoot, agentID string, holder PauseHolder) error {
-	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{At: time.Now().UTC(), PID: holder.PID, PIDStart: holder.Start})
+// from the paused agent that launched it. An agent this one launches in turn
+// finds the marker through the SAGEOX_AGENT_ID it inherits, and is paused too
+// while the anchor holds (InheritedPauseHeld): a pause reaches every agent down
+// the launch chain. An anchor with neither a process nor a root is refused,
+// because it would read as a pause a person asked for.
+func MarkInheritedPause(projectRoot, agentID string, anchor PauseAnchor) error {
+	if anchor.PID <= 0 && anchor.RootAgentID == "" {
+		return fmt.Errorf("inherited pause for agent=%s names no anchor", agentID)
+	}
+	return writePauseMarker(projectRoot, agentID, pauseMarkerPayload{
+		At: time.Now().UTC(), PID: anchor.PID, PIDStart: anchor.Start, RootAgentID: anchor.RootAgentID,
+	})
 }
 
-// InheritedPauseHolder returns the process holding agentID's inherited pause,
-// when that process still runs. A pause a person asked for names no process,
-// and a marker whose process has exited or whose PID now names another
-// process holds nothing: both return found=false, so an ended launcher's
-// marker never blocks a later agent.
-func InheritedPauseHolder(projectRoot, agentID string) (PauseHolder, bool) {
-	p, ok := readPauseMarker(projectRoot, agentID)
-	holder := PauseHolder{PID: p.PID, Start: p.PIDStart}
-	if !ok || !holder.Live() {
-		return PauseHolder{}, false
-	}
-	return holder, true
+// InheritedPauseHeld reports whether agentID holds a pause it inherited down a
+// launch chain that still holds for an agent running as process self. A pause
+// a person asked for, and an inherited one whose anchors have ended, report
+// false: an ended chain never blocks a later agent.
+func InheritedPauseHeld(projectRoot, agentID string, self int) bool {
+	p, found := readPauseMarker(projectRoot, agentID)
+	return found && p.inherited() && p.anchor().holds(projectRoot, self)
 }
 
 // readPauseMarker reads agentID's pause marker; an unparsable one reads as found

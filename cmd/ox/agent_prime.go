@@ -1296,10 +1296,9 @@ type inheritedParent struct {
 	// pause reached it from its own launcher (an inherited pause whose agent
 	// process still runs), so the pause reaches this agent too.
 	PausedLauncher string
-	// Holder is the process a pause reaching this agent lasts for: the parent
-	// recording's agent process, or the paused launcher's holder. An agent that
-	// cannot name its own process passes it on (MarkInheritedPause).
-	Holder session.PauseHolder
+	// PauseAnchor is what a pause reaching this agent lasts for, as the
+	// launcher passes it on (session.LaunchedPauseAnchor).
+	PauseAnchor session.PauseAnchor
 }
 
 // inheritedParentOf is what agentID inherits from the agent whose shell
@@ -1315,14 +1314,16 @@ func inheritedParentOf(projectRoot, agentID string) inheritedParent {
 		for _, s := range states {
 			if s.AgentID == launcher && s.IsAgentAlive() {
 				return inheritedParent{AgentID: launcher, SessionID: s.SessionID, SessionPath: s.SessionPath,
-					Holder: session.PauseHolderOf(s.ParentPID)}
+					PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, s.ParentPID)}
 			}
 		}
 	}
-	// No recording: the launcher may be a paused agent's skipped child. Its
-	// pause holds while its agent process runs, and is never this process's own.
-	if holder, held := session.InheritedPauseHolder(projectRoot, launcher); held && holder.PID != agentProcessPID() {
-		return inheritedParent{PausedLauncher: launcher, Holder: holder}
+	// No recording: the launcher may be a paused agent's skipped child, whose
+	// pause holds while the root recording a person paused still is (or, for a
+	// marker naming no root, while a process up the chain runs). This
+	// process's own PID is never its anchor.
+	if session.InheritedPauseHeld(projectRoot, launcher, agentProcessPID()) {
+		return inheritedParent{PausedLauncher: launcher, PauseAnchor: session.LaunchedPauseAnchor(projectRoot, launcher, 0)}
 	}
 	return inheritedParent{}
 }
@@ -1731,18 +1732,23 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType string, paren
 		// The skip must outlive this prime: the child's id is now in its env
 		// file, so a later re-prime finds no parent and would otherwise record
 		// unsuspended. Its own pause marker makes that recording start paused,
-		// and names a process, so an agent it launches in turn is paused too
-		// while that process runs (inheritedParentOf). Cursor's GUI process is
-		// shared by every conversation, so a Cursor child, or any child whose
-		// agent process is unknown, names the process holding the pause it
-		// inherited; never 0, which would stop the pause here.
-		holder := parent.Holder
-		if agentType != "cursor" {
-			if own := session.PauseHolderOf(agentProcessPID()); own.PID > 0 {
-				holder = own
+		// and carries the chain's anchors, so an agent it launches in turn is
+		// paused too while the root's pause holds (inheritedParentOf). The process anchor is
+		// the nearest known up the chain, else this agent's own; Cursor names
+		// none, since its GUI process is shared by every conversation.
+		anchor := parent.PauseAnchor
+		if anchor.PID <= 0 && agentType != "cursor" {
+			own := session.ProcessAnchorOf(agentProcessPID())
+			anchor.PID, anchor.Start = own.PID, own.Start
+		}
+		if anchor.PID <= 0 && anchor.RootAgentID == "" {
+			// no anchor known: anchor on the launcher's recording as the root
+			anchor.RootAgentID = parent.AgentID
+			if anchor.RootAgentID == "" {
+				anchor.RootAgentID = parent.PausedLauncher
 			}
 		}
-		if err := session.MarkInheritedPause(projectRoot, agentID, holder); err != nil {
+		if err := session.MarkInheritedPause(projectRoot, agentID, anchor); err != nil {
 			slog.Warn("paused parent: failed to keep the child paused", "agent_id", agentID,
 				"parent_agent_id", parent.AgentID, "paused_launcher", parent.PausedLauncher, "error", err)
 		}
