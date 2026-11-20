@@ -70,3 +70,11 @@ func SetSpoolUnlockedHookForTest(t testing.TB, f func()) {
 	spoolUnlockedHook = f
 	t.Cleanup(func() { spoolUnlockedHook = prev })
 }
+
+// SetFlushPreflightHookForTest runs f between FlushTeammateAcks' preflight and
+// its lock, where a state swap would be visible.
+func SetFlushPreflightHookForTest(t testing.TB, f func()) {
+	t.Helper()
+	flushPreflightHook = f
+	t.Cleanup(func() { flushPreflightHook = nil })
+}

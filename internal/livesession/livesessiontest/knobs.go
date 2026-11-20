@@ -2,6 +2,7 @@ package livesessiontest
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -303,4 +304,70 @@ func (s *Server) Preload(t testing.TB, cnv, layer string, batches ...[]byte) {
 		}
 		l.cur = next
 	}
+}
+
+// QueueTeammateComment adds a comment every append answer carries until an ack
+// for its id is recorded, as api-go re-sends undelivered ones.
+func (s *Server) QueueTeammateComment(c sessionstream.TeammateComment) {
+	s.set(func() { s.comments = append(s.comments, c) })
+}
+
+// DeliveredAtSeq is the delivered_at_seq recorded for a comment id.
+func (s *Server) DeliveredAtSeq(id string) (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq, ok := s.delivered[id]
+	return seq, ok
+}
+
+// AckRequests are the ack bodies the server accepted, in order.
+func (s *Server) AckRequests() []sessionstream.AckTeammateCommentsRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sessionstream.AckTeammateCommentsRequest(nil), s.ackBodies...)
+}
+
+// RefuseNextAck answers the next ack with this refusal.
+func (s *Server) RefuseNextAck(status int, reason string, action sessionstream.Action) {
+	s.RefuseAcks(1, status, reason, action)
+}
+
+// IgnoreNextAcks answers the next n acks 200 without recording them, as a lost
+// write behind a healthy reply would: the note stays undelivered server-side.
+func (s *Server) IgnoreNextAcks(n int) { s.set(func() { s.ackIgnored = n }) }
+
+// RemoveTeammateComment stops listing a comment, as the server does once the
+// owner opts out or the author deletes it before delivery.
+func (s *Server) RemoveTeammateComment(id string) {
+	s.set(func() {
+		s.comments = slices.DeleteFunc(s.comments, func(c sessionstream.TeammateComment) bool { return c.ID == id })
+	})
+}
+
+// FailTeammateLookup makes appends answer without a pending list
+// (teammate_comments_listed false and no notes), as a server whose lookup erred.
+func (s *Server) FailTeammateLookup(on bool) { s.set(func() { s.listFails = on }) }
+
+// RefuseOpensAsNameTaken answers every open 409 session_name_taken (action stop).
+func (s *Server) RefuseOpensAsNameTaken(on bool) { s.set(func() { s.nameTaken = on }) }
+
+// RefuseAcks answers the next n acks with this refusal and records nothing: a
+// 503 (action retry) is a transient outage, a 400 (action fix) a permanent one.
+func (s *Server) RefuseAcks(n int, status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.ackRefusal, s.ackRefusals = &x, n })
+}
+
+// DropAcksBeforeRecording closes the connection on the next n acks before the
+// server records them: the caller sees a network error, the server nothing.
+func (s *Server) DropAcksBeforeRecording(n int) { s.set(func() { s.ackDropBefore = n }) }
+
+// DropAcksAfterRecording records the next n acks, then closes the connection
+// without an answer: the caller must treat the ack as unsent and send it again.
+func (s *Server) DropAcksAfterRecording(n int) { s.set(func() { s.ackDropAfter = n }) }
+
+// AckAttempts are the ack requests received, in order, as their callers saw them.
+func (s *Server) AckAttempts() []AckAttempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AckAttempt(nil), s.ackAttempts...)
 }

@@ -204,6 +204,7 @@ type Daemon struct {
 	sessionFinalizeHandler *agentwork.SessionFinalizeHandler
 	sessionWatcher         *agentwork.SessionWatcherManager
 	liveSessions           *LiveSessions // real-time session streaming (ADR-247); nil without a ledger/endpoint
+	teammateComments       *teammateCommentInbox
 	whisperRegistry        *WhisperRegistry
 	murmurNudgeSource      *MurmurNudgeSource
 	projectWatcher         *GitPollWatcher
@@ -1524,6 +1525,25 @@ func (d *Daemon) initComponents() time.Duration {
 	// starts before its Ledger clone and must still stream.
 	if cacheBase := paths.LedgerSessionCacheBase(config.GetRepoID(d.config.ProjectRoot), projectEndpoint); cacheBase != "" {
 		d.liveSessions = NewLiveSessions(d.logger, filepath.Join(cacheBase, "sessions"), endpoint.NormalizeEndpoint(projectEndpoint))
+		d.teammateComments = &teammateCommentInbox{
+			logger:   d.logger,
+			registry: func() *WhisperRegistry { return d.whisperRegistry },
+			live:     func() *LiveSessions { return d.liveSessions },
+			recipientFor: agentRecordingDir(d.config.ProjectRoot, func() []string {
+				if d.heartbeat == nil {
+					return nil
+				}
+				var ids []string
+				for _, a := range d.heartbeat.GetActivitySummary().Agents {
+					ids = append(ids, a.Key)
+				}
+				return ids
+			}),
+			now:     time.Now,
+			enabled: config.TeammateNotesEnabled,
+		}
+		d.liveSessions.onTeammateComments = d.teammateComments.receive
+		d.liveSessions.drainShown = d.teammateComments.drainAllShown
 		d.sessionWatcher.SetLiveDrainer(func(sessionDir string) {
 			d.liveSessions.Spooled(d.ctx, sessionDir)
 		})
@@ -2065,6 +2085,10 @@ func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool
 }
 
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
+	// the recording stopped: notes still waiting for it must not outlive it
+	if s.d.teammateComments != nil && validateSessionName(payload.SessionName) == nil {
+		s.d.teammateComments.purgeSession(s.d.ctx, payload.SessionName)
+	}
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
 		return
@@ -2198,6 +2222,20 @@ func (s *daemonServiceImpl) LiveSessionDrain(payload LiveSessionDrainPayload) {
 		return
 	}
 	s.d.liveSessions.Drain(s.d.ctx, payload.SessionPath)
+}
+
+func (s *daemonServiceImpl) TeammateCommentsTake(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error) {
+	if s.d.teammateComments == nil {
+		return TeammateCommentsTakeResponse{}, nil
+	}
+	return s.d.teammateComments.lease(s.d.ctx, payload)
+}
+
+func (s *daemonServiceImpl) TeammateCommentsConfirm(payload TeammateCommentsConfirmPayload) error {
+	if s.d.teammateComments == nil {
+		return nil
+	}
+	return s.d.teammateComments.confirm(s.d.ctx, payload)
 }
 
 func (s *daemonServiceImpl) Activity() {
