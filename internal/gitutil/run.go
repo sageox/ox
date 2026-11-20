@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -22,6 +23,53 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
 	}
 	return sanitized, nil
+}
+
+// RunGitFileOutput is RunGit with git's output sent to a file instead of a
+// pipe. Use it for a command that must finish even if this process dies under
+// it, such as a push. Through a pipe, git's next write after this process died
+// kills git with SIGPIPE; a session push orphaned at Claude Code's SessionEnd
+// died that way after authenticating, before it sent anything
+// (sageox/ox#1936). A file has no reader to lose.
+func RunGitFileOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("git: missing subcommand")
+	}
+	output, err := runWithFileOutput(localGitCommand(ctx, repoPath, args...))
+	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
+	if err != nil {
+		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
+	}
+	return sanitized, nil
+}
+
+// runWithFileOutput runs cmd with stdout and stderr in one temporary file and
+// returns what it wrote, like CombinedOutput. The file is unlinked as soon as
+// cmd starts: cmd keeps its descriptor, so a parent that dies leaves no file
+// behind (Windows cannot unlink an open file; it is removed after the read).
+func runWithFileOutput(cmd *exec.Cmd) ([]byte, error) {
+	f, err := os.CreateTemp("", "ox-git-output-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+	cmd.Stdout, cmd.Stderr = f, f
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(f.Name())
+	runErr := cmd.Wait()
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.Join(runErr, err)
+	}
+	output, err := io.ReadAll(f)
+	if err != nil {
+		return output, errors.Join(runErr, err)
+	}
+	return output, runErr
 }
 
 // RunGitStdout returns Git's stdout without stderr diagnostics or sanitization.

@@ -408,9 +408,11 @@ func TestWaitForSessionStop(t *testing.T) {
 	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 
+	status := func(t *testing.T) string { return filepath.Join(t.TempDir(), "exit-status") }
+
 	t.Run("finished", func(t *testing.T) {
 		exe, calls, _ := fakeOxStop(t, "", "0", 0)
-		require.NoError(t, waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), time.Minute))
+		require.NoError(t, waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), status(t), time.Minute))
 		got, err := os.ReadFile(calls)
 		require.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(string(got)), "\n")
@@ -421,7 +423,7 @@ func TestWaitForSessionStop(t *testing.T) {
 
 	t.Run("failed", func(t *testing.T) {
 		exe, _, _ := fakeOxStop(t, "", "0", 3)
-		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), time.Minute)
+		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), status(t), time.Minute)
 		require.ErrorIs(t, err, errSessionStopFailed)
 		assert.NotErrorIs(t, err, errSessionStopNotLaunched, "it ran, so it may have marked the recording")
 		assert.NotErrorIs(t, err, errSessionStopStillRunning)
@@ -433,7 +435,7 @@ func TestWaitForSessionStop(t *testing.T) {
 		}
 		exe, _, done := fakeOxStop(t, "", "1", 0)
 		start := time.Now()
-		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), 50*time.Millisecond)
+		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), status(t), 50*time.Millisecond)
 		require.ErrorIs(t, err, errSessionStopStillRunning)
 		assert.Less(t, time.Since(start), time.Second, "the hook stops waiting at its bound")
 		require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond,
@@ -441,9 +443,118 @@ func TestWaitForSessionStop(t *testing.T) {
 	})
 
 	t.Run("cannot start", func(t *testing.T) {
-		err := waitForSessionStop(sessionStopCommand(filepath.Join(t.TempDir(), "missing-ox"), projectRoot, "OxAb12"), time.Minute)
+		err := waitForSessionStop(sessionStopCommand(filepath.Join(t.TempDir(), "missing-ox"), projectRoot, "OxAb12"), status(t), time.Minute)
 		require.ErrorIs(t, err, errSessionStopNotLaunched)
 	})
+}
+
+// TestRunSessionStopWith_StopSurvivesTheHooksTreeBeingKilled reproduces
+// sageox/ox#1936 at the hook's process boundary. About 1.5 s after Claude Code
+// starts the SessionEnd hook it signals every process in the hook's tree by
+// parent PID, then kills the hook. A setsid'd stop was still in that tree, so
+// its push died and the session never reached the Ledger. Here a hook process
+// starts the stop and is killed the same way while the stop still works: the
+// stop is not in the tree the kill walks, and it finishes.
+func TestRunSessionStopWith_StopSurvivesTheHooksTreeBeingKilled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no parent-PID tree kill to escape")
+	}
+	// The fake stop is held at a release gate until the kill is over, so it
+	// is still working when the hook's tree dies, whatever the scheduling.
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "ox")
+	started, release, done := filepath.Join(dir, "started"), filepath.Join(dir, "release"), filepath.Join(dir, "done")
+	script := "#!/bin/sh\n" +
+		"touch '" + started + "'\n" +
+		"i=0; while [ ! -e '" + release + "' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n" +
+		"printf '{\\n  \"success\": true\\n}\\n'\n" +
+		"touch '" + done + "'\n"
+	require.NoError(t, os.WriteFile(exe, []byte(script), 0o755))
+	hook := exec.Command(os.Args[0], "-test.run=^TestHelperSessionEndHook$")
+	hook.Env = append(os.Environ(), "OX_TEST_SESSION_END_HOOK="+exe) // safe: the helper runs only the fake ox script, in TestMain's sandbox
+	require.NoError(t, hook.Start())
+	hookDone := make(chan struct{})
+	go func() { _ = hook.Wait(); close(hookDone) }()
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
+
+	require.Eventually(t, func() bool { _, err := os.Stat(started); return err == nil }, 10*time.Second, 10*time.Millisecond)
+	// the launcher's shell has exited and the stop runs on outside the hook's
+	// tree; a stop started as the hook's own child never gets here
+	require.Eventually(t, func() bool { return len(processTree(t, hook.Process.Pid)) == 1 }, 10*time.Second, 10*time.Millisecond,
+		"the running stop must leave the hook's process tree")
+
+	// kill the hook's tree as Claude Code does: every process whose ancestry
+	// reaches the hook, found by parent PID at the moment of the kill
+	for _, pid := range processTree(t, hook.Process.Pid) {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	}
+	<-hookDone
+	require.NoError(t, os.WriteFile(release, nil, 0o600))
+
+	require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond,
+		"the stop must finish its upload after the hook's whole tree was killed")
+}
+
+// TestSweepAbandonedStopDirs: a hook Claude Code killed never removes its stop
+// folder, which can hold the session's summary. The next hook removes folders
+// no live hook can own, and nothing else.
+func TestSweepAbandonedStopDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.TempDir ignores TMPDIR on Windows, so the sweep root cannot be isolated here")
+	}
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	now := time.Now()
+	mk := func(name string, age time.Duration) string {
+		dir := filepath.Join(tmp, name)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "result.json"), []byte("{}"), 0o600))
+		require.NoError(t, os.Chtimes(dir, now.Add(-age), now.Add(-age)))
+		return dir
+	}
+	abandoned := mk("ox-session-stop-111", 3*sessionEndStopWait)
+	live := mk("ox-session-stop-222", sessionEndStopWait)
+	unrelated := mk("other-folder", 3*sessionEndStopWait)
+	target := mk("target", 3*sessionEndStopWait)
+	require.NoError(t, os.Symlink(target, filepath.Join(tmp, "ox-session-stop-333")))
+
+	sweepAbandonedStopDirs(now)
+
+	assert.NoDirExists(t, abandoned, "a folder no live hook can own is removed")
+	assert.DirExists(t, live, "a hook may still be waiting on this one")
+	assert.DirExists(t, unrelated)
+	assert.FileExists(t, filepath.Join(target, "result.json"), "a symlink is never followed")
+}
+
+// TestHelperSessionEndHook stands in for `ox agent hook` at SessionEnd: it
+// runs the stop it is given and waits for it, as handleEnd does.
+func TestHelperSessionEndHook(t *testing.T) {
+	exe := os.Getenv("OX_TEST_SESSION_END_HOOK")
+	if exe == "" {
+		t.Skip("helper process for TestRunSessionStopWith_StopSurvivesTheHooksTreeBeingKilled")
+	}
+	_ = runSessionStopWith(exe, t.TempDir(), "OxAb12", time.Minute)
+}
+
+// processTree lists root and every process descending from it, by parent PID.
+func processTree(t *testing.T, root int) []int {
+	t.Helper()
+	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=").Output()
+	require.NoError(t, err)
+	children := map[int][]int{}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		var pid, ppid int
+		if _, err := fmt.Sscan(line, &pid, &ppid); err == nil {
+			children[ppid] = append(children[ppid], pid)
+		}
+	}
+	tree := []int{root}
+	for i := 0; i < len(tree); i++ {
+		tree = append(tree, children[tree[i]]...)
+	}
+	return tree
 }
 
 // TestRunSessionStopProcess_NeverRunsTheTestBinary: under go test the stop is
