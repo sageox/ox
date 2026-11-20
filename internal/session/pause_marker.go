@@ -37,16 +37,17 @@ type pauseMarkerPayload struct {
 	RootAgentID  string `json:"root_agent_id,omitempty"`
 	RootPID      int    `json:"root_pid,omitempty"`
 	RootPIDStart int64  `json:"root_pid_start,omitempty"`
-	// Person marks a pause a person asked for. Its PID and PIDStart then name
-	// the paused agent's own process, not a launcher's, so it is not inherited.
-	Person bool `json:"person,omitempty"`
+	// PersonPID and PersonPIDStart name the process of an agent a person
+	// paused. They are keys of their own, never PID/PIDStart: an older ox
+	// reads a positive PID as an inherited pause, and would keep a chain
+	// paused after the person resumed the root.
+	PersonPID      int   `json:"person_pid,omitempty"`
+	PersonPIDStart int64 `json:"person_pid_start,omitempty"`
 }
 
 // inherited reports whether the marker records a pause inherited down a
 // launch chain rather than one a person asked for.
-func (p pauseMarkerPayload) inherited() bool {
-	return !p.Person && (p.PID > 0 || p.RootAgentID != "")
-}
+func (p pauseMarkerPayload) inherited() bool { return p.PID > 0 || p.RootAgentID != "" }
 
 func (p pauseMarkerPayload) anchor() PauseAnchor {
 	return PauseAnchor{PID: p.PID, Start: p.PIDStart, RootAgentID: p.RootAgentID, RootPID: p.RootPID, RootStart: p.RootPIDStart}
@@ -60,10 +61,17 @@ func (p pauseMarkerPayload) anchor() PauseAnchor {
 // an agent launched while /clear has removed the recording state can still
 // tell that this paused agent runs (PausedRootAnchor).
 func MarkExplicitPause(projectRoot, agentID string, seq int) error {
-	payload := pauseMarkerPayload{Seq: seq, At: time.Now().UTC(), Person: true}
-	if state, err := LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil && state.ParentPID > 0 {
-		own := ProcessAnchorOf(state.ParentPID)
-		payload.PID, payload.PIDStart = own.PID, own.Start
+	payload := pauseMarkerPayload{Seq: seq, At: time.Now().UTC()}
+	if state, err := LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil {
+		// a process that ended, or whose PID now names another process, is
+		// not the paused agent; anchoring on it would hold a pause nobody set
+		pid, start := state.ParentPID, state.ParentStartTime
+		if pid > 0 && proc.IsAlive(pid) && !proc.IsReused(pid, start) {
+			if start == 0 {
+				start = ProcessAnchorOf(pid).Start
+			}
+			payload.PersonPID, payload.PersonPIDStart = pid, start
+		}
 	}
 	return writePauseMarker(projectRoot, agentID, payload)
 }
@@ -73,10 +81,10 @@ func MarkExplicitPause(projectRoot, agentID string, seq int) error {
 // marker written before processes were recorded names none and holds nothing.
 func PausedRootAnchor(projectRoot, agentID string) (PauseAnchor, bool) {
 	p, found := readPauseMarker(projectRoot, agentID)
-	if !found || !p.Person || !processLive(p.PID, p.PIDStart) {
+	if !found || p.inherited() || !processLive(p.PersonPID, p.PersonPIDStart) {
 		return PauseAnchor{}, false
 	}
-	return PauseAnchor{PID: p.PID, Start: p.PIDStart}, true
+	return PauseAnchor{PID: p.PersonPID, Start: p.PersonPIDStart}, true
 }
 
 // PauseAnchor is what a pause inherited down a launch chain lasts for. A
@@ -148,7 +156,12 @@ func processLive(pid int, start int64) bool {
 // inherited pause names, or launcher itself, with its agent process, when a
 // person paused it.
 func LaunchedPauseAnchor(projectRoot, launcher string, processPID int) PauseAnchor {
-	own := ProcessAnchorOf(processPID)
+	return LaunchedPauseAnchorFrom(projectRoot, launcher, ProcessAnchorOf(processPID))
+}
+
+// LaunchedPauseAnchorFrom is LaunchedPauseAnchor for a launcher process whose
+// start time was already validated, so the PID is not sampled a second time.
+func LaunchedPauseAnchorFrom(projectRoot, launcher string, own PauseAnchor) PauseAnchor {
 	// a launcher a person paused is the root; its process outlives /clear
 	anchor := PauseAnchor{RootAgentID: launcher, RootPID: own.PID, RootStart: own.Start}
 	if p, found := readPauseMarker(projectRoot, launcher); found && p.inherited() {

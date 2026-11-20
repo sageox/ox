@@ -93,7 +93,7 @@ func (c matrixCell) agentRecords() bool {
 		// a Cursor root ends by its recording state going away
 		stateAlive = false
 	}
-	return !(stateAlive || processLive)
+	return !stateAlive && !processLive
 }
 
 func TestPauseChainMatrix(t *testing.T) {
@@ -187,7 +187,7 @@ func reuseRootPID(t *testing.T, projectRoot, repoID, rootID, childID string) {
 	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, rootID, func(s *session.RecordingState) {
 		s.ParentStartTime = otherStart
 	}))
-	// the root's own person-set marker names its process too
+	// the root's own person-set marker names its process too, under its own keys
 	for _, id := range []string{rootID, childID} {
 		marker := filepath.Join(session.GetContextPath(repoID), "sessions", ".session_paused."+id)
 		data, err := os.ReadFile(marker)
@@ -197,7 +197,7 @@ func reuseRootPID(t *testing.T, projectRoot, repoID, rootID, childID string) {
 		require.NoError(t, err)
 		var payload map[string]any
 		require.NoError(t, json.Unmarshal(data, &payload))
-		for _, key := range []string{"pid_start", "root_pid_start"} {
+		for _, key := range []string{"pid_start", "root_pid_start", "person_pid_start"} {
 			if _, ok := payload[key]; ok {
 				payload[key] = otherStart
 			}
