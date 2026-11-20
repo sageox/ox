@@ -21,7 +21,7 @@ import (
 // described wrongly. Reflection means a new field cannot skip this check.
 func TestEveryGlobalKeyBindingAppearsInHelpView(t *testing.T) {
 	gk := app.DefaultGlobalKeys()
-	rows := helpViewRows(newHelpOverlay(gk, app.DefaultPaneKeys()).View(120, 60))
+	rows := helpViewRows(newHelpOverlay(gk).View(120, 60))
 
 	fields := reflect.ValueOf(gk)
 	require.Positive(t, fields.NumField(), "GlobalKeyMap has no fields; nothing was checked")
@@ -45,7 +45,7 @@ func TestEveryGlobalKeyBindingAppearsInHelpView(t *testing.T) {
 // modal past 24 rows, so its top and bottom are cut off on an 80x24 terminal.
 func TestHelpViewFitsAStandardTerminal(t *testing.T) {
 	const terminalRows = 24
-	view := newHelpOverlay(app.DefaultGlobalKeys(), app.DefaultPaneKeys()).View(80, terminalRows)
+	view := helpFactory().View(80, terminalRows)
 	var modalRows int
 	for _, line := range strings.Split(ansi.Strip(view), "\n") {
 		if strings.TrimSpace(line) != "" {
