@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -120,7 +121,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	onDisk := err == nil
 	pending := err == nil && st.Status == StatusPending
 	switch {
-	case pending && !st.OpenSent && !mayHoldPrompt(dir):
+	case pending && !st.OpenSent && !mayHoldPromptFrom(dir, st.SeedBytes):
 		// local only: an open already sent may have created the conversation,
 		// so only a stream the server has never heard of waits
 		return st, ErrAwaitingPrompt
@@ -176,6 +177,19 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if deleteRequested(dir) {
 		return abortedWhileOpening(ctx, cfg, st)
 	}
+	if err != nil && st.Reopen {
+		nst, fell, ferr := fallBackFromRefusedReopen(ctx, cfg, dir, st, err)
+		if ferr != nil {
+			return State{}, ferr
+		}
+		if fell {
+			st = nst
+			_, err = c.Open(ctx, st.ConversationID, openRequest(st))
+			if deleteRequested(dir) {
+				return abortedWhileOpening(ctx, cfg, st)
+			}
+		}
+	}
 	if err != nil {
 		var eerr error
 		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
@@ -186,6 +200,9 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if pending {
 		st.Status = StatusStreaming
 	}
+	// the server took the reopen: the new layer is live, and any later open of
+	// it (a retry, a new_layer restart) is an ordinary one
+	st.Reopen = false
 	s := &session{cfg: cfg, dir: dir, st: st}
 	s.edgeCleared(ctx)
 	st = s.st
@@ -202,7 +219,13 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 // unreadable spool proves nothing. Either way the stream opens, so a prompt the
 // spool could not carry is declared on the stream, never hidden as an empty
 // session.
-func mayHoldPrompt(dir string) bool {
+func mayHoldPrompt(dir string) bool { return mayHoldPromptFrom(dir, 0) }
+
+// mayHoldPromptFrom is mayHoldPrompt for the spool bytes at and after from. A
+// reopened stream's spool starts with the stopped session's own lines (State
+// SeedBytes), which hold prompts that were already published; only what the
+// person types after the resume may open it.
+func mayHoldPromptFrom(dir string, from int64) bool {
 	if lost := readLost(dir); lost.pending || lost.recorded > 0 {
 		return true
 	}
@@ -214,6 +237,11 @@ func mayHoldPrompt(dir string) bool {
 		return true
 	}
 	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	if from > 0 {
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			return true // cannot prove the tail is promptless
+		}
+	}
 	// Bounded per line: this runs before authorize, on a spool in a checkout a
 	// Ledger contributor can write to, so a planted newline-free spool must not
 	// make the probe allocate it whole. The spool never holds a line longer
@@ -307,8 +335,16 @@ func disableOnKeyConflict(dir, ep string, st State, err error) (State, error) {
 }
 
 func openRequest(st State) sessionstream.OpenSessionRequest {
+	// The server requires session_id to be the ses_ twin of the conversation id
+	// in the path. A reopened conversation belongs to the first recording of the
+	// session, so the twin comes from the conversation, not from the recording
+	// that streams it now (identical for every stream that never reopened).
+	sessionID := st.SessionID
+	if twin, ok := sessionTwin(st.ConversationID); ok {
+		sessionID = twin
+	}
 	return sessionstream.OpenSessionRequest{
-		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: st.SessionID,
+		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: sessionID, Reopen: st.Reopen,
 		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
 		ParentSessionID: st.ParentSessionID, ContinuedFromSessionID: st.ContinuedFromSessionID,
 	}

@@ -464,6 +464,7 @@ func (s *session) restartLayer(ctx context.Context) error {
 	next := s.st
 	next.LayerID = "clyr_" + uuid.Must(uuid.NewV7()).String()
 	next.Acked = 0
+	next.Reopen = false // a replacement layer is never a reopen
 	if _, err := s.c.Open(ctx, next.ConversationID, openRequest(next)); err != nil {
 		var api *sessionstream.APIError
 		if errors.As(err, &api) {

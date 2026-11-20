@@ -144,7 +144,7 @@ func openPending(ctx context.Context, cfg Config, dir string) error {
 func endIfPromptless(ctx context.Context, dir string, st State) (bool, error) {
 	empty := false
 	err := withSwapLock(ctx, dir, func() error {
-		if mayHoldPrompt(dir) {
+		if mayHoldPromptFrom(dir, st.SeedBytes) {
 			return nil
 		}
 		st.Status, st.CloseRequested = StatusEmpty, false

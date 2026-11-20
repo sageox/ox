@@ -89,7 +89,7 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 	if state.SessionPath == "" {
 		return nil
 	}
-	liveSessionFinish(ctx.ProjectRoot, state, "", liveEndCloseBudget)
+	liveSessionFinish(ctx.ProjectRoot, state, nil, liveEndCloseBudget)
 	// a hook has no one to tell about a withheld secret: the stream stays
 	// marked, and the next session start or stop in this project says it
 	settleLiveSecretWithheldNotice(state)

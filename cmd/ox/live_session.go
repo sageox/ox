@@ -126,6 +126,9 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	if state.RecordedManualPublishing() {
 		return
 	}
+	// found before the previous stream is retired below: when both recordings
+	// share a folder, retiring removes the files the reopen copies from
+	reopenSrc := liveReopenSource(projectRoot, state)
 	switch prev, err := livesession.ReadState(state.SessionPath); {
 	case errors.Is(err, livesession.ErrNotStreaming):
 	case err != nil:
@@ -151,11 +154,24 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	defer cancel()
 	log := slog.With("session_id", state.SessionID)
 	parent, continuedFrom := liveSessionLinks(state)
-	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{
+	params := livesession.OpenParams{
 		SessionID: state.SessionID, SessionName: session.GetSessionName(state.SessionPath),
 		RepoID: repoID, Agent: agent, StartedAt: state.StartedAt,
 		ParentSessionID: parent, ContinuedFromSessionID: continuedFrom,
-	}); err != nil {
+	}
+	if reopenSrc != nil {
+		if _, err := livesession.PrepareReopen(ctx, liveConfig(projectRoot), state.SessionPath, params, reopenSrc); err != nil {
+			// no state was written for this recording, so it simply does not
+			// stream; the stopped conversation is left as it was
+			log.Warn("live_session_prepare_reopen_failed", "conversation_id", reopenSrc.State.ConversationID, "error", err)
+			return
+		}
+		// the copied spool already starts with the session's header
+		log.Info("live_session_prepared_reopen", "conversation_id", reopenSrc.State.ConversationID, "seed_bytes", len(reopenSrc.Spool))
+		liveKickDaemon(state.SessionPath)
+		return
+	}
+	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, params); err != nil {
 		log.Warn("live_session_prepare_failed", "error", err)
 		return
 	}
@@ -165,6 +181,24 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	}
 	log.Info("live_session_prepared")
 	liveKickDaemon(state.SessionPath)
+}
+
+// liveReopenSource is the stopped stream of the recording this one continues
+// (the same native agent session, prompted again after a stop), when it may be
+// reopened; see livesession.FindReopenSource. Nil otherwise, including on any
+// failure: the recording then streams as a conversation of its own.
+func liveReopenSource(projectRoot string, state *session.RecordingState) *livesession.ReopenSource {
+	if state.ContinuedFromSessionID == "" || session.IsHeld(state.SessionPath) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+	defer cancel()
+	src, err := livesession.FindReopenSource(ctx, liveConfig(projectRoot), filepath.Dir(state.SessionPath), state.ContinuedFromSessionID)
+	if err != nil {
+		slog.Warn("live_session_reopen_lookup_failed", "session_id", state.SessionID, "continued_from", state.ContinuedFromSessionID, "error", err)
+		return nil
+	}
+	return src
 }
 
 // liveSessionLinks are the links a recording's stream opens with: the ses_ id
@@ -506,7 +540,7 @@ type liveFinish struct {
 // stream deleted on SageOx, or one belonging to another recording, is left
 // alone. A delete that could not be recorded is logged; the session is held
 // either way, and abort reports it.
-func liveSessionFinish(projectRoot string, state *session.RecordingState, summary string, budget time.Duration) liveFinish {
+func liveSessionFinish(projectRoot string, state *session.RecordingState, summarize func() string, budget time.Duration) liveFinish {
 	if state == nil || state.SessionPath == "" {
 		return liveFinish{}
 	}
@@ -515,6 +549,12 @@ func liveSessionFinish(projectRoot string, state *session.RecordingState, summar
 		return liveFinish{}
 	}
 	if !liveSessionHeld(projectRoot, state) {
+		// generated only here: a held session publishes nothing, so its
+		// transcript is never handed to a model for a summary nobody may see
+		summary := ""
+		if summarize != nil && (st.Status == livesession.StatusPending || st.Status == livesession.StatusStreaming || st.Status == livesession.StatusClosing) {
+			summary = summarize()
+		}
 		liveSessionClose(projectRoot, state.SessionPath, summary, budget)
 		return liveFinish{}
 	}

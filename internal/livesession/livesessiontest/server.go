@@ -81,6 +81,7 @@ type Server struct {
 	refuseDelete     bool
 	appendRefusal    *reply
 	closeRefusal     *reply
+	reopenRefusal    *reply
 	deferRecovery    bool
 	rateLimit        int
 	rateLimitMS      int64
@@ -276,10 +277,20 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 		strings.TrimPrefix(req.SessionID, "ses_") != strings.TrimPrefix(cnv, "cnv_") {
 		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
 	}
+	if req.Reopen && s.reopenRefusal != nil {
+		x := *s.reopenRefusal
+		s.reopenRefusal = nil
+		return x
+	}
 	c := s.convs[cnv]
 	if c == nil {
 		c = &conversation{sessionID: req.SessionID, layers: map[string]*layerState{}}
 		s.convs[cnv] = c
+	}
+	// As api-go's reopen: the owner's signed open with reopen adds a layer to a
+	// conversation whose client closed it. A deleted one stays refused.
+	if req.Reopen && c.closed != nil && !c.deleted {
+		c.closed = nil
 	}
 	if rep := s.liveGuard(c); rep != nil {
 		return *rep

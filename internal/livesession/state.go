@@ -105,6 +105,21 @@ type State struct {
 	ParentSessionID        string `json:"parent_session_id,omitempty"`
 	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
 
+	// Reopen marks a stream that resumes a conversation its person stopped:
+	// the first open is sent with reopen set, so the server adds a layer to
+	// the stopped conversation instead of minting one. Cleared once the
+	// server has taken the open.
+	Reopen bool `json:"reopen,omitempty"`
+	// SeedBytes is the length of the spool prefix copied from the stopped
+	// stream (Reopen only). It is the part of the stream already published
+	// once; a prompt in it does not count as one typed since the resume.
+	SeedBytes int64 `json:"seed_bytes,omitempty"`
+	// OwnSessionName and OwnStartedAt are this recording's own identity, kept
+	// while SessionName and StartedAt name the reopened conversation, so a
+	// refused reopen can stream the recording as a conversation of its own.
+	OwnSessionName string    `json:"own_session_name,omitempty"`
+	OwnStartedAt   time.Time `json:"own_started_at,omitzero"`
+
 	// OpenSent is recorded before a pending session's first open request
 	// leaves this machine. The server may then hold the conversation even
 	// though the reply never arrived, so abort must delete it.
