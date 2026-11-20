@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sessions reach the Ledger when Claude Code exits** — at `/exit`, Claude Code ends its SessionEnd hook about 1.5 s in by killing every process the hook started, and that took the session's upload with it: the session stayed on the machine, waiting for `ox doctor`. The upload now runs outside the hook's processes and finishes on its own, and if an upload still dies the daemon retries it within seconds instead of ten minutes later. A session deleted on SageOx while it streamed is still never published.
 - **Sessions in a Git worktree beside the repo are saved** — a Claude Code session run in a worktree outside the main checkout is now found and uploaded at stop. When nothing is found, `session stop` reports failure, says why, and gives the exact `recover` or `ox session import` command instead of claiming success; `session recover` does the same.
 - **Long sessions import** — `ox agent <id> session import` reads entries up to 10 MiB; one over 1 MiB (a screenshot, long tool output) no longer fails the import, and one too large to save names its line. Its help and output now say it adds planning history, and point to `ox session import` for the full conversation.
 - **Add-ons and team memory reach the team** — `ox addons` changes and `ox memory put` push to Team Context and report when a change is still local. The daemon retries on the next sync.

@@ -220,6 +220,9 @@ type SessionFinalizeHandler struct {
 	// warnedOnce remembers which "<site>|<session>" conditions already logged a
 	// Warn, for conditions that persist across detect scans (see warnOnce).
 	warnedOnce sync.Map
+	// uploadProbed maps each .upload-retry-pending marker HasNewOrphanedUpload
+	// has settled to the marker's mod time, so a marker is reported once.
+	uploadProbed sync.Map
 	// afterStageTestHook is called right after `git add` stages the session
 	// path, before the commit. Nil in production; tests use it to perturb the
 	// worktree between staging and commit and confirm the commit still
@@ -596,6 +599,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 		)
 		if hasRecordingMarker {
 			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+			// The ghost grace period guards against a dead transient shell PID
+			// in a young recording whose agent lives on. An orphaned upload is
+			// proof the other way: a stop ended this capture, and it died
+			// before publishing (sageox/ox#1936). Waiting out the grace would
+			// leave the session off the Ledger for up to ten minutes. Only in
+			// a cache dir, the only place recordings and markers live.
+			if repair && recMethod == stalenessPIDDeadGrace && sessionsDir != filepath.Join(ledgerPath, "sessions") &&
+				uploadOrphaned(sessionDir, ledgerPath) {
+				recStale, recMethod = true, stalenessUploadOrphaned
+			}
 		}
 		if !repair && hasRecordingMarker && !recStale {
 			// A failed stop can leave the owner alive after capture has stopped.
@@ -619,7 +632,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 		// The time threshold remains acceptable for the NON-draft recovery
 		// further below, where it has always been the fallback and no
 		// still-live claim is being overridden.
-		abandoned := hasRecordingMarker && recMethod == stalenessPIDDead
+		abandoned := hasRecordingMarker && (recMethod == stalenessPIDDead || recMethod == stalenessUploadOrphaned)
 
 		_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
 
@@ -743,6 +756,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
 				// A busy capture writer can be retried on the next detect pass.
 				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
+					// decided before this lock: if a hook appended since, the
+					// marker no longer matches and the grace period applies again
+					if recMethod == stalenessUploadOrphaned && session.PendingUploadID(sessionDir) == "" {
+						return errors.New("pending upload no longer matches the recording")
+					}
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath, h.projectRoot)
 					if err != nil {
