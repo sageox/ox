@@ -98,6 +98,12 @@ type State struct {
 	RepoID      string    `json:"repo_id,omitempty"`
 	Agent       string    `json:"agent,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitzero"`
+	// ParentSessionID and ContinuedFromSessionID are the session links every
+	// open sends (sessionstream.OpenSessionRequest). Kept here because the
+	// open usually runs later, in the daemon, when the parent's recording may
+	// already have ended.
+	ParentSessionID        string `json:"parent_session_id,omitempty"`
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
 
 	// OpenSent is recorded before a pending session's first open request
 	// leaves this machine. The server may then hold the conversation even

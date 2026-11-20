@@ -153,6 +153,17 @@ type OpenSessionRequest struct {
 	// Agent names the coding agent, such as "claude-code".
 	Agent     string    `json:"agent"`
 	StartedAt time.Time `json:"started_at"`
+	// ParentSessionID is the ses_ id of the recorded session whose shell
+	// launched this session's coding agent (a `claude -p` or `codex exec`
+	// child), optional. The server keeps it only when that session is the same
+	// person's, in the same team and repo; anything else is dropped, never
+	// refused. Readers list this session inside its parent's.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// ContinuedFromSessionID is the ses_ id of the earlier recording this one
+	// continues (the same native coding-agent session, reopened after its
+	// recording ended), optional, kept on the same terms. Readers show the two
+	// as one session.
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
 }
 
 // SessionStatus is a streamed session's lifecycle as readers see it.

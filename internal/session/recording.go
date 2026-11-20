@@ -160,6 +160,11 @@ type RecordingState struct {
 	// back to the parent session for aggregation.
 	ParentSessionPath string `json:"parent_session_path,omitempty"` // path to parent's session folder
 	ParentAgentID     string `json:"parent_agent_id,omitempty"`     // parent's agent ID (e.g., "Oxa7b3")
+	// ParentSessionID is the parent recording's ses_ id, captured when the
+	// parent was chosen. The live stream sends it later, by which time the
+	// parent may have ended or /clear may have replaced its recording, so it
+	// is never looked up again.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 
 	AgentType      string `json:"agent_type,omitempty"`      // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
 	StopIncomplete bool   `json:"stop_incomplete,omitempty"` // set when stop returned retry guidance (empty file)
@@ -1474,6 +1479,7 @@ type StartRecordingOptions struct {
 	// Parent session tracking for subagent workflows
 	ParentSessionPath string // path to parent's session folder (optional)
 	ParentAgentID     string // parent's agent ID (optional)
+	ParentSessionID   string // parent recording's ses_ id (optional)
 
 	AgentType   string // original agent type for metadata (e.g., "codex", "amp")
 	Model       string // LLM model for generic adapters
@@ -1658,6 +1664,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		Branch:                 opts.Branch,
 		ParentSessionPath:      opts.ParentSessionPath,
 		ParentAgentID:          opts.ParentAgentID,
+		ParentSessionID:        opts.ParentSessionID,
 		AgentType:              opts.AgentType,
 		Model:                  opts.Model,
 		ParentPID:              opts.ParentPID,

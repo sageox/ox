@@ -54,7 +54,7 @@ func newAmpThreadFixture(t *testing.T) *orbSessionFixture {
 func (f *orbSessionFixture) prime(t *testing.T) *session.RecordingState {
 	t.Helper()
 	prior, _ := ReadSessionMarker(orbThreadURL)
-	status := startSessionRecording(f.projectRoot, f.agentID, "amp", "", recordingSessionIDFromMarker(prior), orbThreadURL)
+	status := startSessionRecording(f.projectRoot, f.agentID, "amp", inheritedParent{}, recordingSessionIDFromMarker(prior), orbThreadURL)
 	require.NotNil(t, status)
 	require.True(t, status.Recording, "prime must record the thread")
 	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
