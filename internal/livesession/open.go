@@ -61,7 +61,9 @@ func newState(cfg Config, cnv string, status Status, p OpenParams) State {
 // open session re-registers and re-opens on the same layer (both idempotent),
 // keeping the acknowledged offset. A key conflict writes status disabled and returns
 // ErrKeyConflict; an open answered "deleted" or "closed" records that final
-// status; any other failure leaves the state as it was (a fresh session then
+// status, one refused as session_name_taken records disabled, and one refused
+// as feature_off is settled by what earlier opens left (featureOff); any other
+// failure leaves the state as it was (a fresh session then
 // has none and simply does not stream).
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
 	cfg, err := cfg.withDefaults()
@@ -169,6 +171,15 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		}
 		return disableOnKeyConflict(dir, cfg.Endpoint, st, err)
 	}
+	// read before this open is recorded below: what earlier opens of this layer
+	// left the server holding
+	prior := neverAdmitted
+	switch {
+	case onDisk && !pending:
+		prior = admitted
+	case pending && st.OpenSent:
+		prior = maybeAdmitted
+	}
 	if pending && !st.OpenSent {
 		// the server may create the conversation even if its reply is lost;
 		// abort deletes only what it knows may exist (C2)
@@ -197,6 +208,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		}
 		if fell {
 			st = nst
+			prior = neverAdmitted // a new layer no earlier open has reached
 			req = openRequest(cfg, st)
 			_, err = c.Open(ctx, st.ConversationID, req)
 			if deleteRequested(dir) {
@@ -209,7 +221,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
 			return State{}, eerr
 		}
-		return openRefused(ctx, cfg, dir, st, err)
+		return openRefused(ctx, cfg, dir, st, prior, err)
 	}
 	if pending {
 		st.Status = StatusStreaming
@@ -314,11 +326,26 @@ func openAnswered(ctx context.Context, cfg Config, dir string, st State, onDisk 
 	return s.st, eerr
 }
 
+// priorOpen is what earlier opens of a stream's layer left the server holding.
+type priorOpen int
+
+const (
+	// neverAdmitted: no earlier open of this layer was sent.
+	neverAdmitted priorOpen = iota
+	// maybeAdmitted: one was sent and never answered 200 here (its reply was
+	// lost, or the state write after it failed): the layer may exist.
+	maybeAdmitted
+	// admitted: one was answered 200, so the layer exists.
+	admitted
+)
+
 // openRefused records an open answered "deleted" or "closed" exactly as the
 // same answer to an append is recorded, so a session someone deleted while its
-// open reply was lost is held, not published. Any other failure leaves the
-// state as it was for a later attempt.
-func openRefused(ctx context.Context, cfg Config, dir string, st State, err error) (State, error) {
+// open reply was lost is held, not published. An open refused as
+// session_name_taken disables the stream; one refused as feature_off is
+// settled by prior (featureOff). Any other failure leaves the state as it was
+// for a later attempt.
+func openRefused(ctx context.Context, cfg Config, dir string, st State, prior priorOpen, err error) (State, error) {
 	var api *sessionstream.APIError
 	if errors.As(err, &api) {
 		s := &session{cfg: cfg, dir: dir, st: st}
@@ -329,14 +356,50 @@ func openRefused(ctx context.Context, cfg Config, dir string, st State, err erro
 		if done {
 			return s.st, nil
 		}
-		if api.Body.Reason == sessionstream.ReasonSessionNameTaken {
+		switch api.Body.Reason {
+		case sessionstream.ReasonSessionNameTaken:
 			// another person owns this session name in this repo; no retry can
 			// change that, so the stream ends here instead of looping every tick
 			s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
 			return s.st, nil
+		case sessionstream.ReasonFeatureOff:
+			// matched on the reason, not on action stop: other stop refusals
+			// keep the retry
+			return s.featureOff(ctx, api, prior, err)
 		}
 	}
 	return State{}, fmt.Errorf("open live session: %w", err)
+}
+
+// featureOff settles an open refused feature_off: the rollout flag is off for
+// this person though the client's settings cache (up to 2 h old) said on.
+// api-go checks the flag on every open and never on an append or close, so
+// what to do depends on whether the layer may already exist (prior). Retrying
+// the open would loop every tick, rerunning the summary model before each
+// try once the session stopped. raw.jsonl and the v1 upload are untouched.
+//
+//   - neverAdmitted: nothing exists on the server; the stream is disabled, and
+//     the next session asks again.
+//   - maybeAdmitted: the stream is promoted to streaming on its layer, and its
+//     next append settles it: it lands (the lost open was admitted) and the
+//     stream closes as usual, or it is refused not_found (action stop) and the
+//     drain disables it. Disabled outright, an admitted layer read as live on
+//     SageOx until the auto-finish.
+//   - admitted: left as it is, the refusal returned. The SessionEnd hook's probe
+//     open is the one that meets this; the hook then requests the close and the
+//     daemon sends it.
+func (s *session) featureOff(ctx context.Context, api *sessionstream.APIError, prior priorOpen, err error) (State, error) {
+	switch prior {
+	case admitted:
+		return State{}, fmt.Errorf("open live session: %w", err)
+	case maybeAdmitted:
+		s.log().InfoContext(ctx, "live_session_open_refused_after_lost_reply", "reason", api.Body.Reason, "status", api.Status,
+			"impact", "streams on the layer; the next append settles whether it exists")
+		s.setStatus(ctx, StatusStreaming)
+		return s.st, nil
+	}
+	s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
+	return s.st, nil
 }
 
 // disableOnKeyConflict records a disabled session for a 409 on key registration.

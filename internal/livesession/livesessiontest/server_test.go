@@ -288,6 +288,33 @@ func TestServerOpenRefusalsAndLostReplies(t *testing.T) {
 	}
 }
 
+// RefuseNextOpens answers n valid opens, reopen or not, creates nothing, and
+// leaves an invalid open to the validation it would fail anyway.
+func TestServerRefuseNextOpensAnswersNValidOpens(t *testing.T) {
+	f := newFixture(t)
+	f.register()
+
+	f.s.RefuseNextOpens(2, http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
+	bad := f.openReq()
+	bad.SessionID = "ses_01900000-0000-7000-8000-00000000ffff"
+	_, err := f.c.Open(context.Background(), testCnv, bad)
+	wantRefusal(t, err, http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix)
+
+	reopen := f.openReq()
+	reopen.Reopen = true
+	_, err = f.c.Open(context.Background(), testCnv, reopen)
+	wantRefusal(t, err, http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
+	_, err = f.open()
+	wantRefusal(t, err, http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
+	if got := f.s.Layers(testCnv); len(got) != 0 {
+		t.Fatalf("a refused open created layers: %v", got)
+	}
+
+	if _, err := f.open(); err != nil {
+		t.Fatalf("the refusal answers n opens only: %v", err)
+	}
+}
+
 func TestServerAppendKnobsRefuseThenRecover(t *testing.T) {
 	f := newFixture(t)
 	f.ready()

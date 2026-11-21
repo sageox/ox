@@ -79,6 +79,14 @@ func (s *Server) RefuseNextClose(status int, reason string, action sessionstream
 	s.set(func() { x := refusal(status, reason, action, stored); s.closeRefusal = &x })
 }
 
+// RefuseNextOpens answers the next n valid opens (PUT), reopen or not, with
+// this refusal, where api-go's admission refuses one: after the request
+// validates, before any layer is created. RefuseNextOpens(n, 403, feature_off,
+// stop) is the rollout flag turned off after the client's settings cache said on.
+func (s *Server) RefuseNextOpens(n int, status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.openRefusal, s.openRefusals = &x, n })
+}
+
 // RefuseNextReopen answers the next open that carries reopen with this refusal;
 // an open without reopen is never affected.
 func (s *Server) RefuseNextReopen(status int, reason string, action sessionstream.Action) {

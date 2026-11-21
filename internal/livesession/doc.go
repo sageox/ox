@@ -23,7 +23,8 @@
 //	stream-state.json    stream state: ids, endpoint, acked offset, status
 //	live.lock            advisory lock taken by whoever appends to or drains the spool
 //	close-requested      stop asked for the close; kept until the stream ends, so
-//	                     a close that could not take live.lock is never lost
+//	                     a close that could not take live.lock is never lost.
+//	                     Empty, or naming the one recording it is for
 //	delete-requested     abort recorded (or completed) the server-side delete;
 //	                     while it exists the session reads as deleted
 //	spool-lost           one line per batch Spool could not write; append-only,
