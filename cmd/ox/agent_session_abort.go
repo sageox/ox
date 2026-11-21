@@ -498,6 +498,12 @@ func removeLedgerDraftForAbort(sessionName string) (bool, string) {
 	return res.Deleted, res.PushWarning
 }
 
+func dropReopenStashOfDiscard(projectRoot, sessionName, sessionID, stashID string) {
+	if err := livesession.DropReopenStash(liveConfig(projectRoot), sessionID, stashID); err != nil {
+		slog.Warn("failed to remove the reopen copy of a discarded session", "session", sessionName, "error", err)
+	}
+}
+
 // killFinalizedSession removes a finalized/persisted session and ALL of the
 // summarized data around it: the git-tracked ledger directory (meta.json,
 // summary.md, summary.json, session.md, plan.md, context-trace.jsonl, and the
@@ -541,21 +547,24 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 		}
 	}
 
-	// A discard leaves no reopen copy of the transcript behind, even when the
-	// session's cache folder was pruned and only the stash remains.
-	if err := livesession.DropReopenStash(liveConfig(projectRoot), abortedSessionID, stashID); err != nil {
-		slog.Warn("failed to remove the reopen copy of a discarded session", "session", sessionName, "error", err)
-	}
-
 	// Remove the git-tracked ledger directory: git rm -r + commit + push. A
 	// failure that leaves the directory in place killed nothing, so take the
 	// record back; once git rm ran, a later push still carries the kill.
 	if err := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); err != nil {
 		if _, statErr := os.Stat(ledgerSessionDir); statErr == nil {
+			// nothing was killed, so the reopen copy stays: the person can
+			// still resume a session that was not discarded
 			undoAbortRecord()
+		} else {
+			// git rm ran and only the push failed: the kill stands
+			dropReopenStashOfDiscard(projectRoot, sessionName, abortedSessionID, stashID)
 		}
 		return fmt.Errorf("failed to remove finalized session %q from the ledger: %w", sessionName, err)
 	}
+	// A discard leaves no reopen copy of the transcript behind, even when the
+	// session's cache folder was pruned and only the stash remains. It goes
+	// only once the ledger copy is gone, so a failed delete keeps the resume.
+	dropReopenStashOfDiscard(projectRoot, sessionName, abortedSessionID, stashID)
 
 	// A pushed session's cache can still hold its live stream until the daemon
 	// closes it (agentwork.PruneSessionCache). A kill deletes that copy on

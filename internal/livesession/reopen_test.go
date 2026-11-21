@@ -587,7 +587,7 @@ func TestDiscardingASessionRemovesItsReopenStash(t *testing.T) {
 
 func TestCloseOfNeverClosesAnotherRecordingsStream(t *testing.T) {
 	s := newStopped(t)
-	res, err := livesession.CloseOf(t.Context(), s.cfg, s.dir, sessionid.GenerateSessionID(), "someone else's summary", testBudget)
+	res, err := livesession.CloseOf(t.Context(), s.cfg, s.dir, sessionid.GenerateSessionID(), livesession.Summary{Text: "someone else's summary"}, testBudget)
 	if !errors.Is(err, livesession.ErrOtherRecording) || res.Done {
 		t.Fatalf("close of another recording's stream: %+v %v", res, err)
 	}

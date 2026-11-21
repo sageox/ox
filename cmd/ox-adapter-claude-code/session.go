@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -138,32 +139,108 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 }
 
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	// Keep a trailing partial record unconsumed; otherwise a concurrent Claude
-	// write can make validation pass while this reader silently drops the turn.
-	// Every complete record is read: a stop or recovery makes one read and
-	// finalizes from it, so a read that stopped early would lose the tail of the
-	// session. The response is bounded by capping image bytes instead.
-	var imageBytes int64
-	return adapterruntime.TailJSONL(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
-		entries, err := parseLine(line)
-		for i := range entries {
-			if m := entries[i].Media; m != nil && len(m.Data) > 0 {
-				if imageBytes += int64(len(m.Data)); imageBytes > maxImageBytesPerRead {
-					m.Data, m.Skipped = nil, adapterprotocol.MediaSkippedReadLimit
-				}
-			}
-		}
-		return entries, err
-	})
+	return readPage(path, offset, maxReadResponseBytes)
 }
 
-// maxImageBytesPerRead bounds the image bytes one read carries. The daemon
-// cancels an adapter whose one-shot output passes 64 MiB, and bytes ride the
-// response base64-encoded (a third larger): nine 6 MiB screenshots, each line
-// under the per-line cap, would fail every read and block text capture behind
-// them. Images past the cap become declared gaps; text is never cut. The live
-// watcher reads every couple of seconds, so a burst this large is rare.
-const maxImageBytesPerRead = 24 << 20
+// maxReadResponseBytes bounds one read-from-offset response as serialized. The
+// daemon cancels an adapter whose one-shot output (stdout and stderr together)
+// passes 64 MiB and keeps the old cursor, so a catch-up that ever serialized
+// past it would fail on every retry and capture would never advance. Pasted
+// images ride the response as bytes and tool results are whole file contents,
+// so a backlog of either crosses it easily. Smaller pages cost one more
+// adapter subprocess per page; 48 MiB keeps a 16 MiB margin for the JSON
+// framing, stderr, and encoder drift, which the tests check against the real
+// response.
+const maxReadResponseBytes = 48 << 20
+
+// responseFramingBytes covers what the response adds around its entries:
+// {"entries":[ ... ],"new_offset":<int64>} and the trailing newline.
+const responseFramingBytes = 64
+
+// readPage reads complete records from offset while the response stays under
+// limit bytes, and returns the offset of the first record it left for the next
+// read. Records are never cut: the external adapter drains pages until the
+// cursor reaches the end, so a stop or recovery still sees every record. A
+// trailing partial record stays unconsumed, as in every read: a concurrent
+// Claude write could otherwise make validation pass while the turn is dropped.
+func readPage(path string, offset, limit int64) ([]adapterprotocol.RawEntry, int64, error) {
+	room := limit - responseFramingBytes
+	var used int64
+	parse := func(line []byte) ([]adapterprotocol.RawEntry, error) {
+		entries, err := parseLine(line)
+		if err != nil {
+			return nil, err
+		}
+		if n := responseBytes(entries); n > room {
+			// no page could ever carry it; without this every read would stop
+			// before it again, or carry it past the daemon's limit and fail
+			entries = omitOversizedRecord(entries)
+			log.Printf("read-from-offset: a %d-byte record exceeds the %d-byte response budget; its text and image bytes are replaced by a gap marker", n, room)
+		}
+		return entries, nil
+	}
+	fits := func(entries []adapterprotocol.RawEntry) bool {
+		n := responseBytes(entries)
+		if used+n > room {
+			return false
+		}
+		used += n
+		return true
+	}
+	return adapterruntime.TailJSONLUntil(path, offset, parse, fits)
+}
+
+// responseBytes is the size entries add to a response, encoded the way
+// adapterruntime writes it (no HTML escaping). Each Encode ends in a newline,
+// which stands in for the separating comma.
+func responseBytes(entries []adapterprotocol.RawEntry) int64 {
+	var w countingWriter
+	enc := json.NewEncoder(&w)
+	enc.SetEscapeHTML(false)
+	for i := range entries {
+		// a RawEntry holds only strings, bools, ints and bytes, which always
+		// encode; the writer never fails
+		_ = enc.Encode(&entries[i])
+	}
+	return w.n
+}
+
+type countingWriter struct{ n int64 }
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
+}
+
+// omittedRecordText replaces the text of a record no response could carry.
+// Only a record that serializes far larger than its line can reach this: a
+// line is at most 10 MiB, and a tool input dense in "<", ">" or "&" is escaped
+// twice, up to seven bytes for each one in the transcript.
+const omittedRecordText = "[ox: this transcript record was too large to capture]"
+
+// omitOversizedRecord keeps a record's entries, their roles, tools and call
+// ids, so the turn and its tool pairing survive as a declared gap; their text
+// and image bytes do not.
+func omitOversizedRecord(entries []adapterprotocol.RawEntry) []adapterprotocol.RawEntry {
+	out := make([]adapterprotocol.RawEntry, len(entries))
+	for i, e := range entries {
+		for _, field := range []*string{&e.Content, &e.ToolInput, &e.ToolOutput} {
+			if *field != "" {
+				*field = omittedRecordText
+			}
+		}
+		if e.Media != nil {
+			m := *e.Media
+			m.Data = nil
+			if m.Skipped == "" {
+				m.Skipped = adapterprotocol.MediaSkippedReadLimit
+			}
+			e.Media = &m
+		}
+		out[i] = e
+	}
+	return out
+}
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
 	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {

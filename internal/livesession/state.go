@@ -10,13 +10,16 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
 )
 
 const (
 	stateFileName = "stream-state.json"
 	spoolFileName = "spool.jsonl"
-	lockFileName  = "live.lock"
+	// the hold writer takes this same lock (session.WriteHoldMarkerFor), so
+	// the name lives in the session package
+	lockFileName = oxsession.LiveLockFileName
 	// closeRequestFileName marks that stop asked for the close. It is a file of
 	// its own, written without live.lock, because a drain may hold the lock for
 	// longer than stop can wait, and a drain persisting stream-state.json would
@@ -128,6 +131,12 @@ type State struct {
 	// reopen can finish its fallback after cache pruning removed raw.jsonl.
 	OwnHeader    string    `json:"own_header,omitempty"`
 	OwnStartedAt time.Time `json:"own_started_at,omitzero"`
+
+	// AwaitReopen is set on a pending stream that may yet reopen the
+	// conversation of the recording it continues, whose close had not
+	// finished when this one began (see ReopenAwait). Nothing opens the
+	// stream while it is set.
+	AwaitReopen *ReopenAwait `json:"await_reopen,omitempty"`
 
 	// ManualStop is set (from the manual-stop file) when the person stopped the
 	// session with `ox session stop`. Sticky: once persisted it stays.

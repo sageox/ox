@@ -443,3 +443,115 @@ func TestReadFromOffsetJSONL_ReturnsTheProtocolShape(t *testing.T) {
 		t.Errorf("NewOffset %d, want %d", res.NewOffset, info.Size())
 	}
 }
+
+// budgetedFits admits records while their text totals at most limit bytes,
+// the way an adapter keeps one response under the protocol's output limit.
+func budgetedFits(limit int) func([]adapterprotocol.RawEntry) bool {
+	used := 0
+	return func(entries []adapterprotocol.RawEntry) bool {
+		n := 0
+		for _, e := range entries {
+			n += len(e.Content)
+		}
+		if used+n > limit {
+			return false
+		}
+		used += n
+		return true
+	}
+}
+
+// drainUntil reads pages from offset until the cursor stops moving, as the
+// external adapter does, and returns every page.
+func drainUntil(t *testing.T, path string, offset int64, limit int) [][]adapterprotocol.RawEntry {
+	t.Helper()
+	var pages [][]adapterprotocol.RawEntry
+	for range 100 { // test watchdog only: a wedged cursor fails below
+		entries, next, err := TailJSONLUntil(path, offset, testParse, budgetedFits(limit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next == offset {
+			return pages
+		}
+		if next < offset {
+			t.Fatalf("cursor went back from %d to %d", offset, next)
+		}
+		pages = append(pages, entries)
+		offset = next
+	}
+	t.Fatal("the cursor never stopped moving")
+	return nil
+}
+
+func TestTailJSONLUntil_PagesEveryRecordExactlyOnceInOrder(t *testing.T) {
+	// junk and an unterminated tail ride along: neither is a record fits is
+	// asked about, and the partial one must stay unread
+	content := line("aaaa") + line("bb") + "not json\n" + line("cccc") + line("d") + line("eeeeee") + line("ff") + `{"type":"message","text":"partial`
+	path := writeFile(t, content)
+
+	pages := drainUntil(t, path, 0, 6)
+	var got []string
+	for i, page := range pages {
+		n := 0
+		for _, e := range page {
+			n += len(e.Content)
+		}
+		if n > 6 {
+			t.Errorf("page %d holds %d bytes of text, over the limit of 6", i, n)
+		}
+		got = append(got, texts(page)...)
+	}
+	if strings.Join(got, ",") != "aaaa,bb,cccc,d,eeeeee,ff" {
+		t.Fatalf("drained %v, want every record exactly once, in order", got)
+	}
+	if len(pages) < 3 {
+		t.Fatalf("pages = %d, want the limit to split the read", len(pages))
+	}
+	_, next, err := TailJSONLUntil(path, 0, testParse, func([]adapterprotocol.RawEntry) bool { return true })
+	if err != nil || next != int64(strings.LastIndex(content, "\n")+1) {
+		t.Fatalf("next = %d, %v: the unterminated record must stay unread", next, err)
+	}
+}
+
+// A record larger than any page must still move the cursor: an adapter that
+// could never return it would retry the same read forever.
+func TestTailJSONLUntil_TakesARecordNoPageCouldHold(t *testing.T) {
+	path := writeFile(t, line("huge-one")+line("huge-two")+line("small"))
+	pages := drainUntil(t, path, 0, 2)
+	if len(pages) != 3 {
+		t.Fatalf("pages = %d, want one per record", len(pages))
+	}
+	for i, want := range []string{"huge-one", "huge-two", "small"} {
+		if got := texts(pages[i]); len(got) != 1 || got[0] != want {
+			t.Fatalf("page %d = %v, want only %q", i, got, want)
+		}
+	}
+}
+
+// With nothing rejected it is TailJSONL: same entries, same cursor, through
+// every edge case TailJSONL handles.
+func TestTailJSONLUntil_AcceptingEverythingMatchesTailJSONL(t *testing.T) {
+	huge := `{"type":"message","text":"` + strings.Repeat("x", maxLineBytes+1024) + `"}` + "\n"
+	content := line("one") + "garbage\n" + huge + "\n" + `{"type":"message","text":"crlf"}` + "\r\n" + line("two") + `{"type":"message"`
+	path := writeFile(t, content)
+
+	want, wantNext, err := TailJSONL(path, 0, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, gotNext, err := TailJSONLUntil(path, 0, testParse, func([]adapterprotocol.RawEntry) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(texts(got), ",") != strings.Join(texts(want), ",") || gotNext != wantNext {
+		t.Fatalf("until = %v @%d, TailJSONL = %v @%d", texts(got), gotNext, texts(want), wantNext)
+	}
+}
+
+func TestTailJSONLUntil_RequiresAFitsCheck(t *testing.T) {
+	path := writeFile(t, line("one"))
+	if _, _, err := TailJSONLUntil(path, 0, testParse, nil); err == nil {
+		t.Error("a nil fits check silently read without a bound")
+	}
+}

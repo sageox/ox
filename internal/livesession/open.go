@@ -118,6 +118,18 @@ const openLockWait = 5 * time.Second
 
 func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) (State, error) {
 	st, err := ReadState(dir)
+	if err == nil && st.Status == StatusPending && st.AwaitReopen != nil {
+		// resolved before anything else, even with no prompt spooled yet: the
+		// wait's deadline runs from the start, not from the first prompt
+		if st, err = settleAwait(ctx, cfg, dir, st, false); err != nil {
+			return State{}, err
+		}
+		if st.AwaitReopen != nil {
+			// opening now would mint the conversation the wait may yet replace
+			cfg.Logger.DebugContext(ctx, "live_session_open_deferred", "session_id", st.SessionID, "conversation_id", st.ConversationID, "reason", "awaiting_reopen")
+			return st, nil
+		}
+	}
 	onDisk := err == nil
 	pending := err == nil && st.Status == StatusPending
 	switch {

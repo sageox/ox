@@ -86,7 +86,13 @@ func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entri
 		Prompt: prompt, WorkDir: workDir, Model: model, Isolated: true, TimeoutOverride: livesession.SummaryBudget,
 	})
 	if err != nil {
-		return "", fmt.Errorf("run summarizer: %w", err)
+		// the runner's error can quote up to 2 KiB of the CLI's stdout or
+		// stderr, which is transcript-derived model text, and BoundedSummary
+		// logs this error: keep only the cancel or deadline cause
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("run summarizer: %w", ctxErr)
+		}
+		return "", errors.New("run summarizer failed")
 	}
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("summarizer exited with code %d", res.ExitCode)

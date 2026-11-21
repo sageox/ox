@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,13 +16,15 @@ import (
 type fakeSummaryRunner struct {
 	available bool
 	run       func(ctx context.Context, req agentwork.RunRequest) (*agentwork.RunResult, error)
-	calls     int
+	// atomic: a runner abandoned at the bound is still running when the
+	// summary returns, so the test reads this while it may be written
+	calls atomic.Int32
 }
 
 func (f *fakeSummaryRunner) Available() bool { return f.available }
 
 func (f *fakeSummaryRunner) Run(ctx context.Context, req agentwork.RunRequest) (*agentwork.RunResult, error) {
-	f.calls++
+	f.calls.Add(1)
 	return f.run(ctx, req)
 }
 
@@ -37,12 +40,14 @@ const liveSummaryJSON = `{"title":"Retry for the upload client","summary":"Added
 
 func TestSummarizeBounded(t *testing.T) {
 	tests := []struct {
-		name      string
-		entries   []sessionsummary.Entry
-		runner    *fakeSummaryRunner
-		fireClock bool
+		name    string
+		entries []sessionsummary.Entry
+		runner  *fakeSummaryRunner
+		// hang: the runner blocks until its context ends, and the bound fires
+		// only once it is running
+		hang      bool
 		want      string // substring of the summary; "" means an empty summary
-		wantCalls int
+		wantCalls int32
 	}{
 		{
 			name:    "summary is generated and rendered",
@@ -83,28 +88,64 @@ func TestSummarizeBounded(t *testing.T) {
 		{
 			name:    "a hung summarizer is abandoned at the bound",
 			entries: summaryEntries(),
-			runner: &fakeSummaryRunner{available: true, run: func(ctx context.Context, _ agentwork.RunRequest) (*agentwork.RunResult, error) {
-				<-ctx.Done() // only the bound's cancel ends it
-				return nil, ctx.Err()
-			}},
-			fireClock: true, want: "", wantCalls: 1,
+			runner:  &fakeSummaryRunner{available: true},
+			hang:    true, want: "", wantCalls: 1,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			entered := make(chan struct{})
+			observed := make(chan error, 1)
+			if tt.hang {
+				tt.runner.run = func(ctx context.Context, _ agentwork.RunRequest) (*agentwork.RunResult, error) {
+					close(entered)
+					<-ctx.Done() // only the bound's cancel ends it
+					observed <- ctx.Err()
+					return nil, ctx.Err()
+				}
+			}
 			clock := make(chan time.Time, 1)
-			if tt.fireClock {
+			got := make(chan string, 1)
+			go func() {
+				got <- livesession.BoundedSummary(t.Context(), livesession.SummaryRun{
+					After: func(time.Duration) <-chan time.Time { return clock },
+					Summarize: func(ctx context.Context) (string, error) {
+						return Summarize(ctx, tt.runner, "claude-code", tt.entries)
+					},
+				})
+			}()
+			if tt.hang {
+				// fire the bound only after the runner is running, so the case
+				// cannot pass by timing out before the summarizer starts
+				select {
+				case <-entered:
+				case <-time.After(10 * time.Second): // test watchdog only
+					t.Fatal("the summarizer never started")
+				}
 				clock <- time.Time{}
 			}
-			got := livesession.BoundedSummary(t.Context(), livesession.SummaryRun{
-				After: func(time.Duration) <-chan time.Time { return clock },
-				Summarize: func(ctx context.Context) (string, error) {
-					return Summarize(ctx, tt.runner, "claude-code", tt.entries)
-				},
-			})
-			if tt.want == "" && got != "" || !strings.Contains(got, tt.want) {
-				t.Fatalf("summary = %q, want containing %q", got, tt.want)
+			var summary string
+			select {
+			case summary = <-got:
+			case <-time.After(10 * time.Second): // test watchdog only
+				t.Fatal("BoundedSummary did not return")
+			}
+			if tt.want == "" && summary != "" || !strings.Contains(summary, tt.want) {
+				t.Fatalf("summary = %q, want containing %q", summary, tt.want)
+			}
+			if tt.hang {
+				select {
+				case err := <-observed:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("runner context ended with %v, want context.Canceled", err)
+					}
+				case <-time.After(10 * time.Second): // test watchdog only
+					t.Fatal("the abandoned summarizer's context was never canceled")
+				}
+			}
+			if calls := tt.runner.calls.Load(); calls != tt.wantCalls {
+				t.Fatalf("runner calls = %d, want %d", calls, tt.wantCalls)
 			}
 		})
 	}
@@ -137,5 +178,25 @@ func TestSummaryErrorNeverCarriesSummaryContent(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), leaked) {
 		t.Fatalf("error %q quotes rejected summary content, which BoundedSummary logs", err)
+	}
+}
+
+func TestRunnerErrorNeverCarriesCLIOutput(t *testing.T) {
+	t.Parallel()
+	// ClaudeRunner quotes up to 2 KiB of the CLI's stdout or stderr in its
+	// error, and that output can be transcript-derived model text
+	const leaked = "SECRET-TRANSCRIPT-EXCERPT"
+	runner := &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+		return nil, errors.New("claude exited with code 1: " + leaked)
+	}}
+	_, err := Summarize(t.Context(), runner, "claude-code", summaryEntries())
+	if err == nil {
+		t.Fatal("a failed summarizer run was accepted")
+	}
+	if strings.Contains(err.Error(), leaked) {
+		t.Fatalf("error %q quotes the CLI's output, which BoundedSummary logs", err)
+	}
+	if calls := runner.calls.Load(); calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", calls)
 	}
 }

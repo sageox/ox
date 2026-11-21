@@ -411,10 +411,12 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		l.clearBackoff(dir)
 		log.DebugContext(ctx, "live_session_step_skipped", "reason", "awaiting_first_prompt")
 	case errors.Is(err, livesession.ErrUntrustedState):
-		// livesession logged it once at Error; nothing was sent, and a retry
-		// cannot change the answer, so no backoff and no line per tick
-		l.clearBackoff(dir)
-		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "error", err)
+		// livesession logged it once at Error; nothing was sent or summarized.
+		// Backed off, never cleared: a forged state is refused again at most
+		// once per backoff cap rather than every sweep, and a real stream
+		// caught mid-rebind still recovers on the next attempt.
+		delay := l.fail(dir, 0, started)
+		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "retry_in_ms", delay.Milliseconds(), "error", err)
 	case errors.Is(err, livesession.ErrEdgeBlocked):
 		// same backoff as any retryable failure; livesession logged the streak
 		// once at Error and logs when it clears, so a line per retry is noise
@@ -423,6 +425,11 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 	case err != nil:
 		delay := l.fail(dir, res.RetryAfter, started)
 		log.WarnContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
+	case res.Done && st.AwaitReopen != nil:
+		// a continuation waiting on its predecessor's close: every tick until it
+		// resolves (up to the await deadline) would otherwise log at Info
+		l.clearBackoff(dir)
+		log.DebugContext(ctx, "live_session_step_done", "status_before", string(st.Status), "awaiting_reopen", true)
 	case res.Done:
 		l.clearBackoff(dir)
 		log.InfoContext(ctx, "live_session_step_done", "status_before", string(st.Status))
@@ -455,6 +462,12 @@ func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.
 func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
 	cfg := l.config(l.endpoint)
 	if st.Status == livesession.StatusClosing || st.CloseRequested {
+		// the summary runs the person's own model CLI over the spool, and this
+		// state may be a Ledger forgery that Close would refuse only after it:
+		// check provenance first, so a refused state never reaches the model
+		if err := livesession.VerifyProvenance(ctx, cfg, dir, st); err != nil {
+			return livesession.DrainResult{}, err
+		}
 		// every close carries a summary: a SessionEnd hook only requests the
 		// close (it has no time for the model), so this is where it is written
 		summary := ""
@@ -467,7 +480,9 @@ func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.S
 			l.logger.InfoContext(ctx, "live_session_summary_dropped", "session", filepath.Base(dir), "reason", "held_during_summary")
 			return livesession.DrainResult{}, nil
 		}
-		return livesession.Close(ctx, cfg, dir, summary, livesession.CloseBudget)
+		// tagged with the conversation it was written for: a close that finds the
+		// stream on another one (a reopen resolved or fell back meanwhile) drops it
+		return livesession.CloseOf(ctx, cfg, dir, "", livesession.Summary{Text: summary, ConversationID: st.ConversationID}, livesession.CloseBudget)
 	}
 	if st.Status == livesession.StatusPending {
 		// bounded like a drain: a token refresh inside open is otherwise held only

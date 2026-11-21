@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/secretguard"
 	// aliased: this package's own session type would shadow it
 	oxsession "github.com/sageox/ox/internal/session"
@@ -127,10 +128,11 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 	if err != nil {
 		return DrainResult{}, err
 	}
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	var res DrainResult
-	err = withLock(ctx, dir, budget, func() error {
+	err = withLockWithin(ctx, parent, dir, budget, func() error {
 		s, err := loadSession(cfg, dir)
 		if err != nil {
 			return err
@@ -146,6 +148,25 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 		return err
 	})
 	return res, err
+}
+
+// withLockWithin runs fn holding dir's live.lock, waiting at most budget, where
+// ctx is parent bounded by that same budget (a Drain's or a Close's). The lock
+// wait and the budget then run out together, and which one the wait notices
+// first is chance (a loaded machine decides it). A budget spent waiting for
+// the lock before fn ran is therefore always the lock timeout it is, never a
+// bare deadline, so a wedged lock holder reads the same every time. A caller's
+// own cancellation (parent done) is returned as is.
+func withLockWithin(ctx, parent context.Context, dir string, budget time.Duration, fn func() error) error {
+	ran := false
+	err := withLock(ctx, dir, budget, func() error {
+		ran = true
+		return fn()
+	})
+	if !ran && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return &fileutil.ErrLockTimeout{Path: fileutil.LockPath(LockTarget(dir)), Timeout: budget}
+	}
+	return err
 }
 
 func (s *session) caughtUp() bool {
@@ -435,8 +456,10 @@ func (s *session) deletedByServer(ctx context.Context) error {
 	}
 	s.st.Status, s.st.DeletedOnServer = StatusDeleted, true
 	// the hold names this stream's recording: the folder may pass to a new
-	// recording restarted within the minute, and it must not be held by this one
-	holdErr := oxsession.WriteHoldMarkerFor(s.dir, oxsession.HoldDeletedOnServer, "live_stream", s.st.SessionID)
+	// recording restarted within the minute, and it must not be held by this one.
+	// Every drain, open and close that hears a 410 holds live.lock, and the
+	// unlocked writer would wait on it (flock is per open file): the locked one.
+	holdErr := oxsession.WriteHoldMarkerForLocked(s.dir, oxsession.HoldDeletedOnServer, "live_stream", s.st.SessionID)
 	stateErr := s.persist()
 	if holdErr != nil && stateErr != nil {
 		err := errors.Join(holdErr, stateErr)
