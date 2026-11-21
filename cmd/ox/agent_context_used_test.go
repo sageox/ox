@@ -485,16 +485,89 @@ func TestAgentContextUsed_CountsOnStatusline(t *testing.T) {
 		})
 	}
 
-	t.Run("not recording writes no status-line state", func(t *testing.T) {
-		projectRoot := setupSessionTestProject(t)
-		cacheDir := agentTraceCacheDir(projectRoot)
-		require.NoError(t, contexttrace.NewWriter(mkdirAll(t, cacheDir)).Append(contexttrace.Event{
-			Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamMemory, Doc: "MEMORY.md",
-		}))
-		var buf bytes.Buffer
-		require.NoError(t, runAgentContextAt(&buf, projectRoot, "OxSuNR", []string{"used", "memory.md"}))
-		assert.NoDirExists(t, filepath.Join(projectRoot, ".sageox", "cache", "statusline"))
-	})
+}
+
+// TestAgentContextUsed_StatuslineHarnessSession: a reported use reaches the
+// status line of the one harness session the AI coworker runs in, whether or
+// not that session is recording. Without a recording the harness session
+// comes from the agent's primed session marker, and an agent ID primed in two
+// harness sessions names neither. Failure prevented: a primed but unrecorded
+// session reports `context used` and the bar never moves, or a use lands on
+// the wrong harness session (or agent-wide) when the agent is ambiguous.
+func TestAgentContextUsed_StatuslineHarnessSession(t *testing.T) {
+	const (
+		sessA = "c1a2b3c4-0000-4000-8000-00000000000a"
+		sessB = "c1a2b3c4-0000-4000-8000-00000000000b"
+	)
+	tests := []struct {
+		name       string
+		markers    []string // AgentSessionIDs of primed markers for the agent
+		recording  string   // when set, a live recording bound to this harness session
+		statusline bool
+		want       map[string]oxactivity.Counts // harness session -> counts
+	}{
+		{
+			name: "not recording, one primed marker", markers: []string{sessA}, statusline: true,
+			want: map[string]oxactivity.Counts{sessA: {Docs: 1, Used: 1}},
+		},
+		{
+			name: "not recording, two primed markers is ambiguous", markers: []string{sessA, sessB}, statusline: true,
+			want: map[string]oxactivity.Counts{sessA: {}, sessB: {}},
+		},
+		{
+			name: "not recording, no marker", statusline: true,
+			want: map[string]oxactivity.Counts{sessA: {}},
+		},
+		{
+			name: "recording bound to a harness session", markers: []string{sessB}, recording: sessA, statusline: true,
+			want: map[string]oxactivity.Counts{sessA: {Docs: 1, Used: 1}, sessB: {}},
+		},
+		{
+			name: "statusline off", markers: []string{sessA}, statusline: false,
+			want: map[string]oxactivity.Counts{sessA: {}},
+		},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentID := fmt.Sprintf("OxSh%02d", i)
+			projectRoot := setupSessionTestProject(t)
+			isolateSessionMarkerDir(t)
+			t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+			setStatusline(t, tt.statusline)
+			for _, sid := range tt.markers {
+				require.NoError(t, WriteSessionMarker(&SessionMarker{AgentID: agentID, AgentSessionID: sid, PrimedAt: time.Now()}))
+			}
+			provided := contexttrace.Event{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamMemory, Doc: "MEMORY.md"}
+			recordingID := ""
+			if tt.recording != "" {
+				state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+					AgentID: agentID, AgentSessionID: tt.recording, AdapterName: "claude-code",
+				})
+				require.NoError(t, err)
+				recordingID = state.SessionID
+				require.NoError(t, contexttrace.NewWriter(state.SessionPath).Append(provided))
+			} else {
+				require.NoError(t, contexttrace.NewWriter(mkdirAll(t, agentTraceCacheDir(projectRoot))).Append(provided))
+			}
+
+			var buf bytes.Buffer
+			require.NoError(t, runAgentContextAt(&buf, projectRoot, agentID, []string{"used", "memory.md"}), buf.String())
+
+			anyUse := false
+			for sid, want := range tt.want {
+				got := oxactivity.LoadState(projectRoot, oxactivity.StateKey(agentID, sid))
+				assert.Equal(t, want, got.Counts(), "harness session %s", sid)
+				if want.Used > 0 && recordingID != "" {
+					assert.Equal(t, recordingID, got.Recording, "state is bound to the live recording")
+				}
+				anyUse = anyUse || want.Used > 0
+			}
+			if !anyUse {
+				assert.NoDirExists(t, filepath.Join(projectRoot, ".sageox", "cache", "statusline"), "no state file written")
+			}
+			assert.Equal(t, oxactivity.Counts{}, oxactivity.LoadState(projectRoot, agentID).Counts(), "never agent-wide")
+		})
+	}
 }
 
 func mkdirAll(t *testing.T, dir string) string {

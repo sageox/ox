@@ -461,11 +461,20 @@ func FlushTeammateAcks(ctx context.Context, cfg Config, dir string, budget time.
 	if rerr != nil || !hasReceiptLog(rdir) {
 		return false, nil
 	}
+	if flushPreflightHook != nil {
+		flushPreflightHook()
+	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	err = withLock(ctx, dir, budget, func() error {
 		s, ok, err := closedStream(ctx, cfg, dir)
 		if err != nil || !ok {
+			return err
+		}
+		// the receipts of the stream authorized under the lock, which may differ
+		// from the one the preflight saw
+		rdir, err := s.receipts()
+		if err != nil {
 			return err
 		}
 		obligations, err := ackObligations(rdir)
@@ -498,6 +507,9 @@ func FlushTeammateAcks(ctx context.Context, cfg Config, dir string, budget time.
 	})
 	return attempted, err
 }
+
+// flushPreflightHook is set only by tests.
+var flushPreflightHook func()
 
 func hasReceiptLog(dir string) bool {
 	for _, name := range []string{teammateAcksFileName, teammateResendsFileName} {

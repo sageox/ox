@@ -1352,9 +1352,7 @@ func setUserConfig(key, value string) error {
 		cfg.SessionDraft = value
 
 	case "session.teammate_notes":
-		if !config.IsValidTeammateNotes(value) {
-			return fmt.Errorf("session.teammate_notes must be one of: on, off")
-		}
+		// value was already checked against the setting's ValidValues above
 		cfg.SessionTeammateNotes = value
 
 	case "attribution.commit":

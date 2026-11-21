@@ -266,7 +266,7 @@ func (r *claudeRecordingFixture) append(id string, lines ...string) {
 func (r *claudeRecordingFixture) prime(nativeID string) string {
 	r.t.Helper()
 	const agentID = "OxRsm1"
-	status := startSessionRecording(r.projectRoot, agentID, "claude", "", "", nativeID)
+	status := startSessionRecording(r.projectRoot, agentID, "claude", inheritedParent{}, "", nativeID)
 	require.NotNil(r.t, status)
 	require.True(r.t, status.Recording, "prime must start recording: %+v", status)
 	state := r.recording(agentID)

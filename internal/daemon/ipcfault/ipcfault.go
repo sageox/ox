@@ -14,20 +14,13 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Fault is what the next request meets. The zero value is a healthy daemon.
 type Fault struct {
-	// Delay holds the request before it is handled, as a daemon stuck behind a
-	// lock does; a client whose read timeout is shorter gives up and goes away.
-	// The request is still handled afterwards: the daemon cannot know.
-	Delay time.Duration
 	// Hold blocks the request until the channel is closed: a daemon stuck behind
 	// a lock for exactly as long as the test decides, with no wall-clock guess.
 	Hold <-chan struct{}
-	// Drop closes the connection without handling the request.
-	Drop bool
 	// CloseMidResponse handles the request, then closes the connection without
 	// sending the response: the work happened, the caller never hears.
 	CloseMidResponse bool
@@ -41,7 +34,6 @@ type Server struct {
 
 	mu       sync.Mutex
 	faults   []Fault
-	requests int
 	wg       sync.WaitGroup // the accept loop
 	done     int            // requests fully served, faults included
 	doneCond *sync.Cond     // signaled when done grows
@@ -80,13 +72,6 @@ func (s *Server) Inject(faults ...Fault) {
 	s.faults = append(s.faults, faults...)
 }
 
-// Requests counts the requests that reached the server.
-func (s *Server) Requests() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.requests
-}
-
 // WaitServed blocks until n requests have been fully served, including ones
 // whose client already gave up. Waiting for a count the test knows it issued is
 // what makes this deterministic: a request a client abandoned may not have been
@@ -123,20 +108,13 @@ func (s *Server) serve(conn net.Conn) {
 		return
 	}
 	s.mu.Lock()
-	s.requests++
 	var f Fault
 	if len(s.faults) > 0 {
 		f, s.faults = s.faults[0], s.faults[1:]
 	}
 	s.mu.Unlock()
-	if f.Drop {
-		return
-	}
 	if f.Hold != nil {
 		<-f.Hold
-	}
-	if f.Delay > 0 {
-		time.Sleep(f.Delay)
 	}
 	reply := s.handler(line)
 	if f.CloseMidResponse {

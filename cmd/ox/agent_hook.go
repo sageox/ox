@@ -1026,7 +1026,13 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 	if ctx.Marker != nil {
 		boundary = ctx.Marker.CursorSourceBoundary
 	}
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
+	// the same parent prime records, so a recording this safety net starts
+	// still knows which session's shell launched this agent
+	var parent inheritedParent
+	if agentID != "" {
+		parent = inheritedParentOf(ctx.ProjectRoot, agentID)
+	}
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, parent, recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
 
 	// Preserve native-session provenance for every observed startup.
 	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)

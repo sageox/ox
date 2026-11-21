@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -38,6 +39,21 @@ type OpenParams struct {
 	// Agent names the coding agent, such as "claude-code".
 	Agent     string
 	StartedAt time.Time
+	// ParentSessionID is the ses_ id of the session whose shell launched this
+	// one's agent; ContinuedFromSessionID the earlier recording this one
+	// continues. Both optional: empty sends neither.
+	ParentSessionID        string
+	ContinuedFromSessionID string
+}
+
+// newState is the stream state of a session this machine has not streamed yet.
+func newState(cfg Config, cnv string, status Status, p OpenParams) State {
+	return State{
+		ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
+		Endpoint: cfg.Endpoint, Status: status,
+		SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
+		ParentSessionID: p.ParentSessionID, ContinuedFromSessionID: p.ContinuedFromSessionID,
+	}
 }
 
 // Open registers the endpoint's signing key, opens the stream on a new layer and
@@ -85,11 +101,7 @@ func Prepare(ctx context.Context, cfg Config, dir string, p OpenParams) (State, 
 		} else if !errors.Is(err, ErrNotStreaming) {
 			return err
 		}
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusPending,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusPending, p)
 		// registered first, bound to this folder: a stream state whose id is
 		// not bound to its folder is refused everywhere (see authorize)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
@@ -106,10 +118,22 @@ const openLockWait = 5 * time.Second
 
 func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) (State, error) {
 	st, err := ReadState(dir)
+	if err == nil && st.Status == StatusPending && st.AwaitReopen != nil {
+		// resolved before anything else, even with no prompt spooled yet: the
+		// wait's deadline runs from the start, not from the first prompt
+		if st, err = settleAwait(ctx, cfg, dir, st, false); err != nil {
+			return State{}, err
+		}
+		if st.AwaitReopen != nil {
+			// opening now would mint the conversation the wait may yet replace
+			cfg.Logger.DebugContext(ctx, "live_session_open_deferred", "session_id", st.SessionID, "conversation_id", st.ConversationID, "reason", "awaiting_reopen")
+			return st, nil
+		}
+	}
 	onDisk := err == nil
 	pending := err == nil && st.Status == StatusPending
 	switch {
-	case pending && !st.OpenSent && !mayHoldPrompt(dir):
+	case pending && !st.OpenSent && !mayHoldPromptFrom(dir, st.SeedBytes):
 		// local only: an open already sent may have created the conversation,
 		// so only a stream the server has never heard of waits
 		return st, ErrAwaitingPrompt
@@ -118,11 +142,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return st, nil // deleted, closed or disabled stay that way
 	case err == nil: // resume on the same layer, keeping acked
 	case errors.Is(err, ErrNotStreaming):
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusStreaming,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusStreaming, p)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
 			return State{}, err
 		}
@@ -170,6 +190,20 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if deleteRequested(dir) {
 		return abortedWhileOpening(ctx, cfg, st)
 	}
+	if err != nil && st.Reopen {
+		nst, fell, ferr := fallBackFromRefusedReopen(ctx, cfg, dir, st, err)
+		if ferr != nil {
+			return State{}, ferr
+		}
+		if fell {
+			st = nst
+			req = openRequest(cfg, st)
+			_, err = c.Open(ctx, st.ConversationID, req)
+			if deleteRequested(dir) {
+				return abortedWhileOpening(ctx, cfg, st)
+			}
+		}
+	}
 	if err != nil {
 		var eerr error
 		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
@@ -180,6 +214,9 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	if pending {
 		st.Status = StatusStreaming
 	}
+	// the server took the reopen: the new layer is live, and any later open of
+	// it (a retry, a new_layer restart) is an ordinary one
+	st.Reopen = false
 	s := &session{cfg: cfg, dir: dir, st: st}
 	s.edgeCleared(ctx)
 	st = s.st
@@ -196,7 +233,13 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 // unreadable spool proves nothing. Either way the stream opens, so a prompt the
 // spool could not carry is declared on the stream, never hidden as an empty
 // session.
-func mayHoldPrompt(dir string) bool {
+func mayHoldPrompt(dir string) bool { return mayHoldPromptFrom(dir, 0) }
+
+// mayHoldPromptFrom is mayHoldPrompt for the spool bytes at and after from. A
+// reopened stream's spool starts with the stopped session's own lines (State
+// SeedBytes), which hold prompts that were already published; only what the
+// person types after the resume may open it.
+func mayHoldPromptFrom(dir string, from int64) bool {
 	if lost := readLost(dir); lost.pending || lost.recorded > 0 {
 		return true
 	}
@@ -208,6 +251,11 @@ func mayHoldPrompt(dir string) bool {
 		return true
 	}
 	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	if from > 0 {
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			return true // cannot prove the tail is promptless
+		}
+	}
 	// Bounded per line: this runs before authorize, on a spool in a checkout a
 	// Ledger contributor can write to, so a planted newline-free spool must not
 	// make the probe allocate it whole. The spool never holds a line longer
@@ -310,9 +358,18 @@ func disableOnKeyConflict(dir, ep string, st State, err error) (State, error) {
 // absent means yes, so a machine that takes notes sends what every older
 // client sent.
 func openRequest(cfg Config, st State) sessionstream.OpenSessionRequest {
+	// The server requires session_id to be the ses_ twin of the conversation id
+	// in the path. A reopened conversation belongs to the first recording of the
+	// session, so the twin comes from the conversation, not from the recording
+	// that streams it now (identical for every stream that never reopened).
+	sessionID := st.SessionID
+	if twin, ok := sessionTwin(st.ConversationID); ok {
+		sessionID = twin
+	}
 	req := sessionstream.OpenSessionRequest{
-		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: st.SessionID,
+		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: sessionID, Reopen: st.Reopen,
 		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
+		ParentSessionID: st.ParentSessionID, ContinuedFromSessionID: st.ContinuedFromSessionID,
 	}
 	if !cfg.acceptsNotes() {
 		refused := false

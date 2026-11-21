@@ -135,3 +135,124 @@ func TestTeammateCommentRetainReplacesOneConversationsPendingSet(t *testing.T) {
 		t.Fatal("an empty conversation id removed notes")
 	}
 }
+
+// A note the hook already showed leaves the pending set but stays readable
+// until its receipt is recorded, and each shown-state reader sees exactly the
+// notes it is scoped to.
+func TestTeammateCommentShownStateLeavesPendingUntilReceiptDeleted(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+	mk := func(id, agent, conv string, at time.Time) WhisperEntry {
+		e := teammateEntry(id, agent, at)
+		e.Metadata = map[string]string{"conversation_id": conv}
+		return e
+	}
+	if err := s.Add(
+		mk("a1", "agent-a", "c1", now.Add(-3*time.Minute)),
+		mk("a2", "agent-a", "c2", now.Add(-2*time.Minute)),
+		mk("b1", "agent-b", "c1", now.Add(-time.Minute)),
+		mk("a3", "agent-a", "c1", now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkTeammateCommentsShown(7); err != nil {
+		t.Fatalf("marking nothing shown: %v", err)
+	}
+	if err := s.MarkTeammateCommentsShown(7, "a1", "a2", "b1"); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, _ := s.PeekTeammateComments("agent-a", 10)
+	if len(pending) != 1 || pending[0].ID != "a3" {
+		t.Fatalf("pending = %v, want only a3", pending)
+	}
+	shown, err := s.PeekShownTeammateComments("agent-a", 10)
+	if err != nil || len(shown) != 2 || shown[0].ID != "a1" || shown[1].ID != "a2" {
+		t.Fatalf("shown for agent-a = %v, %v; want a1,a2 oldest first", shown, err)
+	}
+	if shown[0].Metadata["shown_seq"] != "7" {
+		t.Fatalf("shown_seq = %q, want 7", shown[0].Metadata["shown_seq"])
+	}
+	byConv, _ := s.ShownTeammateCommentsForConversation("c1", 10)
+	if len(byConv) != 2 || byConv[0].ID != "a1" || byConv[1].ID != "b1" {
+		t.Fatalf("shown for c1 = %v, want a1,b1", byConv)
+	}
+	all, _ := s.AllShownTeammateComments(10)
+	if len(all) != 3 {
+		t.Fatalf("all shown = %d, want 3", len(all))
+	}
+
+	if err := s.DeleteTeammateComments(); err != nil {
+		t.Fatalf("deleting nothing: %v", err)
+	}
+	if err := s.DeleteTeammateComments("a1", "a2", "b1"); err != nil {
+		t.Fatal(err)
+	}
+	if all, _ := s.AllShownTeammateComments(10); len(all) != 0 {
+		t.Fatalf("shown after receipt delete = %v, want none", all)
+	}
+}
+
+// An empty recipient or a non-positive limit matches nothing rather than
+// widening to every agent's notes.
+func TestTeammateCommentShownReadersRefuseEmptyScopeAndZeroLimit(t *testing.T) {
+	s := mustOpen(t)
+	if err := s.Add(teammateEntry("a1", "agent-a", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkTeammateCommentsShown(1, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.PeekShownTeammateComments("", 10); got != nil || err != nil {
+		t.Fatalf("empty agent = %v, %v", got, err)
+	}
+	if got, err := s.ShownTeammateCommentsForConversation("", 10); got != nil || err != nil {
+		t.Fatalf("empty conversation = %v, %v", got, err)
+	}
+	if got, err := s.ShownTeammateCommentsForConversation("c1", 0); got != nil || err != nil {
+		t.Fatalf("zero limit = %v, %v", got, err)
+	}
+	if got, err := s.AllShownTeammateComments(0); got != nil || err != nil {
+		t.Fatalf("zero limit all = %v, %v", got, err)
+	}
+}
+
+// Storage failures surface as errors, never as an empty "no notes" answer that
+// would let the caller believe nothing is owed.
+func TestTeammateCommentStorageFailuresAreReturnedNotSwallowed(t *testing.T) {
+	t.Run("closed store", func(t *testing.T) {
+		s := mustOpen(t)
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AllShownTeammateComments(5); err == nil {
+			t.Fatal("query on closed store returned no error")
+		}
+		if err := s.MarkTeammateCommentsShown(1, "x"); err == nil {
+			t.Fatal("mark on closed store returned no error")
+		}
+	})
+	t.Run("unscannable row", func(t *testing.T) {
+		s := mustOpen(t)
+		// sqlite lets a non-integer primary key hold NULL, which cannot scan into a string id
+		if _, err := s.db.Load().Exec(`INSERT INTO whispers (id, scope, type, source, topic, content, importance, created_at, agent_id)
+			VALUES (NULL, 's', 't', ?, 'x', 'c', 'normal', '2026-01-01T00:00:00Z', 'agent-a')`, SourceTeammateComment); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PeekTeammateComments("agent-a", 5); err == nil {
+			t.Fatal("scan of NULL id returned no error")
+		}
+	})
+	t.Run("corrupt metadata fails the query", func(t *testing.T) {
+		s := mustOpen(t)
+		// json_extract rejects the bad row while sqlite sorts, so Query itself fails
+		if _, err := s.db.Load().Exec(`INSERT INTO whispers (id, scope, type, source, topic, content, importance, created_at, agent_id, metadata) VALUES
+			('good', 's', 't', ?, 'x', 'c', 'normal', '2026-01-01T00:00:00Z', 'agent-a', '{"state":"shown"}'),
+			('bad', 's', 't', ?, 'x', 'c', 'normal', '2026-01-02T00:00:00Z', 'agent-a', 'not json')`, SourceTeammateComment, SourceTeammateComment); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AllShownTeammateComments(5); err == nil {
+			t.Fatal("malformed metadata json returned no error")
+		}
+	})
+}

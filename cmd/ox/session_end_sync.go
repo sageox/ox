@@ -88,10 +88,15 @@ func stopLeftRecordingUntouched(err error, projectRoot, agentID string) bool {
 // stop recording, so a later prime for this agent records again. The stop
 // clears it itself because it may outlive the hook that started it.
 func runAgentSessionStopCommand(cmd *cobra.Command, inst *agentinstance.Instance) error {
+	agentEnded, _ := cmd.Flags().GetBool("agent-ended")
+	if !agentEnded {
+		// the person ended this session themselves: final, never reopened
+		markManualLiveStop(inst.AgentID)
+	}
 	if err := runAgentSessionStop(inst); err != nil {
 		return err
 	}
-	if agentEnded, _ := cmd.Flags().GetBool("agent-ended"); agentEnded {
+	if agentEnded {
 		if projectRoot, err := findProjectRoot(); err == nil {
 			session.ConsumeExplicitStop(projectRoot, inst.AgentID)
 		}

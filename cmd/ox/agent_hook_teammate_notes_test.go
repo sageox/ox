@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -449,3 +453,95 @@ func TestEmitTeammateNotesConfirmsOnlyAfterTheEnvelopeIsWritten(t *testing.T) {
 type brokenPipeWriter struct{}
 
 func (brokenPipeWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// Failure prevented: the hook failing the tool call, or showing something, when
+// the daemon cannot lease notes.
+func TestEmitTeammateNotesShowsNothingWhenTheTakeFails(t *testing.T) {
+	h := newTeammateHook(t, true)
+	h.addEntries(t)
+	h.run(t, "claude-code", &agentx.HookInput{ToolName: "Bash"})
+	teammateTakeFn = func(string, string, int64) ([]whisperstore.WhisperEntry, string, error) {
+		return nil, "", errors.New("daemon down")
+	}
+	var out bytes.Buffer
+	assert.False(t, emitTeammateNotes(&out, h.root, h.agentID))
+	assert.Empty(t, out.String())
+	assert.False(t, emitTeammateNotes(&out, "", h.agentID), "no project root: nothing to deliver to")
+	assert.False(t, emitTeammateNotes(&out, h.root, ""), "no agent: nothing to deliver to")
+}
+
+// Line separators in a note are line breaks, not invisible characters.
+func TestTeammateNoteBodyTreatsUnicodeLineSeparatorsAsNewlines(t *testing.T) {
+	assert.Equal(t, "a\nb\nc", sanitizeTeammateBody("a\u2028b\u2029c"))
+}
+
+// The real daemon calls the hook makes: lease, then confirm, over the socket.
+func TestTeammateTakeAndConfirmTalkToTheDaemonOverItsSocket(t *testing.T) {
+	codexActivityEnv(t, nil)
+	sock := daemon.SocketPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(sock), 0o700))
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var seen []string
+	entry := teammateEntry("tcm_1", "Person A", "x", nil)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(time.Second))
+				line, _ := bufio.NewReader(conn).ReadBytes('\n')
+				var msg daemon.Message
+				_ = json.Unmarshal(line, &msg)
+				resp := daemon.Response{Success: true}
+				if msg.Type == daemon.MsgTypeTeammateCommentsTake {
+					resp.Data, _ = json.Marshal(daemon.TeammateCommentsTakeResponse{LeaseID: "L9", Entries: []whisperstore.WhisperEntry{entry}})
+				}
+				mu.Lock()
+				seen = append(seen, msg.Type)
+				mu.Unlock()
+				out, _ := json.Marshal(resp)
+				_, _ = conn.Write(append(out, '\n'))
+			}()
+		}
+	}()
+	entries, lease, err := teammateTakeFn("OxHook1", "cnv_x", 4)
+	require.NoError(t, err)
+	assert.Equal(t, "L9", lease)
+	assert.Len(t, entries, 1)
+	require.NoError(t, teammateConfirmFn("OxHook1", lease, []string{"tcm_1"}))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{daemon.MsgTypeTeammateCommentsTake, daemon.MsgTypeTeammateCommentsConfirm}, seen)
+}
+
+// With no daemon the hook's calls fail, which the hook treats as "no notes".
+func TestTeammateTakeWithNoDaemonIsAnError(t *testing.T) {
+	codexActivityEnv(t, nil)
+	_ = os.Remove(daemon.SocketPath())
+	_, _, err := teammateTakeFn("OxHook1", "cnv_x", 4)
+	assert.Error(t, err)
+	assert.Error(t, teammateConfirmFn("OxHook1", "L", nil))
+}
+
+func TestTeammateNotesSettingValidatesAndUnsets(t *testing.T) {
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	t.Setenv("OX_TEAMMATE_NOTES", "")
+	require.Error(t, SetConfigValue("session.teammate_notes", "sometimes", ConfigLevelUser, ""))
+	require.NoError(t, SetConfigValue("session.teammate_notes", "off", ConfigLevelUser, ""))
+	cv, err := ResolveConfigValue("session.teammate_notes", "")
+	require.NoError(t, err)
+	assert.Equal(t, "off", cv.Value)
+	require.NoError(t, UnsetConfigValue("session.teammate_notes", ConfigLevelUser, ""))
+	cv, err = ResolveConfigValue("session.teammate_notes", "")
+	require.NoError(t, err)
+	assert.Equal(t, "on", cv.Value, "unsetting returns to the default")
+}

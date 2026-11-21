@@ -360,6 +360,8 @@ func TestNormalizeRef(t *testing.T) {
 		{"team-ctx slug", "team-context", "team-ctx/acme", TeamContextRef},
 		{"team-ctx retrieval ref", "team-context", TeamContextRef, TeamContextRef},
 		{"plan slug trimmed", "plan", "  my-plan ", "my-plan"},
+		{"plan name holding a conversation id is kept", "plan", "alpha." + testCnv, "alpha." + testCnv},
+		{"other plan name holding the same id stays distinct", "plan", "beta." + testCnv, "beta." + testCnv},
 		{"doc path kept", "doc", "docs/adr/001.md", "docs/adr/001.md"},
 		{"empty", "team-context", "  ", ""},
 	}
@@ -369,6 +371,20 @@ func TestNormalizeRef(t *testing.T) {
 			assert.Equal(t, tt.want, NormalizeRef(tt.refType, tt.ref))
 		})
 	}
+}
+
+// TestState_BumpKeepsPlansThatShareAConversationID: two plans whose names
+// hold the same conversation id are two plans.
+// Failure prevented: both are keyed by the embedded id and the line shows one.
+func TestState_BumpKeepsPlansThatShareAConversationID(t *testing.T) {
+	t.Parallel()
+	var s State
+	require.True(t, s.Bump("plan", "alpha."+testCnv))
+	require.True(t, s.Bump("plan", "beta."+testCnv))
+	assert.Equal(t, 2, s.Plans)
+	// the discussion itself is a third, separate item
+	require.True(t, s.Bump("discussion", testCnv))
+	assert.Equal(t, Counts{Discussions: 1, Plans: 2}, s.Counts())
 }
 
 // TestState_MarkUsed counts each used item once, alongside — never instead

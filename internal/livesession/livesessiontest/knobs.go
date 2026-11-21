@@ -79,6 +79,12 @@ func (s *Server) RefuseNextClose(status int, reason string, action sessionstream
 	s.set(func() { x := refusal(status, reason, action, stored); s.closeRefusal = &x })
 }
 
+// RefuseNextReopen answers the next open that carries reopen with this refusal;
+// an open without reopen is never affected.
+func (s *Server) RefuseNextReopen(status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.reopenRefusal = &x })
+}
+
 // LoseStoredBytes erases every stored object of cnv and rewinds its layers to
 // empty, as a storage restore from before the session would: the server now
 // stands behind every ack it gave. Later appends and closes answer what api-go
@@ -230,6 +236,17 @@ func (s *Server) ClosedWith(cnv string) (Closed, bool) {
 		return *c.closed, true
 	}
 	return Closed{}, false
+}
+
+// OpenedWith returns the newest open request the server accepted for cnv, as
+// it decoded it from the wire.
+func (s *Server) OpenedWith(cnv string) (sessionstream.OpenSessionRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c := s.convs[cnv]; c != nil && c.opened.LayerID != "" {
+		return c.opened, true
+	}
+	return sessionstream.OpenSessionRequest{}, false
 }
 
 // IsDeleted reports whether cnv was deleted on the server.

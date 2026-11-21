@@ -484,3 +484,95 @@ func TestReceiptLogsLiveUnderTheDataDirNotTheSessionFolder(t *testing.T) {
 		t.Fatal("a path-shaped conversation id was accepted")
 	}
 }
+
+// Failure prevented: the receipts of the conversation seen before the lock sent
+// to the conversation found under it.
+func TestFlushReadsReceiptsOfTheStreamTheLockAuthorized(t *testing.T) {
+	e := closedEnvWithAck(t) // tcm_1 owed under the original conversation
+	origState, err := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a second conversation, minted for the same folder and closed
+	if err := os.Remove(filepath.Join(e.dir, "stream-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	params := livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "2026-03-04T13-41-person-a-Oxabc1", RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()}
+	if _, err := livesession.Prepare(t.Context(), e.cfg, e.dir, params); err != nil {
+		t.Fatal(err)
+	}
+	e.spool(withPrompt(lines(0, 3)))
+	if _, err := livesession.Open(t.Context(), e.cfg, e.dir, params); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := livesession.Close(t.Context(), e.cfg, e.dir, "", testBudget); err != nil || !res.Done {
+		t.Fatalf("close = %+v, %v", res, err)
+	}
+	newState, err := os.ReadFile(filepath.Join(e.dir, "stream-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(e.srv.AckRequests())
+	// the preflight sees the original stream; the state is swapped to the other
+	// authorized one before the lock
+	if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), origState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	livesession.SetFlushPreflightHookForTest(t, func() {
+		if err := os.WriteFile(filepath.Join(e.dir, "stream-state.json"), newState, 0o600); err != nil {
+			t.Errorf("swap the stream state: %v", err)
+			return
+		}
+		swapped = true
+	})
+	e.srv.RefuseAcks(0, 0, "", "")
+	// a failed flush sends nothing too, so an error must not pass for the
+	// successful swap this test is about
+	if _, err := livesession.FlushTeammateAcks(t.Context(), e.cfg, e.dir, testBudget, time.Now()); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if !swapped {
+		t.Fatal("the preflight hook never ran, so no swap was tested")
+	}
+	if n := len(e.srv.AckRequests()) - before; n != 0 {
+		t.Fatalf("%d ack requests: the old conversation's receipts were sent to another conversation", n)
+	}
+}
+
+// A receipt log that cannot be read must not stop the drain, and the note the
+// server lists is still handed over (the daemon's stored-once mark stops a
+// second display).
+func TestDrainWithAnUnreadableReceiptLogStillHandsOverTheListedNote(t *testing.T) {
+	e := newEnv(t)
+	if err := os.Mkdir(filepath.Join(e.rdir(t), "teammate-comment-acks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.QueueTeammateComment(comment("tcm_1", "x"))
+	e.spool(withPrompt(lines(0, 3)))
+	res := e.mustDrain()
+	if len(res.TeammateComments) != 1 {
+		t.Fatalf("comments = %v", res.TeammateComments)
+	}
+}
+
+// A shown note listed again whose resend cannot be recorded is still never shown
+// again; an empty id and a repeated id in one list are ignored.
+func TestDrainDropsShownEmptyAndRepeatedNotes(t *testing.T) {
+	e := newEnv(t)
+	if err := livesession.RecordTeammateCommentAck(e.rdir(t), "tcm_shown", 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(e.rdir(t), "teammate-comment-resends"), 0o700); err != nil { // resends unwritable
+		t.Fatal(err)
+	}
+	e.srv.QueueTeammateComment(comment("tcm_shown", "old"))
+	e.srv.QueueTeammateComment(comment("", "no id"))
+	e.srv.QueueTeammateComment(comment("tcm_new", "new"))
+	e.srv.QueueTeammateComment(comment("tcm_new", "new again"))
+	e.spool(withPrompt(lines(0, 3)))
+	res := e.mustDrain()
+	if len(res.TeammateComments) != 1 || res.TeammateComments[0].ID != "tcm_new" || res.TeammateComments[0].Body != "new" {
+		t.Fatalf("comments = %+v; want only tcm_new once", res.TeammateComments)
+	}
+}

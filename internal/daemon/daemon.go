@@ -263,6 +263,19 @@ func New(config *Config, logger *slog.Logger) *Daemon {
 	}
 }
 
+// activeAgentIDs lists the agents the heartbeat handler has seen, the candidates
+// for owning a live recording folder. Nil before the handler exists.
+func (d *Daemon) activeAgentIDs() []string {
+	if d.heartbeat == nil {
+		return nil
+	}
+	var ids []string
+	for _, a := range d.heartbeat.GetActivitySummary().Agents {
+		ids = append(ids, a.Key)
+	}
+	return ids
+}
+
 // recordActivity updates the last activity timestamp.
 func (d *Daemon) recordActivity() {
 	d.mu.Lock()
@@ -1532,21 +1545,12 @@ func (d *Daemon) initComponents() time.Duration {
 		notesOn := func() bool { return config.TeammateNotesEnabled(projectRoot) }
 		d.liveSessions.acceptsNotes = notesOn
 		d.teammateComments = &teammateCommentInbox{
-			logger:   d.logger,
-			registry: func() *WhisperRegistry { return d.whisperRegistry },
-			live:     func() *LiveSessions { return d.liveSessions },
-			recipientFor: agentRecordingDir(d.config.ProjectRoot, func() []string {
-				if d.heartbeat == nil {
-					return nil
-				}
-				var ids []string
-				for _, a := range d.heartbeat.GetActivitySummary().Agents {
-					ids = append(ids, a.Key)
-				}
-				return ids
-			}),
-			now:     time.Now,
-			enabled: notesOn,
+			logger:       d.logger,
+			registry:     func() *WhisperRegistry { return d.whisperRegistry },
+			live:         func() *LiveSessions { return d.liveSessions },
+			recipientFor: agentRecordingDir(d.config.ProjectRoot, d.activeAgentIDs),
+			now:          time.Now,
+			enabled:      notesOn,
 		}
 		d.liveSessions.onTeammateComments = d.teammateComments.receive
 		d.liveSessions.drainShown = d.teammateComments.drainAllShown

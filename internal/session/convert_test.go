@@ -217,3 +217,14 @@ func TestConvertProtocolEntriesToHistory_ToolErrorPreserved(t *testing.T) {
 	assert.True(t, history.Entries[0].IsError)
 	assert.Equal(t, "exit code 1", history.Entries[0].ToolOutput)
 }
+
+func TestConvertProtocolEntriesToHistorySkipsMedia(t *testing.T) {
+	h := ConvertProtocolEntriesToHistory([]adapterprotocol.RawEntry{
+		{Role: adapterprotocol.RoleUser, Content: "look"},
+		{Role: adapterprotocol.RoleMedia, Media: &adapterprotocol.MediaRef{SHA256: "ab", MIME: "image/png"}},
+		{Role: adapterprotocol.RoleAssistant, Content: "ok"},
+	}, "agent", "claude-code")
+	if len(h.Entries) != 2 || h.Entries[0].Type != "user" || h.Entries[1].Type != "assistant" {
+		t.Fatalf("entries = %+v", h.Entries)
+	}
+}

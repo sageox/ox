@@ -733,10 +733,10 @@ func (s *Store) queryTeammateComments(where string, args []any, limit int) ([]Wh
 		}
 		entries = append(entries, e)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate teammate comments: %w", err)
-	}
-	return entries, nil
+	// sqlite sorts before the first row, so a step failure surfaces from Query
+	// above; rows.Err here only reports a late driver failure, which callers
+	// treat like any error (they check err before using entries).
+	return entries, rows.Err()
 }
 
 // AllShownTeammateComments returns up to limit notes already shown whose receipt

@@ -72,3 +72,14 @@ func TestTeammateNotesRepoOffIsScopedToThatRepo(t *testing.T) {
 	assert.True(t, TeammateNotesEnabled(other))
 	assert.True(t, TeammateNotesEnabled(""), "outside any repo only the user layer counts")
 }
+
+func TestTeammateNotesModeValidationAndNormalization(t *testing.T) {
+	for _, ok := range []string{"on", "off", ""} {
+		assert.True(t, IsValidTeammateNotes(ok), ok)
+	}
+	for _, bad := range []string{"yes", "ON ", "maybe"} {
+		assert.False(t, IsValidTeammateNotes(bad), bad)
+	}
+	assert.Equal(t, TeammateNotesOff, NormalizeTeammateNotes(" Off "))
+	assert.Equal(t, TeammateNotesOn, NormalizeTeammateNotes("garbage"), "anything but off is on")
+}

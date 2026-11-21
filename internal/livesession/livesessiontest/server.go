@@ -65,6 +65,8 @@ type conversation struct {
 	layers    map[string]*layerState
 	deleted   bool
 	closed    *Closed
+	// opened is the newest accepted open request, as decoded from the wire.
+	opened sessionstream.OpenSessionRequest
 }
 
 // Server is the fake api-go. Create it with New.
@@ -88,6 +90,7 @@ type Server struct {
 	refuseDelete     bool
 	appendRefusal    *reply
 	closeRefusal     *reply
+	reopenRefusal    *reply
 	deferRecovery    bool
 	rateLimit        int
 	rateLimitMS      int64
@@ -119,6 +122,8 @@ type Server struct {
 	openBodies [][]byte
 
 	inflight, maxInflight int
+
+	media *mediaState
 }
 
 // New starts a fake server and registers its cleanup.
@@ -136,6 +141,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("DELETE "+sessionstream.PathSessions+"/{cnv}", s.route(s.remove))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/close", s.route(s.closeSession))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/layers/{layer}/lines", s.route(s.appendLines))
+	s.registerMedia(mux)
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/teammate-comments/acks", s.route(s.ackTeammateComments))
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
@@ -304,14 +310,25 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 		strings.TrimPrefix(req.SessionID, "ses_") != strings.TrimPrefix(cnv, "cnv_") {
 		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
 	}
+	if req.Reopen && s.reopenRefusal != nil {
+		x := *s.reopenRefusal
+		s.reopenRefusal = nil
+		return x
+	}
 	c := s.convs[cnv]
 	if c == nil {
 		c = &conversation{sessionID: req.SessionID, layers: map[string]*layerState{}}
 		s.convs[cnv] = c
 	}
+	// As api-go's reopen: the owner's signed open with reopen adds a layer to a
+	// conversation whose client closed it. A deleted one stays refused.
+	if req.Reopen && c.closed != nil && !c.deleted {
+		c.closed = nil
+	}
 	if rep := s.liveGuard(c); rep != nil {
 		return *rep
 	}
+	c.opened = req
 	l := c.layers[req.LayerID]
 	if l == nil {
 		l = &layerState{cur: sessionstream.NewCursor()}
@@ -576,8 +593,6 @@ func (s *Server) recoveredCursor(ctx context.Context, cnv, layer string, row ses
 	case err != nil:
 		x := unavailable("storage is temporarily unavailable")
 		return sessionstream.Cursor{}, &x
-	case cur.StoredThrough <= row.StoredThrough:
-		return row, nil
 	}
 	return cur, nil
 }
