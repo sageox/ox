@@ -42,6 +42,11 @@ type Config struct {
 	DataDir string
 	// Logger receives single-line key=value events; nil means slog.Default.
 	Logger *slog.Logger
+	// AcceptsNotes reports, at each open, whether this machine takes teammate
+	// notes (session.teammate_notes for the repo). nil means it does. Read per
+	// open rather than once, so `ox config set` reaches the next layer opened
+	// without a daemon restart.
+	AcceptsNotes func() bool
 }
 
 func (c Config) withDefaults() (Config, error) {
@@ -65,6 +70,9 @@ func (c Config) withDefaults() (Config, error) {
 	}
 	return c, nil
 }
+
+// acceptsNotes reads the teammate-notes switch; unset means notes are accepted.
+func (c Config) acceptsNotes() bool { return c.AcceptsNotes == nil || c.AcceptsNotes() }
 
 func storedLoginToken(ctx context.Context, endpoint string) (string, error) {
 	tok, err := auth.EnsureValidTokenForEndpointContext(ctx, endpoint, tokenRefreshBufferSeconds)

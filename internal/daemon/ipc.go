@@ -1510,8 +1510,11 @@ func (s *Server) SetLiveSessionDrainHandler(fn func(payload LiveSessionDrainPayl
 	svc.onLiveSessionDrain = fn
 }
 
-// SetTeammateCommentsTakeHandler sets the handler that takes an agent's
-// waiting teammate notes (once) and logs their delivery acks.
+// SetTeammateCommentsTakeHandler sets the handler that leases an agent's
+// waiting teammate notes. A take acknowledges nothing: the caller must confirm
+// the ids it showed (SetTeammateCommentsConfirmHandler), which is what logs
+// their delivery acks. An unconfirmed lease expires and its notes are offered
+// again.
 func (s *Server) SetTeammateCommentsTakeHandler(fn func(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error)) {
 	svc := s.mustCallbackService("SetTeammateCommentsTakeHandler")
 	svc.mu.Lock()

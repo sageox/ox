@@ -341,6 +341,18 @@ func (s *Server) AckRequests() []sessionstream.AckTeammateCommentsRequest {
 	return append([]sessionstream.AckTeammateCommentsRequest(nil), s.ackBodies...)
 }
 
+// OpenBodies are the raw open (PUT) bodies received, in order, refused ones
+// included.
+func (s *Server) OpenBodies() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]byte, len(s.openBodies))
+	for i, b := range s.openBodies {
+		out[i] = append([]byte(nil), b...)
+	}
+	return out
+}
+
 // RefuseNextAck answers the next ack with this refusal.
 func (s *Server) RefuseNextAck(status int, reason string, action sessionstream.Action) {
 	s.RefuseAcks(1, status, reason, action)
