@@ -278,7 +278,7 @@ func TestFileQueue_FlushRejectsSymlinkSubstitution(t *testing.T) {
 			client := &Client{
 				enabled:   true,
 				fileQueue: q,
-				endpoint:  "https://telemetry.invalid",
+				baseURL:   "https://telemetry.invalid",
 				httpClient: &http.Client{Transport: queueFlushTransport(func(*http.Request) (*http.Response, error) {
 					posted = true
 					path, target := q.Path(), sentinel
