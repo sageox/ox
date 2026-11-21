@@ -175,6 +175,37 @@ func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Durati
 	})
 }
 
+// RequestCloseOfEnded is RequestClose for the stream of the recording
+// sessionID, which ended with no stop to close it: an AI coworker that crashed,
+// recovered from its cache or finalized by the daemon. Left open, that stream
+// read as live on SageOx until the server's 72 h auto-finish. The daemon's
+// sweep finishes the close, summary included, as for a hook-ended recording.
+//
+// It requests nothing for a held session (the sweep deletes its live copy with
+// stopHeld and never closes it with a summary), for another recording's
+// stream (the folder was reused), or for a stream already closing or ended.
+// Like RequestClose it takes no lock, so a drain in flight cannot lose it. It
+// reports whether a close was recorded.
+func RequestCloseOfEnded(dir, sessionID string) (bool, error) {
+	if sessionID == "" || oxsession.IsHeld(dir) {
+		return false, nil
+	}
+	st, err := ReadState(dir)
+	if errors.Is(err, ErrNotStreaming) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.SessionID != sessionID || st.CloseRequested || (st.Status != StatusPending && st.Status != StatusStreaming) {
+		return false, nil
+	}
+	if err := RequestClose(dir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // openPending opens a session that never reached the server so Close can drain
 // and finish it. The close request is persisted first: if the server is down the
 // daemon still knows stop already happened. A session whose spool never held a

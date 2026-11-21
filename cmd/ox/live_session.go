@@ -682,6 +682,25 @@ func liveSessionFinishAtHook(projectRoot string, state *session.RecordingState, 
 	return liveFinish{}
 }
 
+// liveSessionCloseEnded requests the close of the live stream of a recording
+// that ended without a stop to close it (recovered from the cache after its AI
+// coworker crashed), then kicks the daemon, which finishes the close with a
+// summary. A held session's stream is left to the daemon's stopHeld, which
+// deletes its live copy (livesession.RequestCloseOfEnded).
+func liveSessionCloseEnded(state *session.RecordingState) {
+	if state == nil || state.SessionPath == "" {
+		return
+	}
+	requested, err := livesession.RequestCloseOfEnded(state.SessionPath, state.SessionID)
+	switch {
+	case err != nil:
+		slog.Warn("live_session_close_request_failed", "session_id", state.SessionID, "during", "recover", "error", err)
+	case requested:
+		slog.Info("live_session_close_requested", "session_id", state.SessionID, "during", "recover")
+		liveKickDaemon(state.SessionPath)
+	}
+}
+
 // heldLiveWarning is the stop message for a held session whose live copy the
 // stop deleted on SageOx: said once, at the stop that did it.
 func heldLiveWarning(base string, fin liveFinish) string {

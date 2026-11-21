@@ -773,7 +773,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
-					return os.Remove(recPath)
+					return h.clearStaleRecording(sessionDir, recPath, manual)
 				})
 				if recoverErr != nil {
 					h.logStaleRecoveryDeferred(name, recoverErr)
@@ -1234,7 +1234,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err := holdIfRecordedManual(sessionDir); err != nil {
 						return err
 					}
-					return os.Remove(recPath)
+					return h.clearStaleRecording(sessionDir, recPath, manual)
 				})
 				if recoverErr != nil {
 					h.warnOnce("orphan-recovery-deferred", name,
@@ -4327,6 +4327,36 @@ func holdIfRecordedManual(sessionDir string) error {
 	}
 	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
 		return fmt.Errorf("hold recovered manual-mode session: %w", err)
+	}
+	return nil
+}
+
+// clearStaleRecording removes the .recording.json of a recording whose process
+// is gone, then requests the close of the live stream it leaves open: no stop
+// will close it, and an open stream reads as live on SageOx until the server's
+// 72 h auto-finish. The live sweep finishes the close on its next tick. None is
+// requested while the project publishes manually (manual): this pass may still
+// hold the session, and a held stream is deleted by the sweep's stopHeld, never
+// closed with a summary. The caller holds the raw.jsonl lock; the request takes
+// none (livesession.RequestCloseOfEnded). A failed request is logged, never a
+// failed recovery: the v1 finalize must not wait on the live stream.
+func (h *SessionFinalizeHandler) clearStaleRecording(sessionDir, recPath string, manual bool) error {
+	// read before the remove: the marker names the recording the stream must belong to
+	rec, _ := session.ReadRecordingStateFile(sessionDir)
+	if err := os.Remove(recPath); err != nil {
+		return err
+	}
+	if rec == nil || manual {
+		return nil
+	}
+	requested, err := livesession.RequestCloseOfEnded(sessionDir, rec.SessionID)
+	switch {
+	case err != nil:
+		h.logger.Warn("live stream close not requested for an ended recording",
+			"session", filepath.Base(sessionDir), "session_id", rec.SessionID, "impact", "reads live on SageOx until the server finishes it", "err", err)
+	case requested:
+		h.logger.Info("live stream close requested for an ended recording",
+			"session", filepath.Base(sessionDir), "session_id", rec.SessionID)
 	}
 	return nil
 }

@@ -61,7 +61,8 @@ func newState(cfg Config, cnv string, status Status, p OpenParams) State {
 // open session re-registers and re-opens on the same layer (both idempotent),
 // keeping the acknowledged offset. A key conflict writes status disabled and returns
 // ErrKeyConflict; an open answered "deleted" or "closed" records that final
-// status; any other failure leaves the state as it was (a fresh session then
+// status, and one refused as session_name_taken or feature_off records
+// disabled; any other failure leaves the state as it was (a fresh session then
 // has none and simply does not stream).
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
 	cfg, err := cfg.withDefaults()
@@ -314,8 +315,9 @@ func openAnswered(ctx context.Context, cfg Config, dir string, st State, onDisk 
 
 // openRefused records an open answered "deleted" or "closed" exactly as the
 // same answer to an append is recorded, so a session someone deleted while its
-// open reply was lost is held, not published. Any other failure leaves the
-// state as it was for a later attempt.
+// open reply was lost is held, not published. An open refused as
+// session_name_taken or feature_off disables the stream. Any other failure
+// leaves the state as it was for a later attempt.
 func openRefused(ctx context.Context, cfg Config, dir string, st State, err error) (State, error) {
 	var api *sessionstream.APIError
 	if errors.As(err, &api) {
@@ -327,9 +329,16 @@ func openRefused(ctx context.Context, cfg Config, dir string, st State, err erro
 		if done {
 			return s.st, nil
 		}
-		if api.Body.Reason == sessionstream.ReasonSessionNameTaken {
-			// another person owns this session name in this repo; no retry can
-			// change that, so the stream ends here instead of looping every tick
+		switch api.Body.Reason {
+		case sessionstream.ReasonSessionNameTaken, sessionstream.ReasonFeatureOff:
+			// Neither is worth a retry every tick, so the stream ends here.
+			// name_taken: another person owns this session name in this repo.
+			// feature_off: the rollout flag is off for this person though the
+			// client's settings cache (up to 2 h old) said on; api-go checks it
+			// on every open, and the next session asks again. A stopped stream
+			// would otherwise rerun the summary model before each retry.
+			// raw.jsonl and the v1 upload are untouched. Matched on the
+			// reason, not on action stop: other stop refusals keep the retry.
 			s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
 			return s.st, nil
 		}
