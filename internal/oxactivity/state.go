@@ -48,8 +48,92 @@ type State struct {
 	Used int `json:"used,omitempty"`
 	// UsedRefs dedups Used the way SeenRefs dedups the kind buckets, with the
 	// same key format and cap.
-	UsedRefs  []string  `json:"used_refs,omitempty"`
+	UsedRefs []string `json:"used_refs,omitempty"`
+	// ShownLine is the last line shown to the coworker by a host that has no
+	// status bar and shows the line as a turn-end notice instead (Codex). It
+	// is how that notice stays silent on turns where nothing changed.
+	ShownLine string `json:"shown_line,omitempty"`
+	// ShownFlows is how many of the session's flow lanes (ox calls that moved
+	// team data) that turn-end notice has already shown, so each is shown
+	// once. Like the counts it starts over with a new recording.
+	ShownFlows int `json:"shown_flows,omitempty"`
+	// ShownFlowsTrace names the trace ShownFlows counts into. The trace
+	// changes when a recording starts or ends; a position in the old one says
+	// nothing about the new one.
+	ShownFlowsTrace string `json:"shown_flows_trace,omitempty"`
+	// ShownFlowsByTrace keeps the position reached in each trace this
+	// session has left, so coming back to one (a recording stops, and the
+	// not-recording trace is current again) does not show its lanes twice.
+	ShownFlowsByTrace map[string]int `json:"shown_flows_by_trace,omitempty"`
+	// Recording is the ox recording (session.RecordingState.SessionID, a
+	// ses_ id) the counts belong to. A harness session outlives a recording
+	// on every resume, pause or idle finalize, and `ox session report` counts
+	// only the current recording; binding the counts to it (BindRecording)
+	// keeps the two surfaces telling the same story. Empty when written with
+	// no live recording or before this field existed; such counts are adopted
+	// by the next recording that writes or reads them.
+	Recording string    `json:"recording,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
+}
+
+// BelongsTo reports whether the counts may be shown for the ox recording
+// recordingID: they are its own, or they name no recording (no live recording
+// when written, or a file from before State.Recording existed) and are
+// adopted by it. An empty recordingID (no live recording) accepts any state.
+func (s State) BelongsTo(recordingID string) bool {
+	recordingID = strings.TrimSpace(recordingID)
+	return recordingID == "" || s.Recording == "" || s.Recording == recordingID
+}
+
+// BindRecording scopes the counts to the ox recording recordingID. When they
+// belong to a different recording, the counts, their dedup lists and the
+// shown line start over, so a new recording starts the line at zero the way
+// the session report does; counts that name no recording yet are adopted as
+// they are. An empty recordingID (no live recording) changes nothing. It
+// reports whether anything changed.
+func (s *State) BindRecording(recordingID string) bool {
+	recordingID = strings.TrimSpace(recordingID)
+	if recordingID == "" || s.Recording == recordingID {
+		return false
+	}
+	if !s.BelongsTo(recordingID) {
+		*s = State{}
+	}
+	s.Recording = recordingID
+	return true
+}
+
+// maxShownFlowTraces caps State.ShownFlowsByTrace: a session moves between
+// a handful of traces, never many.
+const maxShownFlowTraces = 8
+
+// SwitchFlowTrace makes trace the one ShownFlows counts into, remembering
+// the position reached in the trace it leaves and resuming at the position
+// last reached in the one it enters (zero for a trace not seen before). It
+// reports whether anything changed; an empty trace changes nothing.
+func (s *State) SwitchFlowTrace(trace string) bool {
+	if trace == "" || s.ShownFlowsTrace == trace {
+		return false
+	}
+	s.RememberFlowTrace(s.ShownFlowsTrace, s.ShownFlows)
+	s.ShownFlows, s.ShownFlowsTrace = s.ShownFlowsByTrace[trace], trace
+	delete(s.ShownFlowsByTrace, trace)
+	return true
+}
+
+// RememberFlowTrace records shown as the position reached in trace. It is
+// how a position survives the reset a new recording brings (BindRecording).
+func (s *State) RememberFlowTrace(trace string, shown int) {
+	if trace == "" || shown <= 0 {
+		return
+	}
+	if s.ShownFlowsByTrace == nil {
+		s.ShownFlowsByTrace = map[string]int{}
+	}
+	if _, known := s.ShownFlowsByTrace[trace]; !known && len(s.ShownFlowsByTrace) >= maxShownFlowTraces {
+		clear(s.ShownFlowsByTrace) // far more traces than a session has: start over
+	}
+	s.ShownFlowsByTrace[trace] = shown
 }
 
 // MaxSeenRefs caps State.SeenRefs and State.UsedRefs; the oldest entries are
@@ -68,8 +152,9 @@ const TeamContextRef = "agent team-ctx"
 // "team-context" ref becomes TeamContextRef, and a ref holding a
 // conversation, recording or discussion ID (a bare cnv_/rec_ id, a sageox://
 // citation, or a /c/ link to one) becomes its canonical cnv_ id (see
-// contextuse.CanonicalRef), so rec_<u> and cnv_<u> count once. Anything else
-// is returned trimmed.
+// contextuse.CanonicalRef), so rec_<u> and cnv_<u> count once. A "plan" ref
+// is the exception: it keeps its own name even when that name holds a
+// conversation id. Anything else is returned trimmed.
 func NormalizeRef(refType, ref string) string {
 	refType = strings.TrimSpace(refType)
 	ref = strings.TrimSpace(ref)
@@ -79,8 +164,12 @@ func NormalizeRef(refType, ref string) string {
 	if refType == "team-context" {
 		return TeamContextRef
 	}
-	if id := contextuse.FindConversationID(ref); id != "" {
-		return id
+	// A plan is counted under its own name: one that merely holds a
+	// conversation id is still that plan, not the discussion.
+	if refType != "plan" {
+		if id := contextuse.FindConversationID(ref); id != "" {
+			return id
+		}
 	}
 	return contextuse.CanonicalRef(refType, ref)
 }
@@ -226,7 +315,15 @@ func (s State) Counts() Counts {
 // counted. It waits at most the default file-lock timeout for a concurrent
 // writer, then returns that error; callers in hooks should log it and move on.
 func RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref string) error {
-	return record(projectRoot, agentID, harnessSessionID, refType, ref, nil, "record influence", (*State).Bump)
+	return record(projectRoot, agentID, harnessSessionID, "", refType, ref, nil, "record influence", (*State).Bump)
+}
+
+// RecordInfluenceIn is RecordInfluence for a session with a live ox
+// recording: the state is bound to recordingID first (see
+// State.BindRecording), so counts left by an earlier recording of the same
+// harness session do not carry over. An empty recordingID is RecordInfluence.
+func RecordInfluenceIn(projectRoot, agentID, harnessSessionID, recordingID, refType, ref string) error {
+	return record(projectRoot, agentID, harnessSessionID, recordingID, refType, ref, nil, "record influence", (*State).Bump)
 }
 
 // RecordUse counts one item of team context as used — reported by the AI
@@ -236,12 +333,18 @@ func RecordInfluence(projectRoot, agentID, harnessSessionID, refType, ref string
 // of aliases, its other names (see State.MarkUsed). harnessSessionID, the no-op rules and the locking are as
 // for RecordInfluence.
 func RecordUse(projectRoot, agentID, harnessSessionID, refType, ref string, aliases ...string) error {
-	return record(projectRoot, agentID, harnessSessionID, refType, ref, aliases, "record use", (*State).MarkUsed)
+	return record(projectRoot, agentID, harnessSessionID, "", refType, ref, aliases, "record use", (*State).MarkUsed)
 }
 
-// record applies apply(refType, ref, aliases...) to the stored state under the
-// lock.
-func record(projectRoot, agentID, harnessSessionID, refType, ref string, aliases []string, op string, apply func(*State, string, string, ...string) bool) error {
+// RecordUseIn is RecordUse bound to the live ox recording recordingID, as
+// RecordInfluenceIn is to RecordInfluence.
+func RecordUseIn(projectRoot, agentID, harnessSessionID, recordingID, refType, ref string, aliases ...string) error {
+	return record(projectRoot, agentID, harnessSessionID, recordingID, refType, ref, aliases, "record use", (*State).MarkUsed)
+}
+
+// record binds the stored state to recordingID (when given) and applies
+// apply(refType, ref, aliases...) to it, all under the lock.
+func record(projectRoot, agentID, harnessSessionID, recordingID, refType, ref string, aliases []string, op string, apply func(*State, string, string, ...string) bool) error {
 	var probe State
 	if probe.counter(strings.TrimSpace(refType)) == nil || NormalizeRef(refType, ref) == "" {
 		return nil
@@ -250,7 +353,8 @@ func record(projectRoot, agentID, harnessSessionID, refType, ref string, aliases
 		return fmt.Errorf("%s: empty project root", op)
 	}
 	err := UpdateState(projectRoot, StateKey(agentID, harnessSessionID), func(s *State) bool {
-		if !apply(s, refType, ref, aliases...) {
+		rebound := s.BindRecording(recordingID)
+		if !apply(s, refType, ref, aliases...) && !rebound {
 			return false
 		}
 		s.UpdatedAt = time.Now().UTC()

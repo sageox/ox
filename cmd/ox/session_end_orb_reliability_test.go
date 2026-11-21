@@ -124,7 +124,7 @@ func TestStartSessionRecording_OrbRecordsBeforeTheLedgerIsCloned(t *testing.T) {
 			require.False(t, ledger.Exists(""), "precondition: the Ledger is not cloned yet")
 			const agentID = "OxOrbFirst"
 
-			stat := startSessionRecording(projectRoot, agentID, "amp", "", "", "https://ampcode.com/threads/T-first-prime")
+			stat := startSessionRecording(projectRoot, agentID, "amp", inheritedParent{}, "", "https://ampcode.com/threads/T-first-prime")
 
 			require.NotNil(t, stat)
 			assert.Equal(t, tc.wantRecording, stat.Recording, "recording")

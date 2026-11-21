@@ -41,6 +41,10 @@ type PushOpts struct {
 	// and returns success without publishing unrelated pending commits.
 	ValidatePush func(ctx context.Context, repoPath string) (alreadyPublished bool, err error)
 
+	// PreserveCommitHistory keeps per-commit provenance intact on rebase retry
+	// for publishers that authorize each commit by its subject and paths.
+	PreserveCommitHistory bool
+
 	// ReconcileLFS is called when a push fails with "LFS objects are missing".
 	// If set, PushWithRetry calls this instead of failing permanently, then
 	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
@@ -346,7 +350,9 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			if err := ValidateSessionPublication(attemptCtx, repoPath); err != nil {
 				return err
 			}
-			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+			// a file, not a pipe: the push must not die with a pusher that is
+			// killed mid-push (sageox/ox#1936)
+			outStr, err = RunGitFileOutput(attemptCtx, repoPath, "push", "--quiet")
 			return nil
 		})
 		if validationErr != nil {
@@ -424,7 +430,10 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				ahead := CommitsAhead(ctx, repoPath)
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
-				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
+				pullCtx, pullCancel := baseCtx, baseCancel
+				if ahead >= longBacklogAhead {
+					pullCtx, pullCancel = PullContext(baseCtx, ahead, nil)
+				}
 				if opts.ValidatePush != nil {
 					// autostash restoration does not preserve differing staged
 					// and working copies, so validated publication must stop here.
@@ -527,7 +536,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				// the next push would lose the same race (#1261). Collapse it
 				// into one snapshot commit: the next rebase replays a single
 				// commit in seconds and the push wins.
-				if ahead > collapseBacklogAbove {
+				if ahead > collapseBacklogAbove && !opts.PreserveCommitHistory {
 					collapseCtx, collapseCancel := context.WithTimeout(ctx, opTimeout)
 					collapseErr := SquashUnpushed(collapseCtx, repoPath, fmt.Sprintf("ledger: collapse %d unpushed commits so the push can win the rebase race", ahead))
 					collapseCancel()

@@ -2,8 +2,11 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -11,6 +14,82 @@ import (
 // Output is auto-sanitized to remove credentials. Use repoPath="" for
 // commands that don't need -C.
 func RunGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("git: missing subcommand")
+	}
+	output, err := localGitCommand(ctx, repoPath, args...).CombinedOutput()
+	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
+	if err != nil {
+		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
+	}
+	return sanitized, nil
+}
+
+// RunGitFileOutput is RunGit with git's output sent to a file instead of a
+// pipe. Use it for a command that must finish even if this process dies under
+// it, such as a push. Through a pipe, git's next write after this process died
+// kills git with SIGPIPE; a session push orphaned at Claude Code's SessionEnd
+// died that way after authenticating, before it sent anything
+// (sageox/ox#1936). A file has no reader to lose.
+func RunGitFileOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("git: missing subcommand")
+	}
+	output, err := runWithFileOutput(localGitCommand(ctx, repoPath, args...))
+	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
+	if err != nil {
+		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
+	}
+	return sanitized, nil
+}
+
+// runWithFileOutput runs cmd with stdout and stderr in one temporary file and
+// returns what it wrote, like CombinedOutput. The file is unlinked as soon as
+// cmd starts: cmd keeps its descriptor, so a parent that dies leaves no file
+// behind (Windows cannot unlink an open file; it is removed after the read).
+func runWithFileOutput(cmd *exec.Cmd) ([]byte, error) {
+	f, err := os.CreateTemp("", "ox-git-output-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+	cmd.Stdout, cmd.Stderr = f, f
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(f.Name())
+	runErr := cmd.Wait()
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.Join(runErr, err)
+	}
+	output, err := io.ReadAll(f)
+	if err != nil {
+		return output, errors.Join(runErr, err)
+	}
+	return output, runErr
+}
+
+// RunGitStdout returns Git's stdout without stderr diagnostics or sanitization.
+// Use it to parse machine-readable output. Error messages sanitize stderr.
+func RunGitStdout(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("git: missing subcommand")
+	}
+	output, err := localGitCommand(ctx, repoPath, args...).Output()
+	if err == nil {
+		return output, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) != 0 {
+		return nil, fmt.Errorf("git %s: %s: %w", args[0], SanitizeOutput(strings.TrimSpace(string(exitErr.Stderr))), err)
+	}
+	return nil, fmt.Errorf("git %s: %w", args[0], err)
+}
+
+func localGitCommand(ctx context.Context, repoPath string, args ...string) *exec.Cmd {
 	var cmdArgs []string
 	if repoPath != "" {
 		cmdArgs = append(cmdArgs, "-C", repoPath)
@@ -57,12 +136,6 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	// git subprocess this codebase spawns, closes that whole class instead
 	// of patching each match site individually. Does not affect git's
 	// handling of file content or paths, which are UTF-8 regardless.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
-	output, err := cmd.CombinedOutput()
-	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
-
-	if err != nil {
-		return sanitized, fmt.Errorf("git %s: %s: %w", args[0], sanitized, err)
-	}
-	return sanitized, nil
+	cmd.Env = append(oxIdentityEnv(ctx, repoPath, os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	return cmd
 }

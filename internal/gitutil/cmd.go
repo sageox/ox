@@ -4,7 +4,11 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"time"
 )
+
+// Bound how long a helper can keep a Git subprocess's output pipes open.
+const gitWaitDelay = 2 * time.Second
 
 // NewNetworkCmd builds an *exec.Cmd for a git operation that talks to a remote
 // (clone, fetch, ls-remote, push). It is the single chokepoint that guarantees
@@ -60,7 +64,9 @@ func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
 		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
 	}, args...)
 	cmd := commandContext(ctx, "git", gitArgs...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	// A pull --rebase rewrites local commits, so their committer needs the
+	// same identity filter as RunGit.
+	cmd.Env = append(oxIdentityEnv(ctx, networkCmdRepo(args), os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	return cmd
 }
 
@@ -70,5 +76,6 @@ func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
 func commandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	setProcessGroupKill(cmd)
+	cmd.WaitDelay = gitWaitDelay
 	return cmd
 }

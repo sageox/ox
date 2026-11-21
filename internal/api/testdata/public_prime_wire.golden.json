@@ -54,6 +54,19 @@
       "url": "https://github.com/readest/readest/pulls",
       "at": "2026-10-19T16:00:00Z"
     }
+  ],
+  "rules": [
+    {
+      "name": "contributing",
+      "content": "Open an issue before a large PR.\nRun make test before you push."
+    },
+    {
+      "name": "go-style",
+      "globs": [
+        "**/*.go"
+      ],
+      "content": "Run gofmt."
+    }
   ]
 }
 

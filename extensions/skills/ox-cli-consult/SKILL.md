@@ -7,7 +7,8 @@ description: >-
   now?", "this request", or anything tied to a prior decision, a prod anomaly, or
   a metric/cost change. A confident answer that prior work contradicts is worse
   than a slow one — check first, then answer. Routes the cue to the right corpus:
-  recency to `ox session list`, conceptual to `ox query`, who/when of a recorded
+  recency to `ox session list`, a pasted sageox.ai session link to
+  `ox session view`, conceptual to `ox query`, who/when of a recorded
   conversation to `ox conversation search`, code-provenance to
   `ox code search`, decision-record work to `ox decision enrich`, a pasted
   sageox.ai recording link to `ox conversation show` (requires sign-in and

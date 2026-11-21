@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -26,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -325,12 +328,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
-	// write raw.jsonl header immediately so incremental hooks can append entries
-	if adapterName != "cursor" {
-		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-			// non-fatal: processAgentSession will write header at stop time as fallback
-		}
+	// an earlier recording's stream may owe its person the withheld notice;
+	// its mark is cleared only once this start's output is written
+	noticeDirs := writeStartHeaderAndCollectOwedNotices(projectRoot, state, adapterName)
+	if len(noticeDirs) > 0 {
+		notice = strings.TrimSpace(notice + "\n\n" + liveSecretWithheldEarlierWarning)
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -344,12 +346,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// output format selection (priority: review > text > json default)
 	if cfg.Review || cfg.Text {
-		printSessionStartText(inst.AgentID, adapterName, title, notice, state.StartedAt)
+		if err := printSessionStartText(os.Stdout, inst.AgentID, adapterName, title, notice, state.StartedAt, cfg.Review); err != nil {
+			return fmt.Errorf("write start output: %w", err)
+		}
 		if !cfg.Review {
+			confirmLiveSecretWithheldNotices(noticeDirs)
 			return nil
 		}
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
 	}
 
 	jsonOut, err := cli.MarshalJSONIndent(output)
@@ -357,7 +360,27 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("format start JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	return cli.WriteJSONBytes(os.Stdout, jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
+		return err
+	}
+	confirmLiveSecretWithheldNotices(noticeDirs)
+	return nil
+}
+
+// writeStartHeaderAndCollectOwedNotices writes a just-started recording's
+// raw.jsonl header, so incremental hooks can append entries (Cursor's is
+// written inside StartRecording), then returns the folders of earlier streams
+// that owe their person the withheld notice. The order matters: a start in a
+// reused folder moves the stream there, owed mark and all, to .live-<id>, and
+// a mark is cleared only where it is now.
+func writeStartHeaderAndCollectOwedNotices(projectRoot string, state *session.RecordingState, adapterName string) []string {
+	if adapterName != "cursor" {
+		if err := writeRawHeader(projectRoot, state); err != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", err)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
+	}
+	return earlierLiveSecretWithheld(state.SessionPath, state.SessionID)
 }
 
 // buildSessionStartOutput constructs the JSON output for session start.
@@ -385,19 +408,27 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 	return output
 }
 
-// printSessionStartText renders the human-readable text summary for session start.
-func printSessionStartText(agentID, adapterName, title, notice string, startedAt time.Time) {
+// printSessionStartText renders the human-readable text summary for session
+// start to w, followed in review mode by the machine output's heading. It is
+// one write, so its error says whether the notice in it reached the person.
+func printSessionStartText(w io.Writer, agentID, adapterName, title, notice string, startedAt time.Time, review bool) error {
+	var b bytes.Buffer
 	if notice != "" {
-		fmt.Printf("\n  %s\n\n", notice)
+		fmt.Fprintf(&b, "\n  %s\n\n", notice)
 	}
 	if title != "" {
-		cli.PrintSuccess(fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
+		cli.PrintSuccessTo(&b, fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
 	} else {
-		cli.PrintSuccess(cli.Wordmark() + " session recording started")
+		cli.PrintSuccessTo(&b, cli.Wordmark()+" session recording started")
 	}
-	fmt.Printf("  Agent: %s (%s)\n", agentID, adapterName)
-	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
-	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
+	fmt.Fprintf(&b, "  Agent: %s (%s)\n", agentID, adapterName)
+	fmt.Fprintf(&b, "  Started: %s\n", startedAt.Format("15:04:05"))
+	fmt.Fprintf(&b, "  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
+	if review {
+		b.WriteString("\n--- Machine Output ---\n")
+	}
+	_, err := w.Write(b.Bytes())
+	return err
 }
 
 // isManualSessionAgent returns true for agent types that require explicit
@@ -583,58 +614,31 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
+	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
+	var discoveryErr error
 	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
-		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
-			// use state.WorkspacePath (persisted at start) as the single source of truth
-			// for repoRoot -- never derive from ambient cwd/env at stop time
+		if sf, findErr := discoverNativeSessionFile(projectRoot, state); findErr == nil {
+			state.SessionFile = sf
+		} else {
+			discoveryErr = findErr
 			repoRoot := state.WorkspacePath
 			if repoRoot == "" {
-				repoRoot = projectRoot // fallback for legacy states without WorkspacePath
+				repoRoot = projectRoot
 			}
-			lookup := adapters.SessionLookup{
-				RepoRoot:       repoRoot,
-				AgentID:        state.AgentID,
-				AgentSessionID: state.AgentSessionID,
-				Since:          state.StartedAt.Add(-5 * time.Minute),
-			}
-			if sf, findErr := adapter.FindSessionFile(lookup); findErr == nil {
-				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
-				state.SessionFile = sf
+			if cacheHasEntries {
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo; saving the turns already captured instead.\n  %v\n", state.AdapterName, findErr)
 			} else {
-				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
-
-				// path variant retries: try alternate path forms that produce different project hashes
-				pathVariants := sessionPathVariants(repoRoot)
-				for _, variant := range pathVariants {
-					retryLookup := adapters.SessionLookup{
-						RepoRoot:       variant,
-						AgentID:        state.AgentID,
-						AgentSessionID: state.AgentSessionID,
-						Since:          state.StartedAt.Add(-5 * time.Minute),
-					}
-					if sf, retryErr := adapter.FindSessionFile(retryLookup); retryErr == nil {
-						slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
-						state.SessionFile = sf
-						break
-					}
-				}
-				// Do not scan other project buckets by time/agent ID here: that
-				// bypasses the adapter's native session ID and repo checks.
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state))
 			}
-
-			// if still not found after all retries, set rich recovery marker
-			if state.SessionFile == "" {
-				fmt.Fprintf(os.Stderr, "\nSession data may still be recoverable. Try:\n  ox agent %s session import --file <path-to-session-jsonl>\n\n", state.AgentID)
-				_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
-					AgentID:       state.AgentID,
-					AdapterName:   state.AdapterName,
-					StartedAt:     state.StartedAt,
-					WorkspacePath: repoRoot,
-					FailedAt:      time.Now(),
-					Error:         "session file not found at stop time",
-				})
-				_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			}
+			_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
+				AgentID:       state.AgentID,
+				AdapterName:   state.AdapterName,
+				StartedAt:     state.StartedAt,
+				WorkspacePath: repoRoot,
+				FailedAt:      time.Now(),
+				Error:         "session file not found at stop time",
+			})
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		}
 	}
 
@@ -644,7 +648,6 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// would, rather than leave the recording live for 'ox session upload' to
 	// refuse. An empty cache keeps the recording: an undiscovered source does
 	// not prove the session empty, and a later stop can still find it.
-	cacheHasEntries := state.SessionPath != "" && session.HasSubstantiveEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
 	var processResult *agentSessionResult
 	if state.SessionFile != "" || state.AdapterName == "cursor" || cacheHasEntries {
 		processStart := time.Now()
@@ -749,23 +752,31 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		})
 	}
 
+	return emitSessionStop(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
+}
+
+// emitSessionStop writes the stop's output, then clears the owed marks of the
+// withheld notices it gave: only an output actually written has said them.
+func emitSessionStop(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, discoveryErr error, timing map[string]int64) error {
+	var err error
 	// output format selection (priority: review > text > json default)
-	if cfg.Review {
+	switch {
+	case cfg.Review:
 		// security audit mode: human summary first, then JSON
-		outputTextSummary(projectRoot, state, duration, processResult)
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
-	}
-
-	if cfg.Text {
+		err = outputTextSummary(os.Stdout, projectRoot, state, duration, processResult, true)
+		if err == nil {
+			err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
+		}
+	case cfg.Text:
 		// human-readable text output
-		outputTextSummary(projectRoot, state, duration, processResult)
-		return nil
+		err = outputTextSummary(os.Stdout, projectRoot, state, duration, processResult, false)
+	default:
+		err = outputSessionStopJSON(projectRoot, inst, state, duration, processResult, discoveryErr, timing)
 	}
-
-	// default: JSON output
-	return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
+	if err == nil && processResult != nil {
+		confirmLiveSecretWithheldNotices(processResult.LiveNoticeDirs)
+	}
+	return err
 }
 
 // sessionPathVariants returns alternate path forms that may produce different
@@ -793,6 +804,64 @@ func sessionPathVariants(repoRoot string) []string {
 	}
 
 	return variants
+}
+
+// discoverNativeSessionFile finds a recording's native session file when none
+// was known at start. The recorded workspace is the source of truth; its other
+// spellings, and the checkout this command runs in (a linked worktree, where
+// Claude Code desktop runs a session whose hooks ran in the main checkout), are
+// retried. Each lookup keeps the adapter's own session ID and ownership checks;
+// other project buckets are never scanned by time or agent ID here. The error
+// is the recorded workspace's, which says why its transcript was not accepted.
+func discoverNativeSessionFile(projectRoot string, state *session.RecordingState) (string, error) {
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	if err != nil {
+		return "", err
+	}
+	repoRoot := state.WorkspacePath
+	if repoRoot == "" {
+		repoRoot = projectRoot // fallback for legacy states without WorkspacePath
+	}
+	lookup := func(root string) (string, error) {
+		return adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot:       root,
+			AgentID:        state.AgentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
+		})
+	}
+	sf, findErr := lookup(repoRoot)
+	if findErr == nil {
+		slog.Info("session file discovered", "file", sf, "adapter", state.AdapterName)
+		return sf, nil
+	}
+	slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
+	variants := sessionPathVariants(repoRoot)
+	if projectRoot != "" && projectRoot != repoRoot {
+		variants = append(variants, projectRoot)
+	}
+	for _, variant := range variants {
+		if sf, retryErr := lookup(variant); retryErr == nil {
+			slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
+			return sf, nil
+		}
+	}
+	return "", findErr
+}
+
+// undiscoveredSessionNextSteps says what to do with a recording whose native
+// session file was not found: the recording and cache stay, so a retry can
+// still publish it once the transcript is accepted.
+func undiscoveredSessionNextSteps(state *session.RecordingState) string {
+	steps := fmt.Sprintf("The recording is kept. Next steps:\n"+
+		"  - retry once the cause above is fixed: ox agent %s session recover\n"+
+		"  - or upload the transcript itself: ox agent %s session abort, then ox session import", state.AgentID, state.AgentID)
+	if state.AgentSessionID != "" {
+		steps += fmt.Sprintf(" --session %s --include-aborted", shellQuote(state.AgentSessionID))
+	} else {
+		steps += " (pick the session, then add --include-aborted)"
+	}
+	return steps
 }
 
 // recordSessionObservation writes a session summary observation to team memory.
@@ -830,39 +899,48 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 	}
 }
 
-// outputTextSummary renders the human-readable text summary for session stop.
-func outputTextSummary(projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult) {
+// outputTextSummary renders the human-readable text summary for session stop
+// to w, followed in review mode by the machine output's heading. It is one
+// write, so its error says whether the notices in it reached the person.
+func outputTextSummary(w io.Writer, projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult, review bool) error {
+	var b bytes.Buffer
 	if state.Title != "" {
-		cli.PrintSuccess(fmt.Sprintf("Recording stopped: %q", state.Title))
+		cli.PrintSuccessTo(&b, fmt.Sprintf("Recording stopped: %q", state.Title))
 	} else {
-		cli.PrintSuccess("Recording stopped")
+		cli.PrintSuccessTo(&b, "Recording stopped")
 	}
 
-	fmt.Printf("  Duration: %s\n", duration)
-	fmt.Printf("  Agent: %s (%s)\n", state.AgentID, state.AdapterName)
+	fmt.Fprintf(&b, "  Duration: %s\n", duration)
+	fmt.Fprintf(&b, "  Agent: %s (%s)\n", state.AgentID, state.AdapterName)
 
 	if processResult != nil {
 		if processResult.Model != "" {
-			fmt.Printf("  Model: %s\n", processResult.Model)
+			fmt.Fprintf(&b, "  Model: %s\n", processResult.Model)
 		}
 		if processResult.Held {
-			fmt.Printf("  %s\n", processResult.UploadWarning)
+			fmt.Fprintf(&b, "  %s\n", processResult.UploadWarning)
+		}
+		if processResult.LiveSecretWithheld && !processResult.DeletedOnServer {
+			fmt.Fprintf(&b, "  %s\n", liveSecretWithheldWarning)
+		}
+		if processResult.EarlierLiveSecretWithheld {
+			fmt.Fprintf(&b, "  %s\n", liveSecretWithheldEarlierWarning)
 		}
 
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.SummaryMDPath != "" {
-			fmt.Println("\n  Generated files:")
+			b.WriteString("\n  Generated files:\n")
 			if processResult.RawPath != "" {
-				fmt.Printf("    Raw session:     %s\n", processResult.RawPath)
+				fmt.Fprintf(&b, "    Raw session:     %s\n", processResult.RawPath)
 			}
 			if processResult.SummaryMDPath != "" {
-				fmt.Printf("    Summary:         %s\n", processResult.SummaryMDPath)
+				fmt.Fprintf(&b, "    Summary:         %s\n", processResult.SummaryMDPath)
 			}
 			if processResult.SessionMDPath != "" {
-				fmt.Printf("    Full session:    %s\n", processResult.SessionMDPath)
+				fmt.Fprintf(&b, "    Full session:    %s\n", processResult.SessionMDPath)
 			}
 			if processResult.PlanPath != "" {
-				fmt.Printf("    Plan:            %s\n", processResult.PlanPath)
+				fmt.Fprintf(&b, "    Plan:            %s\n", processResult.PlanPath)
 			}
 		}
 
@@ -875,19 +953,24 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 			if teamLabel == "" {
 				teamLabel = loc.TeamID
 			}
-			fmt.Printf("  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
+			fmt.Fprintf(&b, "  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
 		}
 		if loc.SessionURL != "" {
-			fmt.Printf("  %-13s%s\n", "View at", loc.SessionURL)
+			fmt.Fprintf(&b, "  %-13s%s\n", "View at", loc.SessionURL)
 		}
 
 		if processResult.SecretsRedacted > 0 {
-			fmt.Printf("\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
+			fmt.Fprintf(&b, "\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
 		}
 		if processResult.Summary != "" {
-			fmt.Printf("\n  Summary: %s\n", processResult.Summary)
+			fmt.Fprintf(&b, "\n  Summary: %s\n", processResult.Summary)
 		}
 	}
+	if review {
+		b.WriteString("\n--- Machine Output ---\n")
+	}
+	_, err := w.Write(b.Bytes())
+	return err
 }
 
 // sessionStopLocationInfo carries where a stopped session landed, for
@@ -923,7 +1006,9 @@ func sessionStopLocation(projectRoot string, state *session.RecordingState) sess
 }
 
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+// discoveryErr is why the native session file was not found, when it was not.
+func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, discoveryErr error, timing map[string]int64) error {
+	confirmMediaNotice := func() {}
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
@@ -974,16 +1059,31 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		if processResult.Held {
 			output.Guidance = heldSessionGuidance
 		}
+		if processResult.DeletedOnServer {
+			output.Guidance = deletedOnServerGuidance
+		}
+		addLiveSecretWithheldNotice(&output, processResult)
+		confirmMediaNotice = addLiveMediaNotice(&output)
 	} else {
+		// nothing was saved or uploaded, and the recording is kept for a retry:
+		// report failure so no caller reads this as a saved session
+		output.Success = false
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
-		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
+		if discoveryErr != nil {
+			output.UploadWarning += ": " + discoveryErr.Error()
+		}
+		output.Guidance = "Session not saved: no conversation data was found for this recording. " + strings.ReplaceAll(undiscoveredSessionNextSteps(state), "\n", " ")
 	}
 	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format stop JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	return cli.WriteJSONBytes(os.Stdout, jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
+		return err
+	}
+	confirmMediaNotice() // delivered: only now is it given
+	return nil
 }
 
 // sessionStopOutput aliases pipeline.StopOutput for backward compat within package main.
@@ -1328,9 +1428,17 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 	// A held session gets its hold before anything the daemon reacts to, and
 	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
-	// be recorded, the stop fails and the recording state is kept.
-	held := stopHoldsSession(projectRoot, state)
-	if held {
+	// be recorded, the stop fails and the recording state is kept. A session
+	// deleted on SageOx while it streamed is held the same way, for its own reason.
+	deletedOnServer := liveDeletedOnServer(state.SessionPath)
+	collectLiveSecretWithheldNotices(result, state)
+	held := deletedOnServer || stopHoldsSession(projectRoot, state)
+	switch {
+	case deletedOnServer:
+		if err := holdDeletedOnServer(result, state.SessionPath, "session_stop"); err != nil {
+			return nil, err
+		}
+	case held:
 		if err := holdStoppedSession(result, state, filepath.Dir(result.RawPath), "session_stop"); err != nil {
 			return nil, err
 		}
@@ -1388,10 +1496,18 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	if held {
-		slog.Info("session held on this machine, skipping upload", "session", sessionName)
+		slog.Info("session held on this machine, skipping upload", "session", sessionName, "deleted_on_server", deletedOnServer)
 		result.LedgerSessionDir = ""
 		result.UploadWarning = heldSessionWarning(sessionName)
+		if deletedOnServer {
+			result.UploadWarning = deletedOnServerWarning
+		}
 		return result, nil
+	}
+	// the publication boundary (C3): both upload modes below publish, the async
+	// one through the daemon, so a delete heard since the check above stops here
+	if errors.Is(refuseDeletedOnServer(state.SessionPath), errSessionDeletedOnServer) {
+		return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
 	}
 
 	// LFS upload pipeline: upload content files to LFS blob storage,
@@ -1465,7 +1581,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// the header-only raw.jsonl written at session start (plus any footer a
 			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
-		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+		} else if copyErr := copySessionCacheToLedger(result, state, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
@@ -1494,6 +1610,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
 		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
+		if errors.Is(uploadErr, errSessionDeletedOnServer) {
+			return holdRefusedAsDeleted(result, state.SessionPath, filepath.Dir(result.RawPath))
+		}
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")
@@ -1573,8 +1692,22 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	if err := session.CheckNativeSourceBinding(state); err != nil {
 		return err
 	}
+	// the publication boundary (C3): read now, before the first Ledger write,
+	// never from a value the stop read before generating artifacts
+	if err := refuseDeletedOnServer(state.SessionPath); err != nil {
+		return err
+	}
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	recordingID := stopRecordingID(result, state)
+	publicationID := session.PendingUploadID(sourceCacheDir)
+	if publicationID == "" {
+		publicationID = recordingID
+	}
+	if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, publicationID); err != nil {
+		return err
+	}
 
 	// durable ID precedence via the shared resolver: a preserved meta.json
 	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
@@ -1616,7 +1749,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return nil
 	}
 
-	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	sessionID := session.ResolveOrMintSessionID(preservedID, recordingID)
 	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, state.SessionPath, state.Trace)
 	if traceErr != nil {
 		slog.Warn("trace materialization skipped", "error", traceErr)
@@ -1649,8 +1782,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// Record retry ownership before the ledger gains a final meta.json: once
 	// that file exists, findOrphanedSessionsInDir skips this session unless
 	// the marker is present, so every failure below must leave it behind.
-	sourceCacheDir := filepath.Dir(result.RawPath)
-	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+	if err := session.WriteUploadRetryPending(sourceCacheDir, sessionID); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}
 
@@ -1676,7 +1808,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		if errors.Is(err, api.ErrReadOnly) {
 			// Read-only access is not retryable; a marker would only hand doctor
 			// a retry that fails the same way.
-			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+			_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
@@ -1748,7 +1880,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
-	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
+	_ = os.Remove(filepath.Join(sourceCacheDir, session.UploadRetryPendingFile))
 
 	// reverse-link reconciliation: the session is committed, so record its
 	// ses_ id + outcome=stopped in the meta.json of every plan it produced
@@ -1864,9 +1996,24 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID 
 	}
 }
 
-// copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.
-func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
-	return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+func stopRecordingID(result *agentSessionResult, state *session.RecordingState) string {
+	if state.SessionID != "" {
+		return state.SessionID
+	}
+	return session.ReadHeaderSessionID(result.RawPath)
+}
+
+// Delegated stop can write into the Ledger before the daemon sees the session.
+// Protect that write with the same ownership check and lock as daemon staging.
+func copySessionCacheToLedger(result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	waitForGCSwap(ledgerPath)
+	return gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if err := session.CheckFinalizedLedgerSessionDestination(sessionDir, sessionName, stopRecordingID(result, state)); err != nil {
+			return err
+		}
+		return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
+	})
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon

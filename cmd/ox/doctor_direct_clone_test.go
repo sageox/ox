@@ -132,8 +132,8 @@ func (p *pacedResponse) Write(b []byte) (int, error) {
 }
 
 // setDirectCloneBudgets shrinks doctor's direct-clone budgets for one test:
-// fixed is the team-context budget, the fixed 60s a Ledger clone used to
-// share; backstop is the Ledger's own wall-clock limit. Progress is sampled
+// fixed is the team-context budget, the fixed 60s both clones used to
+// have; backstop is the Ledger's own wall-clock limit. Progress is sampled
 // and printed often enough to see in a download lasting a few seconds.
 func setDirectCloneBudgets(t *testing.T, fixed, backstop time.Duration) {
 	t.Helper()

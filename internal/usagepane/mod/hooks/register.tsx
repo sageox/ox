@@ -17,38 +17,40 @@
 // re-read at each turn's start and end, after each ox command, and every 15
 // seconds. Terminal sessions keep their own status line and never run it.
 //
-// On the desktop app, VS Code and mobile it also draws SageOx's data flow
-// into the transcript: a one-line lane under each ox tool row (a Bash `ox …`
-// command or a SageOx MCP tool) and under each prompt whose hooks brought
-// team context in (prime, murmurs, ledger recall). Context arriving travels
-// the lane as filled dots, anything sent back as hollow rings, once; then the
-// lane settles to a still line that says what moved. Folded tool groups
-// holding an ox call unfold so the lane shows. `/ox-session-report flow off`
+// It also draws SageOx's data flow into the transcript, on every surface: a
+// one-line lane under each ox tool row (a Bash `ox …` command or a SageOx MCP
+// tool). Only ox calls get one: context a hook injects with a prompt (the
+// session-start prime, murmurs, ledger recall) draws nothing, since nobody
+// asked for it at that moment and the engine sends it again after every
+// reload. Context arriving travels the lane as filled dots, anything sent
+// back as hollow rings: marching while the call runs, then once across as it
+// lands; then the lane settles to a still line that says what moved. Outside the terminal,
+// folded tool groups holding an ox call unfold so the lane shows; the
+// terminal keeps them folded and draws the lanes of their ox calls beneath
+// the group (the newest three, then a count). `/ox-session-report flow off`
 // turns the lanes off, `flow still` draws them without motion and `flow on`
-// brings the motion back. Terminal sessions draw none.
+// brings the motion back. The desktop app, VS Code and mobile get an SVG
+// lane; the terminal has no Svg, so it gets the same lane as one row of text
+// cells (hooks/textlane.ts), repainted in place while the dots travel.
 //
 // Every hook falls back to `next(e)`: a pane bug must never cost a turn.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import type { FlowEvent, FlowState, Statusline, UsageReport } from '../types'
-import { attachEvents, classifyAttachment, classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, promptEvents, startEvent } from './flow'
-import type { FlowAttachment, FlowStart } from './flow'
+import type { FlowEvent, Statusline, UsageReport } from '../types'
+import { classifyBash, classifyMcp, EMPTY_FLOW, eventsFor, finishEvent, startEvent } from './flow'
+import type { FlowStart } from './flow'
 import {
-  arrived,
-  drawn,
   finishOf,
   FLOW_KEY,
   flowMode,
   flowStored,
   isMcpName,
   laneWidth,
-  newBinder,
   parseFlowArg,
   settleDelay,
   startOf,
-  submitted,
   withSent,
   type FlowMode,
   type RanLike,
@@ -81,7 +83,8 @@ import {
   truncate,
   usedRows,
 } from './logic'
-import { caption, laneSvg, promptSvg } from './scene'
+import { caption, eventModel, laneSvg, type Model } from './scene'
+import { encodeCells, LABEL_SAGEOX, LABEL_SESSION, DIGEST_GAP, textLane, TRACK } from './textlane'
 import { TOKENS } from './tokens'
 
 // Change a tag when its value's fields change: an atom declines what an
@@ -288,14 +291,12 @@ function refreshStatusline($: EngineInterface): Promise<void> {
 }
 
 // Module state for the flow lanes: the setting as last read (re-read after
-// FLOW_CACHE_MS; the command sets it at once), one settle timer per row
-// still animating, and the binder tying hook attachments to their prompt row
-// (hooks/flowwire.ts states the rule). A reload drops all of it: the events
-// themselves live in the `flow` atom, and the next draw settles what it finds.
+// FLOW_CACHE_MS; the command sets it at once) and one settle timer per row
+// still animating. A reload drops both: the events themselves live in the
+// `flow` atom, and the next draw settles what it finds.
 const FLOW_CACHE_MS = 5_000
 let flowCache: { mode: FlowMode; at: number } | null = null
 const settling = new Map<string, { cancel: () => void }>()
-let binder = newBinder<FlowAttachment[]>()
 
 async function modeOf($: EngineInterface, now: number): Promise<FlowMode> {
   if (flowCache !== null && now - flowCache.at < FLOW_CACHE_MS) {
@@ -311,12 +312,160 @@ async function modeOf($: EngineInterface, now: number): Promise<FlowMode> {
   return flowCache.mode
 }
 
+// The terminal's lanes still in flight: each track's model and the frame last
+// painted, repainted by one shared ticker (a blit, no redraw) the way the pet
+// mod animates Oxy. The ticker runs only while a lane is moving. A row's lone
+// lane is keyed by its requestId; a folded group's several lanes each add
+// their call's tool_use_id, to the map key and to the Raster's key alike.
+const LANE_TICK_MS = 50
+const TRACK_KEY = 'ox-flow-track'
+type LaneSite = { requestId: string; key: string; model: Model; columns: number | undefined; drawn: string }
+const lanes = new Map<string, LaneSite>()
+let laneTicker: { cancel: () => void } | null = null
+
+async function laneTick($: EngineInterface) {
+  const now = await $.clock.now()
+  for (const [id, site] of lanes) {
+    const lane = textLane(site.model, now, { columns: site.columns })
+    if (lane.track !== site.drawn) {
+      let done: { deny?: string }
+      try {
+        done = await $.ui.blit({ requestId: site.requestId, key: site.key, cells: encodeCells(lane.cells) })
+      } catch {
+        done = { deny: 'blit failed' }
+      }
+      if (done.deny !== undefined) {
+        // Not mounted any more (scrolled away, redrawn): the settle redraw
+        // already scheduled for this row leaves it on its still frame.
+        lanes.delete(id)
+        continue
+      }
+      site.drawn = lane.track
+    }
+    if (!lane.moving) {
+      lanes.delete(id)
+    }
+  }
+  if (lanes.size === 0) {
+    laneTicker?.cancel()
+    laneTicker = null
+  }
+}
+
+function startLaneTicker($: EngineInterface) {
+  laneTicker ??= $.clock.every(LANE_TICK_MS, () => void laneTick($).catch(() => undefined))
+}
+
+type LaneSiteOf = { requestId: string; viewport?: { columns?: number } }
+
+// laneRow is one text lane: dim end labels, the track as a one-row Raster (so
+// the ticker can repaint it), and the digest. `call` names the group call the
+// lane belongs to, keeping its track apart from its neighbours'; a row's lone
+// lane leaves it out and keeps the plain keys.
+function laneRow($: EngineInterface, e: LaneSiteOf, m: Model, now: number, still: boolean, call?: string) {
+  const columns = e.viewport?.columns
+  const lane = textLane(m, now, { columns, still })
+  const key = call === undefined ? TRACK_KEY : `${TRACK_KEY}:${call}`
+  const id = call === undefined ? e.requestId : `${e.requestId}#${call}`
+  if (lane.moving) {
+    lanes.set(id, { requestId: e.requestId, key, model: m, columns, drawn: lane.track })
+    startLaneTicker($)
+  } else {
+    lanes.delete(id)
+  }
+  const { Box, Text, Raster } = $.ui.resolve(e as never) as unknown as Elements['terminal']
+  return (
+    <Box key={call === undefined ? 'ox-flow' : `ox-flow:${call}`} flexDirection="row">
+      {lane.labels && <Text dimColor>{LABEL_SAGEOX}</Text>}
+      <Raster key={key} cells={encodeCells(lane.cells)} columns={TRACK} rows={1} />
+      {lane.labels && <Text dimColor>{LABEL_SESSION}</Text>}
+      <Text key="ox-flow-digest" wrap="truncate-end">
+        {DIGEST_GAP}
+        {lane.digest.map((s, i) =>
+          s.cls === 'bad' ? (
+            <Text key={i} color="error">
+              {s.text}
+            </Text>
+          ) : (
+            <Text key={i} dimColor>
+              {s.text}
+            </Text>
+          ),
+        )}
+      </Text>
+    </Box>
+  )
+}
+
+// terminalLane draws `own` with its text lane beneath it.
+function terminalLane($: EngineInterface, e: LaneSiteOf, own: unknown, m: Model, now: number, still: boolean) {
+  const { Box } = $.ui.resolve(e as never) as unknown as Elements['terminal']
+  return (
+    <Box flexDirection="column">
+      {own as never}
+      {laneRow($, e, m, now, still)}
+    </Box>
+  )
+}
+
+// The most lanes a folded terminal group draws beneath it: its newest calls,
+// with one dim line counting the rest.
+const MAX_GROUP_LANES = 3
+
+// groupLanes draws a folded terminal group's row with the lanes of its ox
+// calls beneath it, or `own` alone when none has a flow event.
+async function groupLanes(
+  $: EngineInterface,
+  e: LaneSiteOf & { props: { calls: ReadonlyArray<{ tool_use_id?: string }>; onScreen?: unknown } },
+  own: unknown,
+): Promise<unknown> {
+  const now = await $.clock.now()
+  const mode = await modeOf($, now)
+  if (mode === 'off') {
+    return own
+  }
+  const state = await read($, flow)
+  const evs: FlowEvent[] = []
+  for (const c of e.props.calls) {
+    const id = c.tool_use_id
+    const ev = id ? eventsFor(state, id).find(x => x.id === id) : undefined
+    if (ev !== undefined) {
+      evs.push(ev)
+    }
+  }
+  if (evs.length === 0) {
+    return own
+  }
+  const shown = evs.slice(-MAX_GROUP_LANES)
+  const hidden = evs.length - shown.length
+  const still = mode === 'still' || e.props.onScreen === null
+  if (!still) {
+    for (const ev of shown) {
+      settleLater($, ev.id, settleDelay([ev], now))
+    }
+  }
+  const { Box, Text } = $.ui.resolve(e as never) as unknown as Elements['terminal']
+  return (
+    <Box flexDirection="column">
+      {own as never}
+      {hidden > 0 && (
+        <Text key="ox-flow-more" dimColor>
+          {`+${hidden} more ox call${hidden === 1 ? '' : 's'}`}
+        </Text>
+      )}
+      {shown.map(ev => laneRow($, e, eventModel(ev), now, still, ev.id))}
+    </Box>
+  )
+}
+
 function resetFlow() {
   for (const t of settling.values()) {
     t.cancel()
   }
   settling.clear()
-  binder = newBinder<FlowAttachment[]>()
+  laneTicker?.cancel()
+  laneTicker = null
+  lanes.clear()
   flowCache = null
 }
 
@@ -357,25 +506,6 @@ async function endFlow($: EngineInterface, id: string, start: FlowStart | null, 
   } catch {
     // The call already ran; a lane that cannot close changes nothing.
   }
-}
-
-// withAttachments files one hook attachment's blocks under a prompt row.
-// Each attachment gets its own batch id (`att:<msg>#b<n>`), n above every
-// batch still retained, so a prompt holding both SessionStart and
-// UserPromptSubmit context keeps both, even after the cap evicted some.
-function withAttachments(s: FlowState, msg: string, attachments: FlowAttachment[], now: number): FlowState {
-  let next = 0
-  for (const e of promptEvents(s, msg)) {
-    const m = /#b(\d+)#/.exec(e.id)
-    if (m) {
-      next = Math.max(next, Number(m[1]) + 1)
-    }
-  }
-  return attachEvents(s, { id: `att:${msg}#b${next}`, now, attachments })
-}
-
-async function recordAttachments($: EngineInterface, msg: string, attachments: FlowAttachment[], now: number) {
-  await update($, flow, s => withAttachments(s, msg, attachments, now))
 }
 
 // settleLater redraws a row once its animation has played, so it settles to
@@ -505,42 +635,6 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // A prompt submit opens the window its hook attachments belong to.
-  on('prompt.submit', async ($, e, next) => {
-    if (e.isMeta !== true) {
-      submitted(binder)
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
-  // Hook-injected team context (prime, murmurs, ledger recall): filed under
-  // the prompt row it came in with, now or once that row draws. The text the
-  // model reads passes through untouched.
-  on('prompt.attachment', async ($, e, next) => {
-    const out = await next(e)
-    try {
-      if (e.origin.kind !== 'hook' || e.agentId !== undefined || typeof out.text !== 'string') {
-        return out
-      }
-      const attachments = classifyAttachment(out.text, e.origin.event)
-      if (attachments.length === 0) {
-        return out
-      }
-      const now = await $.clock.now()
-      if ((await modeOf($, now)) === 'off') {
-        return out
-      }
-      const target = arrived(binder, out.text, attachments)
-      if (target !== null) {
-        await recordAttachments($, target, attachments, now)
-        $.ui.invalidate('ui.render')
-      }
-    } catch {
-      // Context still reaches the model; only its lane is lost.
-    }
-    return out
-  }).catch(($, e, next) => next(e))
-
   on('turn.start', async ($, e, next) => {
     void refreshStatusline($)
     return next(e)
@@ -620,12 +714,9 @@ export const register: Register = on => {
     )
   }).catch(($, e, next) => next(e))
 
-  // The flow lane under an ox tool row (desktop, VS Code, mobile).
+  // The flow lane under an ox tool row: an SVG, or text cells on the terminal.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const own = await next(e)
-    if (e.surface === 'terminal') {
-      return own
-    }
     const now = await $.clock.now()
     const mode = await modeOf($, now)
     if (mode === 'off') {
@@ -639,6 +730,9 @@ export const register: Register = on => {
     const still = mode === 'still' || e.props.onScreen === null
     if (!still) {
       settleLater($, e.requestId, settleDelay([ev], now))
+    }
+    if (e.surface === 'terminal') {
+      return terminalLane($, e, own, eventModel(ev), now, still)
     }
     const width = laneWidth(e.viewport)
     const { Box, Svg } = $.ui.resolve(e)
@@ -654,60 +748,20 @@ export const register: Register = on => {
     )
   }).catch(($, e, next) => next(e))
 
-  // The flow strip under a prompt that carried team context in. Every
-  // UserMessage draw also lets the binder claim pending attachments.
-  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const own = await next(e)
-    const composer = e.props.origin.kind === 'composer'
-    const now = await $.clock.now()
-    // Drawing is pure: the claim is written from a timer, and this draw folds
-    // it in locally so the strip shows at once.
-    const claimed = drawn(binder, e.requestId, composer)
-    if (claimed.length > 0) {
-      const id = e.requestId
-      $.clock.after(0, () => {
-        void (async () => {
-          for (const attachments of claimed) {
-            await recordAttachments($, id, attachments, now)
-          }
-          $.ui.invalidate('ui.render')
-        })().catch(() => undefined)
-      })
-    }
-    if (e.surface === 'terminal' || !composer) {
-      return own
-    }
-    const mode = await modeOf($, now)
-    if (mode === 'off') {
-      return own
-    }
-    let state = await read($, flow)
-    for (const attachments of claimed) {
-      state = withAttachments(state, e.requestId, attachments, now)
-    }
-    const evs: FlowEvent[] = promptEvents(state, e.requestId)
-    if (evs.length === 0) {
-      return own
-    }
-    const still = mode === 'still' || e.props.onScreen === null
-    if (!still) {
-      settleLater($, `att:${e.requestId}`, settleDelay(evs, now))
-    }
-    const width = laneWidth(e.viewport)
-    const { Box, Svg } = $.ui.resolve(e)
-    return (
-      <Box flexDirection="column">
-        {own}
-        <Box key="ox-flow" flexDirection="row">
-          <Svg key="ox-flow-lane" source={promptSvg(evs, now, { width, reducedMotion: still })} alt={caption(evs)} width={width} height={TOKENS.height} />
-        </Box>
-      </Box>
-    )
-  }).catch(($, e, next) => next(e))
-
-  // A folded group holding an ox call unfolds, so its rows (and lanes) show.
+  // Outside the terminal, a folded group holding an ox call unfolds, so its
+  // rows (and lanes) show. The terminal stays folded and draws the lanes of
+  // its ox calls beneath the group's line instead; unfolded, each row draws
+  // its own.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    if (e.surface === 'terminal' || e.props.isExpanded) {
+    if (e.surface === 'terminal') {
+      const own = await next(e)
+      if (e.props.isExpanded) {
+        return own
+      }
+      // A lane that cannot draw never costs the group's own line.
+      return groupLanes($, e, own).catch(() => own) as never
+    }
+    if (e.props.isExpanded) {
       return next(e)
     }
     if (!e.props.calls.some(c => safely(() => startOf(c.tool, c.input)) !== null)) {
@@ -966,6 +1020,6 @@ async function flowCommand($: EngineInterface, rest: string): Promise<string> {
       ? 'ox flow lanes off.'
       : mode === 'still'
         ? 'ox flow lanes drawn still, without motion.'
-        : 'ox flow lanes on: SageOx data flow draws under ox calls and prompts (desktop, VS Code, mobile).'
+        : 'ox flow lanes on: SageOx data flow draws under ox calls and prompts.'
   return saved ? said : `${said} The setting did not save; it lasts until the session ends.`
 }

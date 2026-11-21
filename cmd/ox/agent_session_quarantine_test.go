@@ -120,7 +120,7 @@ func TestPrimeStartsAFreshRecordingBesideAQuarantinedOne(t *testing.T) {
 	oxConfigSetRepo(t, "session_recording", "auto")
 
 	const agentID = "OxPrimeHeld"
-	first := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", "")
+	first := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", "")
 	require.NotNil(t, first)
 	require.True(t, first.Recording)
 	require.NotContains(t, first.UserNotification, "held back")
@@ -130,7 +130,7 @@ func TestPrimeStartsAFreshRecordingBesideAQuarantinedOne(t *testing.T) {
 	require.NoError(t, session.MarkSourceRejected(f.projectRoot, agentID))
 	moved := moveToEarlierMinute(t, held)
 
-	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", "")
+	status := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", "")
 	require.NotNil(t, status)
 	assert.True(t, status.Recording, "prime must report the new recording")
 	assert.True(t, status.AutoStarted, "a quarantined recording must not make prime think it is already recording")
@@ -284,10 +284,31 @@ func TestReleaseQuarantine_RecoversTheHeldRecordingNotTheActiveOne(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
 	moved := moveToEarlierMinute(t, held)
+	require.NoError(t, session.UpdateRecordingStateAt(moved.SessionPath, moved.SessionID, func(state *session.RecordingState) {
+		state.StartedAt = state.StartedAt.Add(time.Hour)
+		state.WorkspacePath = projectRoot
+	}))
 
-	fresh, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser", SessionFile: source})
+	fresh, err := session.StartRecording(projectRoot, session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser", SessionFile: source, WorkspacePath: projectRoot})
 	require.NoError(t, err)
 
+	// Simulate a clock rollback, then check both active lookup routes while
+	// the held recording is being handed to the recovery pipeline.
+	originalRecover := recoverForRelease
+	t.Cleanup(func() { recoverForRelease = originalRecover })
+	recoverForRelease = func(inst *agentinstance.Instance, root string, state *session.RecordingState) error {
+		require.Equal(t, moved.SessionID, state.SessionID)
+		active, err := session.LoadRecordingStateForAgent(root, inst.AgentID)
+		require.NoError(t, err)
+		require.NotNil(t, active)
+		require.Equal(t, fresh.SessionID, active.SessionID)
+		workspace, err := session.LoadRecordingStateForWorkspace(root, fresh.WorkspacePath)
+		require.NoError(t, err)
+		require.NotNil(t, workspace)
+		require.Equal(t, fresh.SessionID, workspace.SessionID)
+		assert.True(t, heldRecording(t, root, inst.AgentID).SourceRejected)
+		return originalRecover(inst, root, state)
+	}
 	require.NoError(t, recoverAgentSession(&agentinstance.Instance{AgentID: agentID}, true))
 
 	_, statErr := os.Stat(filepath.Join(moved.SessionPath, ".recording.json"))
@@ -644,43 +665,28 @@ func TestUploadSessionLFS_RefusesAQuarantinedSession(t *testing.T) {
 // coworker declines both the upload and the discard, recovery reports success
 // without publishing anything; the recording must go back to being quarantined,
 // not be left as an ordinary stale recording the next sweep would publish.
-func TestReleaseQuarantine_DecliningThePromptsPutsTheQuarantineBack(t *testing.T) {
-	// The prompts exist only on the publish path; the fixture's manual project
-	// config would hold the session instead (GH #1093). Set before the
-	// recording starts, which records the mode it resolves.
-	t.Setenv("OX_SESSION_PUBLISHING", "auto")
-	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+func TestReleaseQuarantine_SourceDisappearsBeforeFinalDrain(t *testing.T) {
+	projectRoot, agentID, source := setupHandleAfterToolTest(t)
 	t.Chdir(projectRoot)
-	held, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
 	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+	held := heldRecording(t, projectRoot, agentID)
 	raw := filepath.Join(held.SessionPath, "raw.jsonl")
-	rawBefore, err := os.ReadFile(raw)
+	before, err := os.ReadFile(raw)
 	require.NoError(t, err)
 
-	// the cache-recovery path, with a coworker who answers no to every question
-	prompted := 0
-	oldEnabled, oldConfirm, oldRecover := recoverPromptsEnabled, recoverConfirm, recoverForRelease
-	t.Cleanup(func() { recoverPromptsEnabled, recoverConfirm, recoverForRelease = oldEnabled, oldConfirm, oldRecover })
-	recoverPromptsEnabled = func() bool { return true }
-	recoverConfirm = func(string, bool) bool { prompted++; return false }
-	recoverForRelease = func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
-		return recoverFromCache(inst, projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"))
+	originalRecover := recoverForRelease
+	t.Cleanup(func() { recoverForRelease = originalRecover })
+	recoverForRelease = func(inst *agentinstance.Instance, root string, state *session.RecordingState) error {
+		require.NoError(t, os.Remove(source))
+		return originalRecover(inst, root, state)
 	}
 
 	err = recoverAgentSession(&agentinstance.Instance{AgentID: agentID}, true)
-	require.NoError(t, err, "declining is not a failure")
-	assert.Equal(t, 2, prompted, "the coworker was asked to upload and then to discard")
-
-	again := heldRecording(t, projectRoot, agentID)
-	assert.Equal(t, held.SessionID, again.SessionID)
-	assert.True(t, again.SourceRejected, "a release that published nothing must put the quarantine back")
-	rawAfter, err := os.ReadFile(raw)
+	require.ErrorContains(t, err, "cannot re-check")
+	require.Equal(t, held.SessionID, heldRecording(t, projectRoot, agentID).SessionID)
+	after, err := os.ReadFile(raw)
 	require.NoError(t, err)
-	assert.Equal(t, string(rawBefore), string(rawAfter), "declined means untouched")
-	active, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	assert.Nil(t, active, "the recording must not be left looking like an ordinary stale one")
+	require.Equal(t, before, after)
 }
 
 // Failure prevented: `ox doctor` (every run) reclaims a crashed manual-mode

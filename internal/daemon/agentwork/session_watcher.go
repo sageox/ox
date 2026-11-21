@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -44,6 +45,25 @@ type SessionWatcherManager struct {
 	watchers map[string]*activeWatcher // keyed by session name
 	stopped  bool                      // set by StopAll to prevent new watchers and defer re-insertion
 	home     string                    // root for the session-file allow-list; see homeDir
+	// liveDrain, when set, means this daemon streams sessions (ADR-247): every
+	// batch committed to raw.jsonl goes through the shared live-spool step,
+	// and liveDrain asks for a drain of a spool that step added to.
+	liveDrain func(sessionDir string)
+	// hookMarks remembers, per hook-mode recording, a catch-up that found
+	// nothing to capture (see hookCatchUpMark).
+	hookMarks map[string]hookCatchUpMark
+	// hookTouched holds the recordings a local hook reported since the daemon
+	// started, the only ones the catch-up acts on (see NoteHook).
+	hookTouched map[hookTouch]time.Time
+}
+
+// SetLiveDrainer wires real-time session streaming into the daemon's capture
+// paths: committed batches are spooled, and fn requests a drain of a session
+// whose spool just grew.
+func (m *SessionWatcherManager) SetLiveDrainer(fn func(sessionDir string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.liveDrain = fn
 }
 
 // activeWatcher tracks a running TailWatcher goroutine.
@@ -656,7 +676,11 @@ func (m *SessionWatcherManager) pollCursorSession(ctx context.Context, aw *activ
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		_, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		capture, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		if err == nil && capture != nil {
+			// the step declares and logs a batch the stream could not take
+			_ = m.spoolLive(aw.cachePath, aw.projectRoot, capture.Appended)
+		}
 		if errors.Is(err, session.ErrNotRecording) || errors.Is(err, context.Canceled) {
 			return nil
 		}
@@ -793,7 +817,83 @@ func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, e
 }
 
 func (m *SessionWatcherManager) appendBatch(aw *activeWatcher, rw *session.RawWriter, entries []session.Entry, newOffset int64) error {
-	return rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset)
+	batch, err := rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset)
+	if err != nil {
+		return err
+	}
+	// the step declares and logs a batch the stream could not take
+	_ = m.spoolLive(aw.cachePath, aw.projectRoot, batch)
+	return nil
+}
+
+// spoolLive hands a batch just committed to raw.jsonl in dir to the live
+// stream, when this daemon streams, and asks for a drain once it is spooled.
+// Every daemon capture path calls it (C8): the tail watcher's appendBatch,
+// Cursor's watcher and the hook catch-up. An error means the stream could not
+// take the batch and it was declared lost.
+func (m *SessionWatcherManager) spoolLive(dir, projectRoot string, batch session.AppendedBatch) error {
+	m.mu.Lock()
+	drain := m.liveDrain
+	m.mu.Unlock()
+	if drain == nil {
+		return nil // this daemon does not stream
+	}
+	spooled, err := spoolCommitted(m.logger, dir, projectRoot, batch)
+	if spooled {
+		drain(dir)
+	}
+	return err
+}
+
+// spoolCommitted runs the shared live-spool step (livesession.SpoolCommitted)
+// for a batch committed to raw.jsonl in dir, checked against the recording on
+// disk now: a stop that switched it to manual publishing wrote the choice there
+// (C1). Daemon recovery calls it directly, with no drain to ask for: the live
+// tick finds the spooled bytes within one tick.
+//
+// The recording read now must be the one that committed the batch
+// (batch.SessionID). When it is gone, unreadable, or another recording's, the
+// batch is declared in its committer's stream instead: the cursor is past it,
+// so no later capture hands it on.
+//
+// The background context is deliberate: the batch's cursor has already moved,
+// so a watcher or sweep canceled now must not cost the stream these bytes.
+func spoolCommitted(logger *slog.Logger, dir, projectRoot string, batch session.AppendedBatch) (bool, error) {
+	if len(batch.Bytes) == 0 {
+		return false, nil
+	}
+	ctx := context.Background()
+	rec, err := reloadCommitter(dir, batch.SessionID)
+	if err != nil {
+		logger.Debug("live_session_recording_not_reloaded", "session", filepath.Base(dir), "session_id", batch.SessionID, "bytes", len(batch.Bytes), "error", err)
+		// logs, at Warn and Error, whatever it declares
+		return false, livesession.DeclareCommitted(ctx, projectRoot, dir, batch, err)
+	}
+	return livesession.SpoolCommitted(ctx, projectRoot, rec, batch)
+}
+
+// reloadCommitter reads the recording in dir again and requires it to be
+// sessionID, the one that committed a batch there. Its session_path is set to
+// dir: the batch was committed in dir, so that is the stream it may feed, and a
+// marker's own session_path is anyone's to rewrite.
+func reloadCommitter(dir, sessionID string) (*session.RecordingState, error) {
+	recPath := filepath.Join(dir, recordingMarker)
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		return nil, fmt.Errorf("reload recording: %w", err)
+	}
+	rec, err := session.ParseRecordingState(recPath, data)
+	if err != nil {
+		return nil, fmt.Errorf("reload recording: %w", err)
+	}
+	if rec == nil {
+		return nil, errors.New("reload recording: empty marker")
+	}
+	if rec.SessionID != sessionID {
+		return nil, fmt.Errorf("reload recording: the folder now holds %s, not %s, which committed the batch", rec.SessionID, sessionID)
+	}
+	rec.SessionPath = dir
+	return rec, nil
 }
 
 // resolveAdapter returns the adapter for the given name.

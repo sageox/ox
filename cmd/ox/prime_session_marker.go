@@ -324,6 +324,60 @@ func UpdateSessionMarker(agentSessionID string, update func(*SessionMarker) erro
 	return marker, nil
 }
 
+// sessionStartWait bounds how long a SessionStart hook waits for a duplicate
+// of itself to finish priming. Prime normally takes a few seconds; past this
+// the hook primes on its own (the pre-claim behavior) rather than risk
+// outliving the coding agent's hook timeout.
+var sessionStartWait = 30 * time.Second
+
+// sessionStartWaiting is a test hook, called when a SessionStart hook finds
+// the session already claimed and starts waiting.
+var sessionStartWaiting = func() {}
+
+// claimSessionStart serializes the SessionStart hooks of one native session.
+// A coding agent that gets ox's hooks from two places (a repo's tracked
+// settings plus --settings or user settings) runs both entries in parallel,
+// and each would prime and start its own recording; the empty one then keeps
+// `ox session wait` waiting until its timeout (GH #1844).
+//
+// seen is the marker the hook read before claiming (nil on a first start).
+// handled is true when, while this hook waited, another hook primed the
+// session: the marker is now primed and differs from seen. The caller must
+// then join that recording instead of priming again. release is always
+// non-nil and must be called once priming is done.
+func claimSessionStart(agentSessionID string, seen *SessionMarker) (release func(), handled bool) {
+	release = func() {}
+	if agentSessionID == "" {
+		return release, false
+	}
+	if err := os.MkdirAll(SessionMarkerDir(), 0700); err != nil {
+		return release, false
+	}
+	// a lock of its own: prime takes the marker's ".lock" while this is held
+	lock := flock.New(markerPath(agentSessionID) + ".start.lock")
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartWait)
+	defer cancel()
+	locked, err := lock.TryLock()
+	if err == nil && !locked {
+		sessionStartWaiting()
+		locked, err = lock.TryLockContext(ctx, 50*time.Millisecond)
+	}
+	if err != nil || !locked {
+		slog.Warn("session start: could not claim the session, priming without it",
+			"agent_session_id", agentSessionID, "error", err)
+		return release, false
+	}
+	release = func() { _ = lock.Unlock() }
+	current, err := ReadSessionMarker(agentSessionID)
+	if err != nil || !current.IsPrimed() {
+		return release, false
+	}
+	if seen != nil && seen.AgentID == current.AgentID && seen.PrimedAt.Equal(current.PrimedAt) {
+		return release, false
+	}
+	return release, true
+}
+
 // WriteSessionMarker writes ordinary prime data while preserving a pending
 // Cursor boundary selected by an earlier hook.
 func WriteSessionMarker(marker *SessionMarker) error {

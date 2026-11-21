@@ -203,6 +203,8 @@ type Daemon struct {
 	agentWorker            *agentwork.Manager
 	sessionFinalizeHandler *agentwork.SessionFinalizeHandler
 	sessionWatcher         *agentwork.SessionWatcherManager
+	liveSessions           *LiveSessions // real-time session streaming (ADR-247); nil without a ledger/endpoint
+	teammateComments       *teammateCommentInbox
 	whisperRegistry        *WhisperRegistry
 	murmurNudgeSource      *MurmurNudgeSource
 	projectWatcher         *GitPollWatcher
@@ -218,6 +220,7 @@ type Daemon struct {
 	restartRequested bool      // set when version mismatch triggers restart
 	wasSuperseded    bool      // set when exiting because another daemon took over
 	startTime        time.Time // daemon start time for uptime tracking
+	envToken         string    // auth.EnvTokenFingerprint when created, reported as StatusData.EnvToken
 	lastActivity     time.Time // tracks last activity for inactivity timeout
 	pendingWorkSince time.Time // when pending work was first detected during inactivity (zero = no pending work)
 
@@ -255,8 +258,22 @@ func New(config *Config, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		config:       config,
 		logger:       logger,
+		envToken:     auth.EnvTokenFingerprint(endpoint.GetForProject(config.ProjectRoot)),
 		lastActivity: time.Now(), // initialize activity timestamp
 	}
+}
+
+// activeAgentIDs lists the agents the heartbeat handler has seen, the candidates
+// for owning a live recording folder. Nil before the handler exists.
+func (d *Daemon) activeAgentIDs() []string {
+	if d.heartbeat == nil {
+		return nil
+	}
+	var ids []string
+	for _, a := range d.heartbeat.GetActivitySummary().Agents {
+		ids = append(ids, a.Key)
+	}
+	return ids
 }
 
 // recordActivity updates the last activity timestamp.
@@ -1203,6 +1220,27 @@ func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
 	d.logger.Info("ledger sparse-checkout verified at startup")
 }
 
+// ledgerSymlinkStartupBound caps the symlink neutralization in setup. It runs
+// git, and setup must never wait long on the Ledger: the IPC server and the
+// live-session drainer start after it. A run cut short is safe: cache readers
+// refuse a symlinked path anyway (paths.CheckNoSymlinksBelow), and the
+// sync's sparse refresh runs DisableSymlinks again.
+const ledgerSymlinkStartupBound = 2 * time.Second
+
+// neutralizeLedgerSymlinks turns tracked Ledger symlinks into plain files
+// before anything in setup opens a .sageox/cache path. It takes no repo lock:
+// it never writes the index, only the links and .git/config.
+func (d *Daemon) neutralizeLedgerSymlinks() {
+	if !pathIsGitRepo(d.config.LedgerPath) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(d.ctx, ledgerSymlinkStartupBound)
+	defer cancel()
+	if err := ledger.DisableSymlinksContext(ctx, d.config.LedgerPath); err != nil {
+		d.logger.Warn("ledger_symlinks_not_neutralized_at_startup", "path", d.config.LedgerPath, "bound_ms", ledgerSymlinkStartupBound.Milliseconds(), "error", err)
+	}
+}
+
 // removeLedgerLocksAtStart cleans up git lock files that crashed processes left
 // in the Ledger, before sync starts.
 func (d *Daemon) removeLedgerLocksAtStart() {
@@ -1226,11 +1264,7 @@ func (d *Daemon) initComponents() time.Duration {
 	projectEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
 
 	d.removeLedgerLocksAtStart()
-
-	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
-	// without this, a corrupt cone from a previous session causes every sync cycle
-	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
-	d.ensureLedgerSparseCheckout(d.ctx)
+	d.neutralizeLedgerSymlinks()
 
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
@@ -1286,9 +1320,12 @@ func (d *Daemon) initComponents() time.Duration {
 	// whisper store for persistent agent signal delivery
 	repoID := config.GetRepoID(d.config.ProjectRoot)
 	if repoID != "" && projectEndpoint != "" {
-		whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
-		ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
-		if err != nil {
+		whisperDir := paths.WhisperDBDir(repoID, projectEndpoint)
+		whisperDBPath := filepath.Join(whisperDir, "whisper.db")
+		if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(repoID, projectEndpoint), whisperDir); err != nil {
+			// a tracked Ledger symlink would aim the database anywhere on disk
+			d.logger.Error("whisper_store_refused", "path", whisperDir, "reason", "symlink_in_ledger_cache", "error", err)
+		} else if ledgerWhisperStore, err := whisperstore.Open(whisperDBPath); err != nil {
 			d.logger.Warn("failed to open whisper store", "error", err)
 		} else {
 			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
@@ -1428,6 +1465,16 @@ func (d *Daemon) initComponents() time.Duration {
 	if d.agentWorker != nil {
 		d.agentWorker.SetSessionWatcher(d.sessionWatcher)
 	}
+	// An agent heartbeat (every ox hook sends one, as do other ox commands)
+	// arms the hook catch-up for that agent's recording. A heartbeat proves
+	// nothing about a marker, so NoteHook arms only a recording ox started on
+	// this machine (session.LoadRecordingMarkers): a marker planted in the
+	// Ledger checkout or legacy sessions/ under a live agent's ID is refused.
+	if projectRoot := d.config.ProjectRoot; projectRoot != "" {
+		d.heartbeat.SetAgentHeartbeatCallback(func(agentID string) {
+			d.sessionWatcher.NoteHook(d.ctx, projectRoot, agentID)
+		})
+	}
 
 	// wire cross-component dependencies
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
@@ -1483,6 +1530,27 @@ func (d *Daemon) initComponents() time.Duration {
 		d.settingsFetcher = NewSettingsFetcher(d.logger, projectEndpoint)
 		d.settingsFetcher.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 		d.scheduler.SetSettingsFetcher(d.settingsFetcher)
+	}
+
+	// real-time session streaming: drains the spools hooks and the tail watcher fill.
+	// The session cache is keyed by repo id and endpoint, the same path the hooks
+	// write to, and exists before the Ledger is cloned: a fresh repo's daemon
+	// starts before its Ledger clone and must still stream.
+	if cacheBase := paths.LedgerSessionCacheBase(config.GetRepoID(d.config.ProjectRoot), projectEndpoint); cacheBase != "" {
+		d.liveSessions = NewLiveSessions(d.logger, filepath.Join(cacheBase, "sessions"), endpoint.NormalizeEndpoint(projectEndpoint))
+		d.teammateComments = &teammateCommentInbox{
+			logger:       d.logger,
+			registry:     func() *WhisperRegistry { return d.whisperRegistry },
+			live:         func() *LiveSessions { return d.liveSessions },
+			recipientFor: agentRecordingDir(d.config.ProjectRoot, d.activeAgentIDs),
+			now:          time.Now,
+			enabled:      config.TeammateNotesEnabled,
+		}
+		d.liveSessions.onTeammateComments = d.teammateComments.receive
+		d.liveSessions.drainShown = d.teammateComments.drainAllShown
+		d.sessionWatcher.SetLiveDrainer(func(sessionDir string) {
+			d.liveSessions.Spooled(d.ctx, sessionDir)
+		})
 	}
 
 	return time.Since(startSetup)
@@ -1569,6 +1637,19 @@ func (d *Daemon) startWorkers() {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		// The Ledger's cone must be right before the first sync: a corrupt cone
+		// from a previous session made every sync cycle wipe .sageox/cache/ via
+		// ConfigureSparseCheckout's rolling-window refresh. It runs here, not in
+		// setup, because it waits on the Ledger (the repo lock for up to 2 min,
+		// git for longer), and setup must never wait on the Ledger: the IPC
+		// server and the live-session drainer start after it, and a session
+		// streams while its Ledger is wedged.
+		d.ensureLedgerSparseCheckout(d.ctx)
+		if d.ctx.Err() != nil {
+			// stopped while the refresh waited on the Ledger: Start would
+			// still spawn sync work that outlives the daemon's wait group
+			return
+		}
 		d.scheduler.Start(d.ctx)
 	}()
 
@@ -1602,6 +1683,25 @@ func (d *Daemon) startWorkers() {
 		go func() {
 			defer d.wg.Done()
 			d.agentWorker.Start(d.ctx)
+		}()
+	}
+
+	if d.liveSessions != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.liveSessions.Run(d.ctx)
+		}()
+	}
+
+	// Hook-mode recordings read the transcript only when a hook fires. This
+	// sweep captures what the agent wrote after its last one (Claude Code can
+	// fire Stop before its final answer is on disk).
+	if d.sessionWatcher != nil && d.config.ProjectRoot != "" {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.sessionWatcher.RunHookCatchUp(d.ctx, d.config.ProjectRoot)
 		}()
 	}
 
@@ -1754,6 +1854,7 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		ProjectTeamID:      projectTeamID,
 		GlobalSyncOwner:    globalSyncOwner,
 		GlobalSyncEndpoint: globalSyncEndpoint,
+		EnvToken:           s.d.envToken,
 		TeamContexts:       s.d.scheduler.TeamContextStatus(),
 		InactivityTimeout:  s.d.config.InactivityTimeout,
 		TimeSinceActivity:  s.d.timeSinceLastActivity(),
@@ -1988,6 +2089,10 @@ func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool
 }
 
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
+	// the recording stopped: notes still waiting for it must not outlive it
+	if s.d.teammateComments != nil && validateSessionName(payload.SessionName) == nil {
+		s.d.teammateComments.purgeSession(s.d.ctx, payload.SessionName)
+	}
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
 		return
@@ -2116,6 +2221,27 @@ func (s *daemonServiceImpl) SessionWatchStop(payload SessionWatchStopPayload) {
 	s.d.sessionWatcher.StopWatch(payload.SessionName)
 }
 
+func (s *daemonServiceImpl) LiveSessionDrain(payload LiveSessionDrainPayload) {
+	if s.d.liveSessions == nil {
+		return
+	}
+	s.d.liveSessions.Drain(s.d.ctx, payload.SessionPath)
+}
+
+func (s *daemonServiceImpl) TeammateCommentsTake(payload TeammateCommentsTakePayload) (TeammateCommentsTakeResponse, error) {
+	if s.d.teammateComments == nil {
+		return TeammateCommentsTakeResponse{}, nil
+	}
+	return s.d.teammateComments.lease(s.d.ctx, payload)
+}
+
+func (s *daemonServiceImpl) TeammateCommentsConfirm(payload TeammateCommentsConfirmPayload) error {
+	if s.d.teammateComments == nil {
+		return nil
+	}
+	return s.d.teammateComments.confirm(s.d.ctx, payload)
+}
+
 func (s *daemonServiceImpl) Activity() {
 	s.d.recordActivity()
 }
@@ -2150,9 +2276,9 @@ func (s *daemonServiceImpl) Friction(payload FrictionPayload) {
 //
 //	YYYY-MM-DDTHH-MM-<user-or-agent-slug>
 //
-// We accept underscores and hyphens in the trailing slug, and bound the length
-// so an attacker cannot DoS by allocating a multi-megabyte filename.
-var sessionNameRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]{1,64}$`)
+// Continued recordings add a two-character delimiter and a 40-character
+// recording ID to the trailing slug, which previously had a 64-byte limit.
+var sessionNameRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]{1,106}$`)
 
 // validateSessionName rejects any IPC-supplied SessionName that could escape
 // the sessions/ subtree or otherwise break the documented session-folder
@@ -2284,11 +2410,18 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 		return fmt.Errorf("rel_path validation failed: %w", err)
 	}
 	if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
+		if errors.Is(err, errMurmurWorkspaceBusy) {
+			// IPC already acknowledged the publish. Use the existing cache
+			// fallback so a concurrent checkout swap cannot discard the entry.
+			return writeOutboxMurmur(murmurOutboxCacheDir(murmurOutboxTarget(payload.TargetDir)), payload)
+		}
 		return err
 	}
 	s.d.logger.Debug("murmur written and committed", "rel_path", payload.RelPath)
 	return nil
 }
+
+var errMurmurWorkspaceBusy = errors.New("murmur workspace is locked for GC or another murmur commit")
 
 // writeAndCommitMurmur writes the murmur file to disk (the daemon owns all I/O)
 // and commits it, scoped to the murmur's own path. The caller MUST have already
@@ -2302,6 +2435,19 @@ func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurP
 	if _, err := decodeMurmurPayload(payload); err != nil {
 		return err
 	}
+
+	// Exclude GC from before it captures local state until it finishes the
+	// swap and restore. Use the same lock so a check cannot race a new GC.
+	lockPath := filepath.Clean(targetDir) + ".gc-lock"
+	lock, err := acquireGCLock(lockPath)
+	if errors.Is(err, os.ErrExist) {
+		return errMurmurWorkspaceBusy
+	}
+	if err != nil {
+		return err
+	}
+	defer releaseGCLock(lock, lockPath)
+
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."

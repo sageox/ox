@@ -54,7 +54,7 @@ func newAmpThreadFixture(t *testing.T) *orbSessionFixture {
 func (f *orbSessionFixture) prime(t *testing.T) *session.RecordingState {
 	t.Helper()
 	prior, _ := ReadSessionMarker(orbThreadURL)
-	status := startSessionRecording(f.projectRoot, f.agentID, "amp", "", recordingSessionIDFromMarker(prior), orbThreadURL)
+	status := startSessionRecording(f.projectRoot, f.agentID, "amp", inheritedParent{}, recordingSessionIDFromMarker(prior), orbThreadURL)
 	require.NotNil(t, status)
 	require.True(t, status.Recording, "prime must record the thread")
 	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
@@ -73,10 +73,7 @@ type uploadedSession struct {
 }
 
 // uploaded returns every raw.jsonl the LFS store received, keyed by the
-// session ID in its header. The store, not the remote's folders, because
-// session folders are named to the minute: two sessions an agent starts
-// within one minute, as these tests do, share a folder. In an orb the reply
-// comes minutes after the first session started.
+// session ID in its header.
 func (f *orbSessionFixture) uploaded(t *testing.T) map[string]uploadedSession {
 	t.Helper()
 	f.store.mu.Lock()
@@ -139,6 +136,12 @@ func TestSessionEnd_AmpReplyAfterIdleEndIsAContinuedSession(t *testing.T) {
 	second := f.prime(t)
 	f.appendSidecar(t, ampSidecarLine{Type: "assistant", Content: followUpReply, At: time.Now().Add(time.Second)})
 	f.sendSessionEnd(t)
+
+	firstName, secondName := filepath.Base(first.SessionPath), filepath.Base(second.SessionPath)
+	require.NotEqual(t, firstName, secondName, "a continuation must use its own folder")
+	assert.ElementsMatch(t, []string{firstName, secondName}, remoteSessionDirs(t, f.barePath))
+	assert.Equal(t, first.SessionID, remoteMeta(t, f.barePath, firstName).SessionID)
+	assert.Equal(t, second.SessionID, remoteMeta(t, f.barePath, secondName).SessionID)
 
 	sessions := f.uploaded(t)
 	require.Len(t, sessions, 2, "the reply lands as a session of its own")

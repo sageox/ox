@@ -433,7 +433,12 @@ func TestNoInputCLI(t *testing.T) {
 					assert.Contains(t, output, "omit --no-input")
 				}
 				assert.Positive(t, introspections.Load(), "fixture must reach authenticated initialization")
-				assert.EqualValues(t, 1, repoRequests.Load(), "fixture must reach the actual zero-team response")
+				// An explicit --team missing from the empty list makes init re-fetch once.
+				wantRepoRequests := 1
+				if tt.explicitTeam {
+					wantRepoRequests = 2
+				}
+				assert.EqualValues(t, wantRepoRequests, repoRequests.Load(), "fixture must reach the actual zero-team response")
 				assert.Zero(t, registrations.Load(), "failed initialization must not register the project")
 				assert.False(t, config.IsInitialized(repo))
 				if tt.failure != "seed" {

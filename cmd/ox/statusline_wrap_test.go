@@ -1,0 +1,319 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// `ox statusline --wrap` keeps ox's row at the bottom of the wrapped app's
+// terminal. These tests cover the part that decides whether the app's own
+// output can take that row back.
+
+// TestWrapFilter_KeepsTheAppOffOxRow is the promise the row rests on.
+// Failure prevented: the app resets the scroll region and its next scroll
+// carries ox's row up into the transcript, leaving a stray status line in
+// the scrollback on every screenful.
+func TestWrapFilter_KeepsTheAppOffOxRow(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+		dirty          bool
+	}{
+		{"plain text passes untouched", "hello\r\nworld", "hello\r\nworld", false},
+		{"color and cursor moves pass untouched", "\x1b[31mred\x1b[0m\x1b[5;10H", "\x1b[31mred\x1b[0m\x1b[5;10H", false},
+		{"a region reset becomes ox's region", "\x1b[r", "\x1b[1;23r", false},
+		{"so does the empty-parameter form", "\x1b[;r", "\x1b[1;23r", false},
+		{"a region inside the app's rows is kept", "\x1b[3;20r", "\x1b[3;20r", false},
+		{"a region reaching past the app's rows is cut back", "\x1b[2;24r", "\x1b[2;23r", false},
+		{"a private-mode restore is not a region", "\x1b[?25r", "\x1b[?25r", false},
+		{"clearing the screen means ox redraws", "\x1b[2J", "\x1b[2J", true},
+		{"so does switching to the other screen", "\x1b[?1049h", "\x1b[?1049h", true},
+		{"and leaving it", "\x1b[?1049l", "\x1b[?1049l", true},
+		{"hiding the cursor does not", "\x1b[?25l", "\x1b[?25l", false},
+		{"a full reset gets the region put back", "\x1bc", "\x1bc\x1b[1;23r", true},
+		{"a title sequence ending in r is not a region", "\x1b]0;my r title\x07\x1b[r", "\x1b]0;my r title\x07\x1b[1;23r", false},
+		{"nor one ended by ST", "\x1b]8;;http://x/[r\x1b\\ok", "\x1b]8;;http://x/[r\x1b\\ok", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &wrapFilter{rows: 23}
+			assert.Equal(t, tt.want, string(f.write([]byte(tt.in))))
+			assert.Equal(t, tt.dirty, f.dirty)
+			assert.True(t, f.idle(), "a complete sequence leaves the filter between sequences")
+		})
+	}
+}
+
+// TestWrapFilter_SequencesSplitAcrossReads: a pseudo-terminal hands output
+// over in arbitrary chunks.
+// Failure prevented: a reset split across two reads slipping through, or ox
+// drawing its row in the middle of the app's half-written sequence and
+// corrupting the screen.
+func TestWrapFilter_SequencesSplitAcrossReads(t *testing.T) {
+	stream := "text\x1b[r more \x1b[2J\x1b]0;title\x07\x1b[10;1Hend\x1bc."
+	whole := &wrapFilter{rows: 23}
+	want := string(whole.write([]byte(stream)))
+
+	for cut := 1; cut < len(stream); cut++ {
+		f := &wrapFilter{rows: 23}
+		got := string(f.write([]byte(stream[:cut])))
+		midSequence := !f.idle()
+		got += string(f.write([]byte(stream[cut:])))
+		assert.Equal(t, want, got, "cut at %d", cut)
+		assert.True(t, f.idle(), "cut at %d", cut)
+		// Wherever the cut falls inside a sequence, ox must be told to wait.
+		if tail := stream[:cut]; strings.HasSuffix(tail, "\x1b") || strings.HasSuffix(tail, "\x1b[") || strings.HasSuffix(tail, "\x1b[2") || strings.HasSuffix(tail, "\x1b]0;ti") {
+			assert.True(t, midSequence, "cut at %d is inside a sequence", cut)
+		}
+	}
+}
+
+// TestWrapFilter_ResizeWaitsForTheAppsSequence: a resize must set the new
+// scroll region, but never in the middle of something the app is writing.
+// Failure prevented: ox's escape codes landing inside an unfinished title,
+// link or image command and corrupting it.
+func TestWrapFilter_ResizeWaitsForTheAppsSequence(t *testing.T) {
+	const region = "\x1b7\x1b[1;29r\x1b8"
+
+	idle := &wrapFilter{rows: 23}
+	assert.Equal(t, region, idle.resized(29, 0), "between sequences: written at once")
+	assert.True(t, idle.dirty, "ox's row is redrawn at its new place")
+	assert.Empty(t, idle.flushRegion(0), "and only once")
+
+	// Each unfinished sequence with the bytes that properly end it: BEL ends
+	// an OSC, ST (ESC \) ends an OSC or a DCS, a final byte ends a CSI.
+	for _, tt := range []struct{ start, end string }{
+		{"\x1b]0;a long ti", "\x07"},
+		{"\x1b]8;;https://exam", "\x1b\\"},
+		{"\x1b[38;5", "m"},
+		{"\x1bPq#0;2", "\x1b\\"},
+		{"\x1b_Gf=100;", "\x1b\\"},
+	} {
+		f := &wrapFilter{rows: 23}
+		_ = f.write([]byte("text" + tt.start))
+		require.False(t, f.idle(), "%q is an unfinished sequence", tt.start)
+		assert.Empty(t, f.resized(29, 0), "%q: nothing may be written inside it", tt.start)
+		assert.Empty(t, f.flushRegion(0), "%q: still unfinished", tt.start)
+		assert.Equal(t, 29, f.rows, "the filter already clamps to the new height")
+
+		// The app finishes its sequence; the region follows, once.
+		_ = f.write([]byte(tt.end))
+		require.True(t, f.idle(), "%q", tt.start)
+		assert.Equal(t, region, f.flushRegion(0), "%q", tt.start)
+		assert.Empty(t, f.flushRegion(0), "%q", tt.start)
+	}
+
+	// BEL ends an OSC only. Inside a DCS (sixel image data) it is data: the
+	// sequence is still open and nothing of ox's may be written yet.
+	dcs := &wrapFilter{rows: 23}
+	_ = dcs.write([]byte("\x1bPq#0;2"))
+	_ = dcs.resized(29, 0)
+	_ = dcs.write([]byte("\x07"))
+	assert.False(t, dcs.idle(), "BEL does not end a DCS")
+	assert.Empty(t, dcs.flushRegion(0))
+	_ = dcs.write([]byte("\x1b\\"))
+	assert.Equal(t, region, dcs.flushRegion(0))
+}
+
+// TestWrapFilter_ResizeLeavesTheAppsSavedCursorAlone: setting the scroll
+// region saves and restores the cursor, as drawing the row does. Failure
+// prevented: a resize between the app's save and its restore replacing the
+// saved position, so the restore lands somewhere else.
+func TestWrapFilter_ResizeLeavesTheAppsSavedCursorAlone(t *testing.T) {
+	const region = "\x1b7\x1b[1;29r\x1b8"
+	f := &wrapFilter{rows: 23}
+	_ = f.write([]byte("at A\x1b7\x1b[5;1Hat B"))
+	require.True(t, f.idle())
+	assert.Empty(t, f.resized(29, 0), "the app holds a saved cursor: nothing is written yet")
+	assert.Empty(t, f.flushRegion(wrapSaveHold-time.Millisecond))
+	assert.Equal(t, 29, f.rows)
+	_ = f.write([]byte("\x1b8"))
+	assert.Equal(t, region, f.flushRegion(0), "restored: the region follows")
+	assert.Empty(t, f.flushRegion(0), "once")
+
+	// An app that never restores does not keep the old region for good.
+	stuck := &wrapFilter{rows: 23}
+	_ = stuck.write([]byte("\x1b7"))
+	assert.Empty(t, stuck.resized(29, 0))
+	assert.Equal(t, region, stuck.flushRegion(wrapSaveHold))
+}
+
+// TestWrapFilter_EscapeWithIntermediatesStaysOpen: ESC ( B selects a
+// character set in three bytes. Failure prevented: a read ending after
+// "ESC (" leaves the filter "idle", ox draws its row there, and the app's
+// sequence is broken in two.
+func TestWrapFilter_EscapeWithIntermediatesStaysOpen(t *testing.T) {
+	for _, seq := range []string{"\x1b(B", "\x1b)0", "\x1b#8", "\x1b%G", "\x1b $F"} {
+		f := &wrapFilter{rows: 23}
+		for i := 0; i < len(seq)-1; i++ {
+			assert.Empty(t, f.write([]byte{seq[i]}), "%q: held back until it is whole", seq)
+			assert.False(t, f.idle(), "%q: open after %d bytes", seq, i+1)
+			assert.False(t, f.canDraw(0), "%q", seq)
+		}
+		assert.Equal(t, seq, string(f.write([]byte{seq[len(seq)-1]})), "passed through unchanged")
+		assert.True(t, f.idle(), "%q", seq)
+	}
+}
+
+// TestWrapFilter_LeavesTheAppsSavedCursorAlone: the terminal keeps one saved
+// cursor, and ox's row is drawn between a save and a restore of its own.
+// Failure prevented: the app saves at A, moves to B and pauses; ox draws,
+// saving B over A; the app's restore then lands on B and it writes in the
+// wrong place.
+func TestWrapFilter_LeavesTheAppsSavedCursorAlone(t *testing.T) {
+	for _, pair := range [][2]string{{"\x1b7", "\x1b8"}, {"\x1b[s", "\x1b[u"}} {
+		f := &wrapFilter{rows: 23}
+		require.True(t, f.canDraw(0))
+		_ = f.write([]byte("at A" + pair[0] + "\x1b[5;1Hat B"))
+		require.True(t, f.idle(), "between sequences, which used to be enough to draw")
+		assert.False(t, f.canDraw(0), "%q: the app holds a saved cursor", pair[0])
+		assert.False(t, f.canDraw(wrapSaveHold-time.Millisecond))
+		_ = f.write([]byte(pair[1]))
+		assert.True(t, f.canDraw(0), "%q: restored, ox may draw", pair[1])
+	}
+	// An app that saves and never restores does not stop ox's row for good.
+	stuck := &wrapFilter{rows: 23}
+	_ = stuck.write([]byte("\x1b7"))
+	assert.True(t, stuck.canDraw(wrapSaveHold))
+	// CSI s with parameters sets margins; it is not a cursor save.
+	margins := &wrapFilter{rows: 23}
+	_ = margins.write([]byte("\x1b[1;80s"))
+	assert.True(t, margins.canDraw(0))
+}
+
+// Failure prevented: a runaway sequence making the filter hold output back forever.
+func TestWrapFilter_OverlongSequenceIsFlushed(t *testing.T) {
+	f := &wrapFilter{rows: 23}
+	in := "\x1b[" + strings.Repeat("1;", 80)
+	out := string(f.write([]byte(in + "visible")))
+	assert.Contains(t, out, "visible")
+	assert.True(t, f.idle())
+}
+
+// TestWrapRow_FitsTheTerminal: ox has exactly one row.
+// Failure prevented: the row wrapping onto a second line and pushing the
+// app's last line off screen.
+func TestWrapRow_FitsTheTerminal(t *testing.T) {
+	lane := func(columns int) string {
+		if columns <= 0 {
+			return "LANE"
+		}
+		return strings.Repeat("L", columns)
+	}
+	assert.Equal(t, "● ox  1 plan", wrapRow("● ox  1 plan", nil, 80), "no ox call yet: the status line alone")
+	for width := 10; width <= 120; width += 7 {
+		row := wrapRow("● ox  1 plan  ● rec", lane, width)
+		assert.LessOrEqual(t, ansi.StringWidth(row), max(width, len("● ox  1 plan  ● rec")), "width %d", width)
+	}
+	assert.Equal(t, "● ox", wrapRow("● ox", lane, 20), "too narrow for a lane's track: the status line alone")
+	assert.True(t, strings.HasPrefix(wrapRow("● ox", lane, 80), "● ox  L"))
+}
+
+// Failure prevented: ox's row moving the app's cursor, so the next thing the app types lands on ox's row.
+func TestDrawWrapRow_SavesAndRestoresTheCursor(t *testing.T) {
+	got := drawWrapRow(24, "● ox")
+	assert.True(t, strings.HasPrefix(got, "\x1b7\x1b[24;1H\x1b[2K"), "%q", got)
+	assert.True(t, strings.HasSuffix(got, "\x1b8"), "%q", got)
+	assert.Contains(t, got, "● ox")
+}
+
+// TestNoteWrapSession_TellsTheWrapperItsSession: the row must follow the
+// session in its own terminal.
+// Failure prevented: two Codex terminals in one repo showing each other's
+// counts, or a row stuck at "● ox" because nothing names its session.
+func TestNoteWrapSession_TellsTheWrapperItsSession(t *testing.T) {
+	path := newWrapSessionFile()
+	require.NotEmpty(t, path)
+	t.Cleanup(func() { _ = os.Remove(path) })
+	assert.Empty(t, readWrapSession(path), "before any hook has run")
+
+	t.Setenv(envStatuslineWrapSession, path)
+	noteWrapSession("thread-1")
+	assert.Equal(t, "thread-1", readWrapSession(path))
+	noteWrapSession("") // a hook with no session changes nothing
+	assert.Equal(t, "thread-1", readWrapSession(path))
+	noteWrapSession("thread-2") // /new in the same terminal
+	assert.Equal(t, "thread-2", readWrapSession(path))
+}
+
+// TestNoteWrapSession_WritesOnlyTheWrappersOwnFile: the variable is an
+// environment value, so a hook must not trust it.
+// Failure prevented: a planted OX_STATUSLINE_WRAP_SESSION making every hook
+// overwrite or create a file of the planter's choosing.
+func TestNoteWrapSession_WritesOnlyTheWrappersOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) string // returns the path to plant
+	}{
+		{"a file not named like the wrapper's", func(t *testing.T) string {
+			p := filepath.Join(dir, "important.txt")
+			require.NoError(t, os.WriteFile(p, []byte("keep"), 0o600))
+			return p
+		}},
+		{"a wrapper-style name that does not exist", func(t *testing.T) string {
+			return filepath.Join(dir, "ox-wrap-missing.session")
+		}},
+		{"a wrapper-style name that is a directory", func(t *testing.T) string {
+			p := filepath.Join(dir, "ox-wrap-dir.session")
+			require.NoError(t, os.Mkdir(p, 0o700))
+			return p
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := tt.setup(t)
+			before, _ := os.ReadFile(p)
+			info, _ := os.Lstat(p)
+			t.Setenv(envStatuslineWrapSession, p)
+			noteWrapSession("thread-1")
+			after, _ := os.ReadFile(p)
+			assert.Equal(t, before, after)
+			infoAfter, err := os.Lstat(p)
+			if info == nil {
+				assert.True(t, os.IsNotExist(err), "nothing is created")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, info.IsDir(), infoAfter.IsDir())
+			}
+		})
+	}
+	// The name is swapped after it was checked (a symbolic link to another
+	// file put in its place): what opens there is not the file that was
+	// checked, and the other file is neither truncated nor written.
+	checkedPath := filepath.Join(dir, "ox-wrap-checked.session")
+	require.NoError(t, os.WriteFile(checkedPath, nil, 0o600))
+	checked, err := os.Lstat(checkedPath)
+	require.NoError(t, err)
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
+	assert.False(t, overwriteChecked(victim, checked, "thread-1"), "a different file than the one checked")
+	if err := os.Remove(checkedPath); err == nil && os.Symlink(victim, checkedPath) == nil {
+		assert.False(t, overwriteChecked(checkedPath, checked, "thread-1"), "the checked name now leads elsewhere")
+	}
+	kept, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(kept))
+	// The file that was checked is written.
+	same := filepath.Join(dir, "ox-wrap-same.session")
+	require.NoError(t, os.WriteFile(same, []byte("old and longer"), 0o600))
+	sameInfo, err := os.Lstat(same)
+	require.NoError(t, err)
+	require.True(t, overwriteChecked(same, sameInfo, "thread-2"))
+	got, err := os.ReadFile(same)
+	require.NoError(t, err)
+	assert.Equal(t, "thread-2", string(got))
+
+	// An absurdly long "session id" is not one.
+	p := newWrapSessionFile()
+	t.Cleanup(func() { _ = os.Remove(p) })
+	t.Setenv(envStatuslineWrapSession, p)
+	noteWrapSession(strings.Repeat("x", maxWrapSessionID+1))
+	assert.Empty(t, readWrapSession(p))
+}

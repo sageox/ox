@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -25,6 +27,172 @@ type sessionUploadFixture struct {
 	result      *agentSessionResult
 	state       *session.RecordingState
 	refs        map[string]lfs.FileRef
+}
+
+func TestSessionFinalizersRefuseDifferentFinalizedSession(t *testing.T) {
+	for _, operation := range []string{"stop", "delegated stop", "doctor retry", "doctor retry after same-minute restart"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newSessionUploadFixture(t)
+			dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(dest, 0o755))
+			const priorID = "ses_019d0000-0000-7000-8000-000000000099"
+			if operation == "doctor retry after same-minute restart" {
+				require.NoError(t, session.WriteUploadRetryPending(f.state.SessionPath, priorID))
+				require.NoError(t, os.WriteFile(f.result.RawPath, []byte(
+					"{\"type\":\"header\",\"metadata\":{\"session_id\":\""+f.state.SessionID+"\"}}\n"+
+						"{\"type\":\"user\",\"content\":\"replacement\"}\n"), 0o600))
+			}
+			require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+				Version: "1.0", SessionName: f.sessionName, Title: "prior recording",
+				SessionID: priorID,
+			}))
+			metaPath := filepath.Join(dest, "meta.json")
+			metaBefore, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+			rawPath := filepath.Join(dest, ledgerFileRaw)
+			const prior = "prior raw.jsonl"
+			require.NoError(t, os.WriteFile(rawPath, []byte(prior), 0o600))
+			var calls []string
+			effects := scriptedSessionUploadEffects(&calls, f.refs, "upload_lfs")
+			switch operation {
+			case "stop":
+				err = uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, f.ledgerPath, f.sessionName, effects)
+			case "delegated stop":
+				err = copySessionCacheToLedger(f.result, f.state, f.ledgerPath, f.sessionName)
+			case "doctor retry", "doctor retry after same-minute restart":
+				err = retrySessionUploadWithEffects(f.projectRoot, f.ledgerPath, f.orphan(), effects)
+			}
+			rawAfter, readErr := os.ReadFile(rawPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, prior, string(rawAfter), "the finalized recording must survive a same-name upload")
+			metaAfter, readErr := os.ReadFile(metaPath)
+			require.NoError(t, readErr)
+			assert.Equal(t, metaBefore, metaAfter)
+			assert.Empty(t, calls)
+			require.ErrorContains(t, err, "refused to overwrite a Ledger session")
+		})
+	}
+}
+
+func TestDelegatedSessionStopUsesRecordedHeaderID(t *testing.T) {
+	f := newSessionUploadFixture(t)
+	id := f.state.SessionID
+	f.state.SessionID = ""
+	raw := []byte("{\"type\":\"header\",\"metadata\":{\"session_id\":\"" + id + "\"}}\n" +
+		"{\"type\":\"user\",\"content\":\"recorded entry\"}\n")
+	require.NoError(t, os.WriteFile(f.result.RawPath, raw, 0o600))
+	dest := filepath.Join(f.ledgerPath, "sessions", f.sessionName)
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+		SessionID: id, SessionName: f.sessionName, Title: "Previously uploaded",
+	}))
+
+	require.NoError(t, copySessionCacheToLedger(f.result, f.state, f.ledgerPath, f.sessionName))
+	published, err := os.ReadFile(filepath.Join(dest, ledgerFileRaw))
+	require.NoError(t, err)
+	require.Equal(t, raw, published)
+}
+
+func TestUploadSessionToLedger_RetriesWithAdoptedDraftID(t *testing.T) {
+	for _, doctor := range []bool{false, true} {
+		name := "foreground"
+		if doctor {
+			name = "doctor_after_interrupted_stop"
+		}
+		t.Run(name, func(t *testing.T) {
+			testRetryWithAdoptedDraftID(t, doctor)
+		})
+	}
+}
+
+func TestDoctorRetryAfterDaemonReclaimsInterruptedStop(t *testing.T) {
+	for _, sweep := range []string{"periodic", "agent exit"} {
+		t.Run(sweep, func(t *testing.T) {
+			f := newSessionUploadFixture(t)
+			barePath, ledgerPath := createBareAndClone(t)
+			isolatePushEnv(t, ledgerPath)
+			cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			f.state.SessionPath = cacheDir
+			f.result.RawPath = filepath.Join(cacheDir, ledgerFileRaw)
+			f.state.StartedAt = time.Now().Add(-2 * session.StaleRecordingThreshold)
+			stopped := f.state.StartedAt.Add(time.Minute)
+			f.state.StoppedAt = &stopped
+			require.NoError(t, os.WriteFile(f.result.RawPath, f.rawContent, 0o600))
+			require.NoError(t, session.StampRawCarrier(f.result.RawPath, session.CarrierStamp{StoppedAt: stopped}))
+			raw, err := os.ReadFile(f.result.RawPath)
+			require.NoError(t, err)
+			f.refs[ledgerFileRaw] = lfs.NewFileRef(raw)
+			recordingPath := filepath.Join(cacheDir, ".recording.json")
+			stateJSON, err := json.Marshal(f.state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(recordingPath, stateJSON, 0o600))
+
+			dest := filepath.Join(ledgerPath, "sessions", f.sessionName)
+			require.NoError(t, os.MkdirAll(dest, 0o755))
+			const draftID = "ses_019d0000-0000-7000-8000-000000000099"
+			require.NoError(t, lfs.WriteSessionMetaOnly(dest, &lfs.SessionMeta{
+				Version: "1.0", SessionName: f.sessionName, SessionID: draftID, Draft: true,
+			}))
+			var calls []string
+			fail := scriptedSessionUploadEffects(&calls, f.refs, "upload_lfs")
+			require.ErrorContains(t, uploadSessionToLedgerWithEffects(f.projectRoot, f.result, f.state, ledgerPath, f.sessionName, fail), "LFS upload")
+
+			handler := agentwork.NewSessionFinalizeHandler(slog.Default())
+			if sweep == "periodic" {
+				_, err := handler.Detect(ledgerPath)
+				require.NoError(t, err)
+			} else {
+				handler.DetectOrphanedForAgent(ledgerPath, f.state.AgentID, 0)
+			}
+			require.NoFileExists(t, recordingPath, "the daemon must reclaim the abandoned recording")
+			orphans, err := findOrphanedSessionsInDir(filepath.Dir(cacheDir), ledgerPath)
+			require.NoError(t, err)
+			require.Len(t, orphans, 1)
+			retry := scriptedSessionUploadEffects(&calls, f.refs, "")
+			retry.commitRetry = commitAndPushLedgerWithExtras
+			require.NoError(t, retrySessionUploadWithEffects(f.projectRoot, ledgerPath, orphans[0], retry))
+			meta := remoteMeta(t, barePath, f.sessionName)
+			assert.Equal(t, draftID, meta.SessionID)
+			assert.Equal(t, f.refs[ledgerFileRaw], meta.Files[ledgerFileRaw])
+		})
+	}
+}
+
+func testRetryWithAdoptedDraftID(t *testing.T, doctor bool) {
+	t.Helper()
+	fixture := newSessionUploadFixture(t)
+	initTestGitRepo(t, fixture.ledgerPath)
+	dir := filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	const draftID = "ses_019d0000-0000-7000-8000-000000000099"
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: fixture.sessionName, SessionID: draftID, Draft: true,
+	}))
+	var calls []string
+	upload := func(failAt string) error {
+		return uploadSessionToLedgerWithEffects(fixture.projectRoot, fixture.result, fixture.state,
+			fixture.ledgerPath, fixture.sessionName, scriptedSessionUploadEffects(&calls, fixture.refs, failAt))
+	}
+	require.ErrorContains(t, upload("upload_lfs"), "LFS upload")
+	if doctor {
+		fixture.state.StartedAt = time.Now().Add(-2 * session.StaleRecordingThreshold)
+		recData, err := json.Marshal(fixture.state)
+		require.NoError(t, err)
+		recordingPath := filepath.Join(fixture.state.SessionPath, ".recording.json")
+		require.NoError(t, os.WriteFile(recordingPath, recData, 0o600))
+		orphans, err := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+		require.NoError(t, err)
+		require.Len(t, orphans, 1)
+		require.NoFileExists(t, recordingPath)
+		effects := scriptedSessionUploadEffects(&calls, fixture.refs, "")
+		require.NoError(t, retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, orphans[0], effects))
+	} else {
+		require.NoError(t, upload(""))
+	}
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	require.Equal(t, draftID, meta.SessionID)
 }
 
 func (f sessionUploadFixture) orphan() orphanedSession {
@@ -165,7 +333,7 @@ func TestUploadSessionToLedger_PreservesPriorStateAtFallibleBoundaries(t *testin
 			assert.Contains(t, err.Error(), tc.failAt+" failed")
 			assert.Equal(t, tc.wantCalls, calls, "no later phase may run after a failed boundary")
 			assertSessionBytesPreserved(t, fixture)
-			require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "every failure after meta.json exists must leave retry ownership")
+			require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile), "every failure after meta.json exists must leave retry ownership")
 			orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
 			require.NoError(t, scanErr)
 			require.Len(t, orphans, 1, "doctor must discover the interrupted upload")
@@ -259,7 +427,7 @@ func TestUploadSessionToLedger_ReadOnlyIsNotHiddenByRecoveryWrapping(t *testing.
 	assert.Equal(t, api.ErrReadOnly, err, "the caller relies on the sentinel for membership guidance")
 	assert.Equal(t, []string{"upload_lfs"}, calls)
 	assertSessionBytesPreserved(t, fixture)
-	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "read-only access is not retryable")
+	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile), "read-only access is not retryable")
 }
 
 func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing.T) {
@@ -546,7 +714,7 @@ func TestRetrySessionUpload_PushFailureRemainsIncomplete(t *testing.T) {
 	assert.Equal(t, []string{"upload_lfs", "commit_retry"}, calls)
 	_, statErr := os.Stat(fixture.state.SessionPath)
 	assert.NoError(t, statErr, "failed retry must leave authoritative cache available")
-	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 
 	// The committed final metadata used to make the next doctor pass skip this
 	// cache directory forever. The pending marker must keep it discoverable.
@@ -580,6 +748,7 @@ func TestRetrySessionUpload_LFSFailurePreservesManifest(t *testing.T) {
 	meta, err := lfs.ReadSessionMeta(sessionDir)
 	require.NoError(t, err)
 	meta.Files = fixture.refs
+	meta.SessionID = fixture.state.SessionID
 	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
 
 	var calls []string
@@ -676,14 +845,14 @@ func TestRetrySessionUpload_AcceptsLargeValidHeader(t *testing.T) {
 }
 
 func TestWriteSessionUploadRetryPending_RequiresExistingCache(t *testing.T) {
-	err := writeSessionUploadRetryPending(filepath.Join(t.TempDir(), "missing"))
+	err := session.WriteUploadRetryPending(filepath.Join(t.TempDir(), "missing"), "ses_019d0000-0000-7000-8000-000000000007")
 	require.Error(t, err)
 }
 
 func TestRetrySessionUpload_PendingMarkerFailureStopsBeforeMutation(t *testing.T) {
 	fixture := newSessionUploadFixture(t)
 	require.NoError(t, os.Mkdir(
-		filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile),
+		filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile),
 		0o700,
 	))
 
@@ -710,5 +879,5 @@ func TestRetrySessionUpload_UnsafePointerPathRemainsRetryable(t *testing.T) {
 		scriptedSessionUploadEffects(&calls, fixture.refs, ""),
 	)
 	require.ErrorContains(t, err, "write LFS pointer files")
-	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, session.UploadRetryPendingFile))
 }

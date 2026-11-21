@@ -40,6 +40,36 @@ type PublicPrimeResponse struct {
 	Plans    []PublicPrimePlan   `json:"plans"`
 	Activity []PublicPrimeWindow `json:"activity"`
 	Murmurs  []PublicPrimeMurmur `json:"murmurs"`
+	// Rules are the Team Rules a maintainer marked `visibility: public`.
+	// Absent from servers that predate them.
+	Rules []PublicPrimeRule `json:"rules,omitempty"`
+	// Team is the project's SageOx team, sent only when Viewer is "member".
+	// Nil from older servers and for everyone else.
+	Team *PublicPrimeTeam `json:"team,omitempty"`
+}
+
+// PublicPrimeTeam names the project's team as `ox init --team` accepts it.
+type PublicPrimeTeam struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug,omitempty"`
+}
+
+// MemberTeam returns the project's team when the caller is on it, else nil.
+// The server only sends Team to members; checking Viewer too keeps a
+// malformed answer from ever naming a team to a non-member.
+func (p *PublicPrimeResponse) MemberTeam() *PublicPrimeTeam {
+	if p == nil || p.Viewer != PublicPrimeViewerMember || p.Team == nil || p.Team.ID == "" {
+		return nil
+	}
+	return p.Team
+}
+
+// PublicPrimeRule is one public Team Rule: its name, the paths it is scoped
+// to (empty means the whole repo) and its markdown body, front matter removed.
+type PublicPrimeRule struct {
+	Name    string   `json:"name"`
+	Globs   []string `json:"globs,omitempty"`
+	Content string   `json:"content"`
 }
 
 // PublicPrimeProject names the project and its public SageOx page.
