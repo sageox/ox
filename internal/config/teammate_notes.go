@@ -126,15 +126,27 @@ func RepoYAMLTeammateNotes(projectRoot string) (value string, set bool, err erro
 	}
 	// decided by the loader's own merge, so the key matching (encoding/json
 	// ignores case) and null handling (a null changes nothing) cannot drift
-	// from what LoadProjectConfig does. The sentinel tells an explicit ""
-	// (which does override) from no value at all.
-	const unset = "\x00unset"
-	cfg := ProjectConfig{SessionTeammateNotes: unset}
-	if err := mergeProjectConfigYAML(data, &cfg); err != nil {
-		return "", false, fmt.Errorf("parse repo yaml config: %w", err)
+	// from what LoadProjectConfig does. Merging over two different seeds tells
+	// an explicit value, "" included, from none: only a value the file sets
+	// replaces both. No reserved string could do that, since a committed file
+	// can spell any string.
+	merged := func(seed string) (string, error) {
+		cfg := ProjectConfig{SessionTeammateNotes: seed}
+		if err := mergeProjectConfigYAML(data, &cfg); err != nil {
+			return "", fmt.Errorf("parse repo yaml config: %w", err)
+		}
+		return cfg.SessionTeammateNotes, nil
 	}
-	if cfg.SessionTeammateNotes == unset {
+	a, err := merged(TeammateNotesOn)
+	if err != nil {
+		return "", false, err
+	}
+	b, err := merged(TeammateNotesOff)
+	if err != nil {
+		return "", false, err
+	}
+	if a != b {
 		return "", false, nil
 	}
-	return cfg.SessionTeammateNotes, true, nil
+	return a, true, nil
 }

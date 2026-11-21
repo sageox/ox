@@ -161,6 +161,8 @@ func TestRepoTeammateNotesChangeRefusedWhenYAMLOverridesIt(t *testing.T) {
 		{name: "capitalized key still overrides", yaml: `Session_Teammate_Notes: "on"`, set: "off", wantErr: true, wantOn: true},
 		// and a null leaves config.json's value in force
 		{name: "null is no override", yaml: `session_teammate_notes: null`, set: "off", wantOn: false},
+		// no committed string may pose as "no value": YAML decodes \0 to NUL
+		{name: "a value spelled like a sentinel still overrides", yaml: `session_teammate_notes: "\0unset"`, set: "off", wantErr: true, wantOn: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -217,11 +217,15 @@ func writeCheckout(t *testing.T, repoID, notes string) string {
 	return root
 }
 
-// writeRecording puts the recording marker naming workspace in a session folder.
+// writeRecording puts the recording marker naming workspace ("" = none) in a session folder.
 func writeRecording(t *testing.T, workspace string) string {
 	t.Helper()
 	dir := t.TempDir()
-	marker := `{"agent_id":"agent-a","session_path":"` + dir + `","workspace_path":"` + workspace + `"}`
+	marker := `{"agent_id":"agent-a","session_path":"` + dir + `"`
+	if workspace != "" {
+		marker += `,"workspace_path":"` + workspace + `"`
+	}
+	marker += `}`
 	if err := os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(marker), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +251,11 @@ func TestTeammateNotesSwitchFollowsEachSessionsCheckout(t *testing.T) {
 	}{
 		{name: "worktree off, daemon's checkout on", daemon: daemonOn, dir: writeRecording(t, worktreeOff), want: false},
 		{name: "worktree on, daemon's checkout off", daemon: daemonOff, dir: writeRecording(t, worktreeOn), want: true},
-		{name: "marker names another repo: the daemon's checkout decides", daemon: daemonOff, dir: writeRecording(t, elsewhere), want: false},
-		{name: "no marker: the daemon's checkout decides", daemon: daemonOff, dir: t.TempDir(), want: false},
+		// fail closed: with no marker the recording is over (or unreadable) and
+		// the checkout that made it is unknown, so its opt-out may be lost
+		{name: "no marker: off, whatever the daemon's checkout says", daemon: daemonOn, dir: t.TempDir(), want: false},
+		{name: "marker names another repo: off", daemon: daemonOn, dir: writeRecording(t, elsewhere), want: false},
+		{name: "marker from before workspace_path: the daemon's checkout decides", daemon: daemonOn, dir: writeRecording(t, ""), want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

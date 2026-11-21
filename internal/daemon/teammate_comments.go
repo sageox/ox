@@ -567,16 +567,24 @@ func agentRecordingDir(projectRoot string, agents func() []string) func(dir stri
 // recorded the session in dir. Clones and worktrees of one repo share this
 // daemon, and each checkout's hook reads its own setting, so the open and the
 // inbox must too: a session recorded in a checkout that opted out must not be
-// offered notes because the daemon started in one that did not. The
-// recording's workspace counts only when it is a checkout of the daemon's own
-// repo; otherwise (marker gone after the recording stopped, unreadable, or
-// naming somewhere else) the daemon's checkout decides.
+// offered notes because the daemon started in one that did not.
+//
+// It fails closed (off) when that checkout is unknown: no readable recording
+// marker (the recording is over, so there is nothing to deliver to anyway) or
+// a marker naming a checkout of another repo. Only a marker older than
+// workspace_path falls back to the daemon's own checkout.
 func teammateNotesSwitch(daemonRoot string) func(dir string) bool {
 	repoID := config.GetRepoID(daemonRoot)
 	return func(dir string) bool {
+		st, err := session.ReadRecordingStateFile(dir)
+		if err != nil || st == nil {
+			return false
+		}
 		root := daemonRoot
-		if st, err := session.ReadRecordingStateFile(dir); err == nil && st != nil && st.WorkspacePath != "" &&
-			repoID != "" && config.GetRepoID(st.WorkspacePath) == repoID {
+		if st.WorkspacePath != "" {
+			if repoID == "" || config.GetRepoID(st.WorkspacePath) != repoID {
+				return false
+			}
 			root = st.WorkspacePath
 		}
 		return config.TeammateNotesEnabled(root)
