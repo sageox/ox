@@ -17,6 +17,14 @@ const (
 
 	// SessionEntryTypeTool is a tool call or result
 	SessionEntryTypeTool SessionEntryType = "tool"
+
+	// SessionEntryTypeMedia cites a pasted image by content: the bytes never
+	// enter the recording, only the sha256 the live stream uploads them under.
+	SessionEntryTypeMedia SessionEntryType = "media"
+
+	// SessionEntryTypeGap declares content the recording could not carry (an
+	// image too large or of an unsupported type), so the loss is never silent.
+	SessionEntryTypeGap SessionEntryType = "gap"
 )
 
 // SessionEntry represents a single conversation turn in the session.
@@ -57,6 +65,19 @@ type SessionEntry struct {
 
 	// CoworkerModel is the model tier used by the coworker (e.g., sonnet, opus, haiku).
 	CoworkerModel string `json:"coworker_model,omitempty"`
+
+	// SHA256, MIME, Size and Position describe a media entry's image (lowercase
+	// hex digest of the bytes, content type, byte count, index among the turn's
+	// content blocks). Position is a pointer so block 0 is not omitted.
+	SHA256   string `json:"sha256,omitempty"`
+	MIME     string `json:"mime,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Position *int   `json:"position,omitempty"`
+
+	// Reason and LostEntries describe a gap entry: why, and how many entries
+	// (pasted images) it stands for.
+	Reason      string `json:"reason,omitempty"`
+	LostEntries int    `json:"lost_entries,omitempty"`
 }
 
 // Session represents a complete recording session.
@@ -201,6 +222,8 @@ const (
 	EntryTypeAssistant = SessionEntryTypeAssistant
 	EntryTypeSystem    = SessionEntryTypeSystem
 	EntryTypeTool      = SessionEntryTypeTool
+	EntryTypeMedia     = SessionEntryTypeMedia
+	EntryTypeGap       = SessionEntryTypeGap
 )
 
 // Function aliases for backward compatibility

@@ -838,8 +838,8 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 	}
 }
 
-// Start runs the scheduler until cancellation, then joins the delayed startup
-// pull before returning. Tracked background clones receive a bounded drain period.
+// Start runs the scheduler until cancellation, then joins the active Team
+// Context cycle. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
 	if s.ctx == nil { // the daemon binds it before the IPC server starts
 		s.ctx = ctx
@@ -888,6 +888,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
+	var teamSyncDone <-chan struct{}
 	if s.config.TeamContextSyncInterval > 0 && s.config.ProjectRoot != "" {
 		teamContextTicker = time.NewTicker(s.config.TeamContextSyncInterval)
 		teamContextChan = teamContextTicker.C
@@ -902,15 +903,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		// delayed team context sync for regular pulls (not just cloning).
 		// Gated on global-sync ownership — non-owner daemons leave team
 		// contexts to the owning daemon for this endpoint (ox-6zme).
-		startupTeamSyncDone := startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
+		teamSyncDone = startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
 			if !s.IsGlobalSyncOwner() {
 				return
 			}
 			s.pullTeamContexts(ctx)
 		})
-		// The startup pull must stop before the scheduler's caller releases
-		// its resources. Cancellation also interrupts the initial delay.
-		defer func() { <-startupTeamSyncDone }()
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -987,14 +985,23 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 	// immediate initial pull so last_sync gets populated right away
 	// (don't wait 5 minutes for the first readTicker)
-	go s.pullChanges(ctx)
+	startupPullDone := make(chan struct{})
+	go func(done chan struct{}) {
+		defer close(done)
+		s.pullChanges(ctx)
+	}(startupPullDone)
 
 	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
 	go s.checkCodeDBFreshness(ctx)
 
+	var periodicGCDone <-chan struct{}
+	var watcherTrigger <-chan struct{} = s.triggerChan
 	for {
 		select {
 		case <-ctx.Done():
+			if teamSyncDone != nil {
+				<-teamSyncDone
+			}
 			// wait briefly for in-flight background clones to finish,
 			// blocking any further clone spawns from still-running sync goroutines
 			s.waitClones(3 * time.Second)
@@ -1003,30 +1010,37 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-readTicker.C:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			s.pullChanges(ctx)
+			// Periodic GC may own the Ledger lock during preservation.
+			// Keep the event loop responsive and resume on the next tick.
+			if periodicGCDone == nil {
+				s.pullChanges(ctx)
+			}
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
-			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			//
 			// Global-sync gate (ox-6zme): only the daemon holding the
 			// per-endpoint flock lease runs team-context pulls and KB
 			// ListBubbles. Other daemons consume the on-disk state the
 			// owner keeps fresh — every daemon still resolves its own
 			// per-project KB symlinks from whatever is on disk via the
 			// existing reconciler.
-			if s.IsGlobalSyncOwner() {
-				s.pullTeamContexts(ctx)
-				// kb bubbles share the team-context cadence (15s). Per-bubble
-				// FETCH_HEAD dedup inside pullManagedRepo (threshold =
-				// max(SyncInterval/2, MinFetchHeadAge)) gates repo/custom
-				// bubbles down to the slower read cadence automatically — see
-				// kbSyncIntervalFor in sync_bubbles.go.
-				s.syncBubbles(ctx)
+			// Coalesce ticks with the startup pull or a periodic cycle so
+			// slow Team Context remotes never stall Ledger work.
+			if periodicGCDone == nil && teamSyncDone == nil && s.IsGlobalSyncOwner() {
+				teamSyncDone = startDelayedTeamContextSync(ctx, 0, func(ctx context.Context) {
+					s.pullTeamContexts(ctx)
+					// Bubbles share this cadence and deduplicate fetches per repo.
+					if ctx.Err() == nil {
+						s.syncBubbles(ctx)
+					}
+				})
 			}
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}
+
+		case <-teamSyncDone:
+			teamSyncDone = nil
 
 		case <-heartbeatTicker.C:
 			// not traced: lightweight liveness ping, not useful in telemetry
@@ -1037,13 +1051,25 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			s.checkLatestVersion(taskCtx)
 			span.End()
 
+		case <-startupPullDone:
+			startupPullDone = nil
+
 		case <-gcChan:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
-			s.checkAndRunGC(taskCtx)
-			span.End()
+			if periodicGCDone == nil && startupPullDone == nil && teamSyncDone == nil {
+				periodicGCDone = s.startPeriodicGC(ctx)
+				if periodicGCDone != nil {
+					// Leave one coalesced watcher event queued until GC releases
+					// the checkout. Heartbeats must still run during preservation.
+					watcherTrigger = nil
+				}
+			}
+
+		case <-periodicGCDone:
+			periodicGCDone = nil
+			watcherTrigger = s.triggerChan
 
 		case <-githubSyncChan:
-			if s.githubSync != nil {
+			if periodicGCDone == nil && s.githubSync != nil {
 				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
 					taskCtx, span := s.tracer.StartTask(ctx, "daemon:github_sync")
 					s.githubSync.CheckAndSync(taskCtx, l.Path)
@@ -1073,7 +1099,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 				}()
 			}
 
-		case <-s.triggerChan:
+		case <-watcherTrigger:
 			// watcher-triggered sync: skip sparse-checkout refresh to avoid
 			// feedback loop where .sageox/cache/ writes trigger sync which
 			// runs ConfigureSparseCheckout which could wipe cache
@@ -1084,7 +1110,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	}
 }
 
-// startDelayedTeamContextSync schedules the initial team pull and reports when
+// startDelayedTeamContextSync schedules a background team cycle and reports when
 // its callback has finished, including when cancellation skips the pull.
 func startDelayedTeamContextSync(ctx context.Context, delay time.Duration, pull func(context.Context)) <-chan struct{} {
 	done := make(chan struct{})
@@ -1412,12 +1438,13 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return nil // can't pull from repo that isn't cloned yet
 	}
 
-	// corruption check: move aside for re-clone on next cycle
+	// corruption check: move aside for re-clone on next cycle, keeping the
+	// local cache (session recordings) where its writers expect it
 	if !isValidGitRepo(s.config.LedgerPath) {
 		backupPath := fmt.Sprintf("%s.bak.%d", s.config.LedgerPath, time.Now().Unix())
 		s.logger.Warn("ledger repo corrupt, moving aside for re-clone",
 			"path", s.config.LedgerPath, "backup", backupPath)
-		if err := os.Rename(s.config.LedgerPath, backupPath); err != nil {
+		if err := s.moveAsideKeepingCache(s.config.LedgerPath, backupPath); err != nil {
 			s.logger.Error("failed to move corrupt ledger aside", "error", err)
 			return fmt.Errorf("corrupt ledger at %s but rename failed: %w", s.config.LedgerPath, err)
 		}
@@ -1503,7 +1530,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 
 		// remote-unchanged or recently-fetched: update sync timestamps
-		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
+		if result.SkipReason == skipReasonRemoteUnchanged || result.SkipReason == skipReasonRecentlyFetched {
 			s.workspaceRegistry.ClearSyncFailures("ledger")
 			if s.issues != nil {
 				// ClearSyncFailures just ended the backoff this issue reports.
@@ -1516,6 +1543,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 				s.logger.Warn("failed to update ledger config last sync", "error", err)
 			}
 			s.recordSyncState(ctx, s.config.LedgerPath)
+			s.syncLedgerMurmurs(ctx)
 		}
 
 		if progress != nil {
@@ -1626,23 +1654,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
-	// write+commit any murmurs the CLI queued while the daemon was down, so they
-	// are relayed and pushed in this same cycle
-	s.drainMurmurOutbox(ctx)
-
-	// relay murmurs from ledger after pull
-	if s.murmurRelay != nil {
-		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" {
-			s.murmurRelay.RelayFromPath(l.Path, "ledger")
-		}
-	}
-
-	// push any unpushed murmur commits (batched by sync cycle)
-	if s.whisperRegistry != nil {
-		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
-			s.pushMurmurCommits(ctx, l.Path)
-		}
-	}
+	s.syncLedgerMurmurs(ctx)
 
 	// retract orphaned draft placeholders (crashed sessions), then push any
 	// unpushed session-draft commits (both batched by sync cycle). Retraction
@@ -1661,10 +1673,26 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	return nil
 }
 
-// drainMurmurOutbox writes and commits any murmurs the CLI queued locally while
-// the daemon was unavailable. It runs at the top of each ledger sync so a drained
-// murmur is relayed and pushed in the same cycle. Entries older than the murmur
-// window are dropped rather than resurfaced. Best-effort: a commit failure leaves
+// syncLedgerMurmurs runs after a successful pull or when the checkout is
+// already current. Local murmurs can be queued while GC holds the checkout,
+// and publishing them does not require a new remote commit.
+func (s *SyncScheduler) syncLedgerMurmurs(ctx context.Context) {
+	s.drainMurmurOutbox(ctx)
+
+	l := s.workspaceRegistry.GetLedger()
+	if l == nil || l.Path == "" {
+		return
+	}
+	if s.murmurRelay != nil {
+		s.murmurRelay.RelayFromPath(l.Path, "ledger")
+	}
+	if s.whisperRegistry != nil && l.Exists {
+		s.pushMurmurCommits(ctx, l.Path)
+	}
+}
+
+// drainMurmurOutbox writes and commits queued murmurs. Entries older than the
+// murmur window are dropped rather than resurfaced. A commit failure leaves
 // the queued file in place for the next cycle.
 //
 // Each workspace in the registry is its own allow-list entry, so the registry
@@ -1709,8 +1737,19 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 				continue
 			}
 
-			if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
-				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", err)
+			commit := func() error { return writeAndCommitMurmur(ctx, ws.Path, payload) }
+			var commitErr error
+			if ws.Type == WorkspaceTypeTeamContext {
+				var acquired bool
+				acquired, commitErr = gitutil.TryWithPreCloneLock(ws.Path, commit)
+				if !acquired && commitErr == nil {
+					continue // leave the outbox entry until the checkout is available
+				}
+			} else {
+				commitErr = commit()
+			}
+			if commitErr != nil {
+				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", commitErr)
 				continue // leave for next cycle
 			}
 			s.logger.Debug("drained queued murmur", "path", e.path, "rel_path", payload.RelPath)
@@ -2412,6 +2451,22 @@ func isValidRepoPath(path string) bool {
 	return false
 }
 
+// moveAsideKeepingCache sets a broken checkout aside for a re-clone without
+// taking its .sageox/cache along (gitserver.MoveAsideKeepingCache) and says
+// what it kept, so the log shows the session recordings never left.
+func (s *SyncScheduler) moveAsideKeepingCache(path, backup string) error {
+	kept, err := gitserver.MoveAsideKeepingCache(path, backup)
+	if err != nil {
+		return err
+	}
+	if kept != "" {
+		entries, _ := os.ReadDir(filepath.Join(kept, "sessions"))
+		s.logger.Info("checkout: kept the local cache in place while moving the checkout aside",
+			"path", path, "cache", kept, "session_folders", len(entries), "backup", backup)
+	}
+	return nil
+}
+
 // checkoutComplete reports whether payload's repo is already cloned: it has a
 // .git, and a team context also has the .sageox/ its two-phase clone
 // materializes last.
@@ -2522,7 +2577,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 					s.logger.Warn("checkout: .git exists but .sageox missing, treating as incomplete clone",
 						"path", payload.RepoPath)
 					backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
-					if rErr := os.Rename(payload.RepoPath, backupPath); rErr != nil {
+					if rErr := s.moveAsideKeepingCache(payload.RepoPath, backupPath); rErr != nil {
 						s.logger.Error("checkout: failed to move incomplete clone aside", "error", rErr)
 					}
 				} else {
@@ -2537,11 +2592,13 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 				s.logger.Debug("checkout: target holds only a CodeDB cache, keeping it", "path", payload.RepoPath)
 			} else {
 				// directory exists but not a git repo - self-healing: move aside and clone fresh
-				// this handles corrupt/incomplete clones that need recovery
+				// this handles corrupt/incomplete clones that need recovery. A Ledger
+				// that never cloned still holds session recordings under its cache,
+				// so the cache stays in place and the clone adopts it.
 				backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
 				s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
 					"path", payload.RepoPath, "backup", backupPath)
-				if err := os.Rename(payload.RepoPath, backupPath); err != nil {
+				if err := s.moveAsideKeepingCache(payload.RepoPath, backupPath); err != nil {
 					// if rename fails, log and continue - git clone will fail if there's a real problem
 					s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
 						"path", payload.RepoPath, "error", err)
@@ -2591,9 +2648,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// context.DeadlineExceeded) — masking a real clone failure as a
 		// harmless retry-next-cycle.
 		//
-		// The budget depends on what is being cloned: a team context is a
-		// small partial clone, a Ledger is its whole history. See
-		// ledgerCloneTimeout.
+		// Both budgets are long backstops; a stalled transfer is aborted by
+		// curl's stall check instead. See ledgerCloneTimeout.
 		cloneBudget := teamContextCloneTimeout
 		if payload.RepoType != "team-context" {
 			cloneBudget = ledgerCloneTimeout
@@ -3061,13 +3117,15 @@ func (s *SyncScheduler) recordSyncState(ctx context.Context, workspacePath strin
 	lock.Lock()
 	defer lock.Unlock()
 
+	ctx, cancel := s.localSyncCompletionContext(ctx)
+	defer cancel()
+	state := LoadSyncState(workspacePath)
 	sha, err := gitHeadSHA(ctx, workspacePath)
 	if err != nil {
 		s.logger.Debug("failed to get HEAD SHA for sync state", "path", workspacePath, "error", err)
-		sha = ""
+		sha = state.LastSyncCommit
 	}
 
-	state := LoadSyncState(workspacePath)
 	state.RecordSuccess(sha)
 	if err := SaveSyncState(workspacePath, state); err != nil {
 		s.logger.Warn("failed to save sync state", "path", workspacePath, "error", err)

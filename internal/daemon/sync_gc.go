@@ -35,24 +35,71 @@ const (
 	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
-// checkAndRunGC iterates team context workspaces and triggers blue-green reclone
-// for any that are past their gc_interval_days cadence.
-func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
+// startPeriodicGC keeps reclone I/O off the scheduler loop. Track it for the
+// same bounded shutdown drain as manually triggered GC.
+func (s *SyncScheduler) startPeriodicGC(ctx context.Context) <-chan struct{} {
+	if atomic.LoadInt32(&s.gcInProgress) != 0 || !s.addClone() {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer s.cloneWg.Done()
+		defer close(done)
+		taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+		defer span.End()
+		s.checkAndRunGC(taskCtx)
+	}()
+	return done
+}
+
+func gcBackupPath(path string) string {
+	return filepath.Clean(path) + ".old"
+}
+
+// checkAndRunGC keeps the Ledger phase serialized with watcher validation and
+// outbox draining. The scheduler pauses both until Ledger cleanup completes. Launch Team Context cleanup before the Ledger phase so a stalled
+// Ledger reclone cannot prevent recovery of an interrupted Team Context swap.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) <-chan struct{} {
 	// only one GC at a time
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		s.logger.Debug("gc: already in progress, skipping check")
-		return
+		return nil
 	}
+	var active atomic.Int32
+	active.Store(1)
+	finish := func() {
+		if active.Add(-1) == 0 {
+			atomic.StoreInt32(&s.gcInProgress, 0)
+		}
+	}
+	defer finish()
 
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("gc: failed to load workspace registry", "error", err)
-		atomic.StoreInt32(&s.gcInProgress, 0)
-		return
+		return nil
 	}
 
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	teams := s.workspaceRegistry.GetTeamContexts()
+	var teamDone chan struct{}
+	if len(teams) > 0 && ctx.Err() == nil && s.addClone() {
+		active.Add(1)
+		teamDone = make(chan struct{})
+		go func() {
+			defer s.cloneWg.Done()
+			defer close(teamDone)
+			defer finish()
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:team_context_gc")
+			defer span.End()
+			s.checkTeamContextGC(taskCtx, teams)
+		}()
+	}
+	s.checkLedgerAndBubbleGC(ctx)
+	return teamDone
+}
+
+func (s *SyncScheduler) checkTeamContextGC(ctx context.Context, teamContexts []WorkspaceState) {
 	for _, ws := range teamContexts {
-		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
+		interruptedSwap := gitutil.IsGitRepo(gcBackupPath(ws.Path))
 		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
 			continue
 		}
@@ -87,8 +134,11 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
 			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
 
-		// run GC synchronously (one at a time) then release the flag
+		// Process one reclone at a time within the GC worker.
 		result := s.runBlueGreenGC(ctx, ws)
+		if result == gcSkippedLocked {
+			continue // no reclone started, so try the next due checkout
+		}
 
 		repoName := ws.TeamName
 		if repoName == "" {
@@ -120,9 +170,11 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		break // one GC per check cycle to avoid overloading
 	}
+}
 
+func (s *SyncScheduler) checkLedgerAndBubbleGC(ctx context.Context) {
 	// ledger GC reclone — same blue-green pattern as team contexts
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			intervalDays := l.GCIntervalDays
 			if intervalDays <= 0 {
@@ -131,7 +183,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			interval := time.Duration(intervalDays) * 24 * time.Hour
 			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
 			fullClone := !isPartialClone(l.Path)
-			interruptedSwap := gitutil.IsGitRepo(l.Path + ".old")
+			interruptedSwap := gitutil.IsGitRepo(gcBackupPath(l.Path))
 
 			// trigger 3: a genuinely wedged ledger (ahead AND behind for
 			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
@@ -239,8 +291,6 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	// knowledge-bubble GC — independent of ledger / team-context GC.
 	s.TriggerKBGC(ctx)
-
-	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 
 // ledgerSyncWedgeAge is how long a ledger must be simultaneously ahead
@@ -419,7 +469,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	resp := &TriggerGCResponse{}
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		if (!ws.Exists && !gitutil.IsGitRepo(ws.Path+".old")) || ws.CloneURL == "" {
+		if (!ws.Exists && !gitutil.IsGitRepo(gcBackupPath(ws.Path))) || ws.CloneURL == "" {
 			continue
 		}
 		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
@@ -481,7 +531,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	}
 
 	// ledger GC reclone
-	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(gcBackupPath(l.Path))) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
 			// A forced repair is an explicit recovery request, so preserve
@@ -539,9 +589,8 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	return resp
 }
 
-// acquireGCLock creates an exclusive filesystem lock for the GC swap window.
+// acquireGCLock creates an exclusive filesystem lock for workspace GC.
 // Returns the lock file handle on success, or an error if the lock is already held.
-// The lock is short-lived (only held during the two-rename atomic swap).
 func acquireGCLock(lockPath string) (*os.File, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
@@ -595,8 +644,29 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // value specifically, not on gcSuccess or on their own pre-call wedge
 // sample.
 func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
+	ws.Path = filepath.Clean(ws.Path)
+	if ws.Type != WorkspaceTypeTeamContext {
+		return s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+	}
+	// The Git lock lives in the clone being replaced. Use the stable path
+	// lock shared by Team Context pulls and clone setup across the swap.
+	acquired, err := gitutil.TryWithPreCloneLock(ws.Path, func() error {
+		result, recovered = s.recloneWorkspaceForGC(ctx, ws, captureUnpushedOnDiverge)
+		return nil
+	})
+	if err != nil {
+		s.logger.Warn("gc: cannot lock Team Context checkout", "path", ws.Path, "error", err)
+		return gcFailed, false
+	}
+	if !acquired {
+		return gcSkippedLocked, false
+	}
+	return result, recovered
+}
+
+func (s *SyncScheduler) recloneWorkspaceForGC(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
-	oldPath := ws.Path + ".old"
+	oldPath := gcBackupPath(ws.Path)
 	diffFile := ws.Path + ".gc-diff"
 	untrackedDir := ws.Path + ".gc-untracked"
 	lockPath := ws.Path + ".gc-lock"
@@ -672,6 +742,11 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
 				return err
 			}
+			// .old holds the live cache when the swap finished but the carry did
+			// not; it is newer than the preserved copy, so it goes first.
+			if err := s.gcCarryCache(oldPath, ws.Path); err != nil {
+				return err
+			}
 			carryErr = gcCarryPlanRetries(oldPath, ws.Path)
 			return nil
 		}()
@@ -710,7 +785,11 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		// crash between the swap and phase 1.5 would otherwise discard the
 		// backup — taking sync-state.json with it, which is the file a
 		// non-owner daemon reads to learn when a team context last synced.
-		if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
+		if _, statErr := os.Stat(cacheBackupDir); statErr == nil && cacheHoldsFiles(ws.Path) {
+			// the carry already put the live cache in place; the copy taken
+			// before the clone is older and would overwrite newer lines
+			_ = os.RemoveAll(cacheBackupDir)
+		} else if statErr == nil {
 			if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
 				s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
 					"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
@@ -943,6 +1022,14 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 
 	if _, err := os.Stat(oldPath); err == nil {
+		if cacheHoldsFiles(oldPath) {
+			if isLedger {
+				s.ledgerMu.Unlock()
+			}
+			s.logger.Error("gc: retained old clone still holds local cache files, refusing to remove it",
+				"path", oldPath, "cache", filepath.Join(oldPath, ".sageox", "cache"))
+			return gcFailed, false
+		}
 		if err := os.RemoveAll(oldPath); err != nil {
 			if isLedger {
 				s.ledgerMu.Unlock()
@@ -974,6 +1061,14 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		return gcFailed, false
 	}
 
+	// Carry the live cache across by rename, still inside the swap window.
+	// The copy preserved before the clone is only a crash backstop: a hook
+	// appends to raw.jsonl and the live spool by path the whole time the clone
+	// runs, and the old clone is removed below, so restoring that copy lost
+	// every line written in between.
+	cacheCarryErr := s.gcCarryCache(oldPath, ws.Path)
+	cacheCarried := cacheCarryErr == nil && !cacheHoldsFiles(oldPath)
+
 	if isLedger {
 		s.ledgerMu.Unlock()
 	}
@@ -996,10 +1091,15 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// Carry .git/ retries, including those written during cloning. Keep .old
 	// until every entry is copied; an entry may hold the only record (#1356).
 	carryErr = gcCarryPlanRetries(oldPath, ws.Path)
-	if carryErr != nil {
+	switch {
+	case carryErr != nil:
 		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", carryErr)
-	} else if err := os.RemoveAll(oldPath); err != nil {
-		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	case cacheCarryErr != nil || cacheHoldsFiles(oldPath):
+		// logged in phase 1.5; .old holds the only copy of what did not move
+	default:
+		if err := os.RemoveAll(oldPath); err != nil {
+			s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+		}
 	}
 
 	// The risky window for a concurrent CLI write (see the comment where
@@ -1011,7 +1111,15 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 
 	// --- phase 1.5: restore cache ---
-	if hasCache {
+	switch {
+	case !hasCache:
+	case cacheCarried:
+		// the live cache is in place and newer than the copy
+		_ = os.RemoveAll(cacheBackupDir)
+	case cacheCarryErr != nil:
+		s.logger.Error("gc: could not carry the whole cache into the new clone, old clone and backup retained",
+			"path", ws.Path, "old", oldPath, "backup", cacheBackupDir, "error", cacheCarryErr)
+	default:
 		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
 			// keep backup so manual recovery is possible
 			s.logger.Error("gc: failed to restore cache, backup retained",
@@ -1096,6 +1204,42 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 
 	s.logger.Info("gc: reclone complete", "workspace", wsLabel, "path", ws.Path)
 	return gcSuccess, divergeCaptured
+}
+
+// gcCarryCache moves the old clone's .sageox/cache into the new one by rename
+// (gitserver.CarryCache) and logs what moved, so a reclone never leaves session
+// recordings behind in a tree it is about to delete.
+func (s *SyncScheduler) gcCarryCache(oldPath, newPath string) error {
+	carried, err := gitserver.CarryCache(oldPath, newPath)
+	if err != nil {
+		return err
+	}
+	if carried {
+		entries, _ := os.ReadDir(filepath.Join(newPath, ".sageox", "cache", "sessions"))
+		s.logger.Info("gc: carried the local cache into the new clone", "path", newPath, "session_folders", len(entries))
+	}
+	return nil
+}
+
+// cacheHoldsFiles reports whether repo's .sageox/cache contains anything but
+// directories. An unreadable tree counts as holding files: it is never safe to
+// delete what could not be checked.
+func cacheHoldsFiles(repo string) bool {
+	found := false
+	err := filepath.WalkDir(filepath.Join(repo, ".sageox", "cache"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return found || err != nil
 }
 
 // Link retries without overwriting destination entries. Retire each source
@@ -1487,6 +1631,12 @@ func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error 
 		if err != nil {
 			return nil
 		}
+		// The cache was carried across by rename and is newer than this copy,
+		// taken before the clone; a Ledger whose .gitignore misses .sageox/cache
+		// lists it as untracked, and copying it back truncated raw.jsonl.
+		if strings.HasPrefix(filepath.ToSlash(relPath), ".sageox/cache/") {
+			return nil
+		}
 
 		dstPath := filepath.Join(repoPath, relPath)
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
@@ -1601,7 +1751,12 @@ func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
 		return
 	}
 
-	dbPath := filepath.Join(paths.WhisperDBDir(repoID, ep), "whisper.db")
+	whisperDir := paths.WhisperDBDir(repoID, ep)
+	if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(repoID, ep), whisperDir); err != nil {
+		s.logger.Error("whisper_store_refused", "path", whisperDir, "reason", "symlink_in_ledger_cache", "error", err)
+		return
+	}
+	dbPath := filepath.Join(whisperDir, "whisper.db")
 	if err := registry.ReopenLedgerStore(dbPath); err != nil {
 		s.logger.Error("gc: failed to reopen whisper store after ledger reclone", "error", err)
 	}

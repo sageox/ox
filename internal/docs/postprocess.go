@@ -2,7 +2,9 @@ package docs
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -184,6 +186,10 @@ func transformFile(srcPath, destPath string, sidebarPosition int) (err error) {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("not a regular file: %s", srcPath)
 	}
+	source, err := io.ReadAll(srcFile)
+	if err != nil {
+		return fmt.Errorf("read source file: %w", err)
+	}
 
 	// Create destination file
 	destFile, err := os.Create(destPath)
@@ -192,7 +198,7 @@ func transformFile(srcPath, destPath string, sidebarPosition int) (err error) {
 	}
 	defer destFile.Close()
 
-	scanner := bufio.NewScanner(srcFile)
+	scanner := bufio.NewScanner(bytes.NewReader(escapeMDX(source)))
 	writer := bufio.NewWriter(destFile)
 	defer func() {
 		if flushErr := writer.Flush(); flushErr != nil && err == nil {

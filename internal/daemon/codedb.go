@@ -51,6 +51,10 @@ type CodeDBManager struct {
 	lastErr   error
 	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
 	dataDir   string      // cached data dir; resolved once on first use
+	// dataDirRefused: every candidate data dir reached outside its checkout
+	// through a symlink (paths.CheckNoSymlinksBelow), so nothing is indexed;
+	// cached like dataDir, so the refusal is logged once
+	dataDirRefused bool
 
 	// testHook is called at the start of doIndex; nil in production.
 	// Tests use it to synchronize with or measure the indexing goroutine.
@@ -62,6 +66,9 @@ type CodeDBManager struct {
 	ledgerIndexing bool
 	ledgerStats    CodeDBStats
 	ledgerDataDir  string // cached ledger index dir; resolved once on first use
+	// ledgerDataDirRefused: the Ledger index dir reached outside the Ledger
+	// through a symlink; cached so the refusal is logged once
+	ledgerDataDirRefused bool
 	// ledgerTestHook is called at the start of BuildLedgerIndex; nil in production.
 	ledgerTestHook func()
 	// ledgerIndexRepoFn replaces db.IndexLocalRepo in tests so a build can be made
@@ -182,10 +189,11 @@ func NewCodeDBManager(projectRoot string, logger *slog.Logger, telemetry *Teleme
 
 // resolveSharedDataDir returns the shared CodeDB directory from project config.
 // Falls back to legacy per-worktree path if config is unavailable.
-// Result is cached after first resolution.
+// Result is cached after first resolution. It returns "" when every candidate
+// reaches outside its checkout through a symlink: callers then index nothing.
 func (m *CodeDBManager) resolveSharedDataDir() string {
 	m.mu.Lock()
-	if m.dataDir != "" {
+	if m.dataDir != "" || m.dataDirRefused {
 		dir := m.dataDir
 		m.mu.Unlock()
 		return dir
@@ -195,7 +203,16 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 
 	ctx, err := config.LoadProjectContext(projectRoot)
 	if err == nil {
-		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+		dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint())
+		if dir != "" {
+			if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint()), dir); err != nil {
+				// a tracked Ledger symlink would aim the index anywhere on disk;
+				// the per-worktree index below lives in the coworker's own repo
+				m.logger.Error("codedb_shared_dir_refused", "path", dir, "reason", "symlink_in_ledger_cache", "error", err)
+				dir = ""
+			}
+		}
+		if dir != "" {
 			// clean up legacy root-level codedb/ if it exists
 			legacyDir := paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint())
 			if legacyDir != "" {
@@ -213,6 +230,14 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	}
 	m.logger.Debug("falling back to legacy codedb path", "reason", err)
 	dir := paths.CodeDBDataDir(projectRoot)
+	if err := paths.CheckNoSymlinksBelow(projectRoot, dir); err != nil {
+		// the source repository can track a symlink here too
+		m.logger.Error("codedb_index_refused", "path", dir, "reason", "symlink_in_worktree_cache", "error", err)
+		m.mu.Lock()
+		m.dataDirRefused = true
+		m.mu.Unlock()
+		return ""
+	}
 	m.mu.Lock()
 	m.dataDir = dir
 	m.mu.Unlock()
@@ -230,6 +255,28 @@ func (m *CodeDBManager) ledgerRootForDataDir(dataDir string) string {
 		return dataDir[:idx]
 	}
 	return ""
+}
+
+// confined re-checks dir right before it is created or opened: no symlink
+// below its checkout on the way to it or inside it (paths.CheckNoSymlinksBelow).
+// The resolvers check once and cache the path, but a pull can check a link out
+// later, and a writable open or MkdirAll follows it. A refusal is logged at
+// Error; the caller skips that index and opens nothing.
+func (m *CodeDBManager) confined(dir string) bool {
+	return m.checkConfined(dir) == nil
+}
+
+// checkConfined is confined for a caller that reports the refusal as an error.
+func (m *CodeDBManager) checkConfined(dir string) error {
+	root := m.ledgerRootForDataDir(dir) // the checkout above .sageox/cache: Ledger or worktree
+	if root == "" {
+		root = filepath.Dir(dir)
+	}
+	if err := paths.CheckNoSymlinksBelow(root, dir); err != nil {
+		m.logger.Error("codedb_index_refused", "path", dir, "reason", "symlink_in_cache", "error", err)
+		return err
+	}
+	return nil
 }
 
 // SetLedgerPath sets the ledger checkout path for GitHub data indexing.
@@ -253,7 +300,7 @@ func (m *CodeDBManager) SetIssueTracker(tracker *IssueTracker) {
 // Result is cached after first resolution.
 func (m *CodeDBManager) resolveLedgerDataDir() string {
 	m.mu.Lock()
-	if m.ledgerDataDir != "" {
+	if m.ledgerDataDir != "" || m.ledgerDataDirRefused {
 		dir := m.ledgerDataDir
 		m.mu.Unlock()
 		return dir
@@ -267,6 +314,13 @@ func (m *CodeDBManager) resolveLedgerDataDir() string {
 	}
 	dir := paths.CodeDBLedgerDir(ctx.RepoID(), ctx.Endpoint())
 	if dir == "" {
+		return ""
+	}
+	if err := paths.CheckNoSymlinksBelow(paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint()), dir); err != nil {
+		m.logger.Error("codedb_ledger_dir_refused", "path", dir, "reason", "symlink_in_ledger_cache", "error", err)
+		m.mu.Lock()
+		m.ledgerDataDirRefused = true
+		m.mu.Unlock()
 		return ""
 	}
 	m.mu.Lock()
@@ -330,6 +384,9 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	}
 
 	start := time.Now()
+	if err := m.checkConfined(ledgerDir); err != nil {
+		return m.ledgerBuildFailed(start, fmt.Errorf("ledger index dir refused: %w", err))
+	}
 	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
 		return m.ledgerBuildFailed(start, fmt.Errorf("create ledger index dir: %w", err))
 	}
@@ -547,6 +604,9 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	}
 
 	dataDir := m.resolveSharedDataDir()
+	if dataDir == "" || !m.confined(dataDir) {
+		return nil, errors.New("code index refused: its cache path reaches outside the checkout through a symlink")
+	}
 
 	// Guard: if dataDir lives inside a ledger that hasn't been cloned yet,
 	// skip indexing. Without this check, os.MkdirAll(dataDir) creates the
@@ -801,7 +861,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			dirtyDuration = time.Since(dirtyStart)
 
 			// also write dirty overlay to ledger index dir so CLI search finds it
-			if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
+			if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir && m.confined(baseDir) {
 				baseDB, bErr := codedb.Open(baseDir)
 				if bErr == nil {
 					if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {
@@ -1317,6 +1377,13 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	}
 
 	dataDir := m.resolveSharedDataDir()
+	if dataDir == "" || !m.confined(dataDir) {
+		// refused and logged; release the flag claimed above
+		m.mu.Lock()
+		m.indexing = false
+		m.mu.Unlock()
+		return
+	}
 	isInitial := false
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		isInitial = true
@@ -1464,8 +1531,12 @@ func (m *CodeDBManager) buildActiveFor(dir string) bool {
 // index and the ledger index. The ledger index is reached through the same
 // resolver BuildLedgerIndex uses, so the two never disagree about its location.
 func (m *CodeDBManager) maintenanceDirs() []string {
-	dirs := []string{m.resolveSharedDataDir()}
-	if ledger := m.resolveLedgerDataDir(); ledger != "" && ledger != dirs[0] {
+	var dirs []string
+	shared := m.resolveSharedDataDir()
+	if shared != "" && m.confined(shared) {
+		dirs = append(dirs, shared)
+	}
+	if ledger := m.resolveLedgerDataDir(); ledger != "" && ledger != shared && m.confined(ledger) {
 		dirs = append(dirs, ledger)
 	}
 	return dirs
@@ -1473,6 +1544,9 @@ func (m *CodeDBManager) maintenanceDirs() []string {
 
 // gcDirtyIndexes removes stale dirty overlay directories and logs the result.
 func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
+	if dataDir == "" || !m.confined(dataDir) {
+		return
+	}
 	db, err := codedb.Open(dataDir)
 	if err != nil {
 		return
@@ -1557,6 +1631,9 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		if m.dirtyOpenHook != nil {
 			m.dirtyOpenHook()
 		}
+		if !m.confined(dataDir) {
+			return
+		}
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			m.logger.Warn("dirty overlay refresh: open failed", "error", err)
@@ -1582,7 +1659,7 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		}
 
 		// also write dirty overlay to ledger index dir so CLI search finds it
-		if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
+		if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir && m.confined(baseDir) {
 			baseDB, bErr := codedb.Open(baseDir)
 			if bErr == nil {
 				if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {

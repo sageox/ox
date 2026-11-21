@@ -265,6 +265,23 @@ coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a re
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "flow_lanes",
+		Label:       "Flow lanes",
+		Description: "Show what each ox call moved between SageOx and your session, as a one-line lane.",
+		LongDescription: `Controls ox's flow lanes outside the Claude Code plugin.
+
+A lane is one line per ox call that moved team data:
+"SAGEOX ●━━━━━━━━━━━━━━━━● SESSION  searched team memory · ~1.2k from 5 discussions · 0.8s".
+When enabled, Codex shows each lane under the ox call that made it, and
+` + "`ox statusline --watch`" + ` draws them live under the status line. Turning
+the status line off also turns these off. In Claude Code the lanes under each
+ox call are set with /ox-session-report flow on|off|still.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "session_report_pane",
 		Label:       "Session report pane",
 		Description: "Show the /ox-session-report pane in Claude Code (installs the ox-cli-brief-pane plugin)",
@@ -463,6 +480,25 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Category:    "Sessions",
 		ValidValues: []string{"auto", "none", "claude", "codex"},
 		Default:     "auto",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "session.teammate_notes",
+		Label:       "Teammate notes",
+		Category:    "Sessions",
+		Description: "Let a teammate watching your live session send your AI coworker a note.",
+		LongDescription: `Controls whether notes from a teammate watching your live session reach
+your AI coworker at its next step.
+
+  on  - Deliver notes the session owner enabled on SageOx (default). Each note
+        is labeled as coming from a teammate, not from you.
+  off - Drop every note on this machine, unshown and unacknowledged.
+
+The session owner's switch on SageOx is the first layer of consent; this is
+the second, on your machine. The environment variable OX_TEAMMATE_NOTES=off
+overrides this setting.`,
+		ValidValues: config.ValidTeammateNotesModes,
+		Default:     config.TeammateNotesOn,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
@@ -886,6 +922,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
+	case "flow_lanes":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.FlowLanesEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.FlowLanesEnabled)
+		}
+
 	case "session_report_pane", "brief_pane":
 		// only an explicit value counts as a user layer (see statusline);
 		// brief_pane is session_report_pane's deprecated name, and an old
@@ -936,6 +978,17 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	case "session.draft":
 		if userCfg != nil && userCfg.SessionDraft != "" {
 			cv.UserVal = config.NormalizeSessionDraft(userCfg.SessionDraft)
+		}
+
+	case "session.teammate_notes":
+		// OX_TEAMMATE_NOTES beats the stored setting at runtime
+		// (config.TeammateNotesEnabled): display must agree, or 'ox config get'
+		// shows "on" while notes are being dropped.
+		if envMode := os.Getenv(config.EnvTeammateNotes); envMode != "" {
+			cv.EnvVal = config.NormalizeTeammateNotes(envMode)
+		}
+		if userCfg != nil && userCfg.SessionTeammateNotes != "" {
+			cv.UserVal = config.NormalizeTeammateNotes(userCfg.SessionTeammateNotes)
 		}
 
 	case "attribution.commit":
@@ -1046,8 +1099,8 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	}
 
 	// determine effective value and source (Env > User > Repo > Team > Default).
-	// EnvVal is only ever populated for session_publishing/session_recording
-	// (see their cases above) — every other setting falls through untouched.
+	// EnvVal is only ever populated for session_publishing, session_recording
+	// and session.teammate_notes (see their cases above) — every other setting falls through untouched.
 	if cv.EnvVal != "" {
 		cv.Value = cv.EnvVal
 		cv.Source = ConfigLevelEnv
@@ -1209,6 +1262,10 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
 
+	case "flow_lanes":
+		enabled := value == "on"
+		cfg.FlowLanesEnabled = &enabled
+
 	case "session_report_pane", "brief_pane":
 		// both names write session_report_pane_enabled and drop the old key,
 		// so the two can never disagree
@@ -1268,6 +1325,10 @@ func setUserConfig(key, value string) error {
 			return fmt.Errorf("session.draft must be one of: on, off")
 		}
 		cfg.SessionDraft = value
+
+	case "session.teammate_notes":
+		// value was already checked against the setting's ValidValues above
+		cfg.SessionTeammateNotes = value
 
 	case "attribution.commit":
 		if cfg.Attribution == nil {
@@ -1550,6 +1611,9 @@ func unsetUserConfig(key string) error {
 	case "statusline":
 		cfg.StatuslineEnabled = nil
 
+	case "flow_lanes":
+		cfg.FlowLanesEnabled = nil
+
 	case "session_report_pane", "brief_pane":
 		cfg.SessionReportPaneEnabled = nil
 		cfg.BriefPaneEnabled = nil
@@ -1593,6 +1657,9 @@ func unsetUserConfig(key string) error {
 
 	case "session.draft":
 		cfg.SessionDraft = ""
+
+	case "session.teammate_notes":
+		cfg.SessionTeammateNotes = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {

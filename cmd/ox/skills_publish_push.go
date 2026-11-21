@@ -11,15 +11,11 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
-// skills_publish_push.go — the push leg of `ox skills publish` (ox#1477).
-//
-// The publish commit is only useful once it is on the Team Context's remote: a
-// coworker's sync pulls from there. So publish pushes right after it commits,
-// and when it cannot, says so plainly and leaves the retry to the daemon's
-// Team Context sync, which pushes the same commits under the same rule
-// (daemon.ShouldPushTeamPublishes).
+// Coworkers sync from the remote, so Team Context writers push after committing.
+// When a push fails, the daemon retries it under the same validation rule.
 
 // The push is bounded by attempts and a per-git-operation timeout, NOT by a
 // context deadline: PushWithRetry may be mid-rebase when a deadline fires, and a
@@ -38,11 +34,13 @@ type teamPublishPush struct {
 	reason string
 	// retried is true when ox's own sync will push it later: the commit is
 	// ox's to push and only the attempt failed. False means a human must act.
-	retried bool
+	retried           bool
+	requiresRedaction bool
 }
 
 func (o *skillsChangeOutput) applyPush(p teamPublishPush) {
 	o.Pushed, o.NotPushedReason, o.pushRetried = p.pushed, p.reason, p.retried
+	o.requiresRedaction = p.requiresRedaction
 }
 
 // teamPublishCommitMessage names the skills in the commit subject the push
@@ -75,6 +73,7 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 	opts.MaxRetries = teamPublishPushAttempts
 	opts.OpTimeout = teamPublishPushOpTimeout
 	opts.ValidatePush = daemon.ValidateTeamPublishPush
+	opts.PreserveCommitHistory = true
 	if err := gitutil.PushWithRetry(context.Background(), teamPath, opts); err != nil {
 		if errors.Is(err, daemon.ErrForeignCommitAhead) {
 			// Re-checked under the push lock: a commit landed after the check
@@ -82,7 +81,10 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 			return teamPublishPush{reason: fmt.Sprintf(
 				"another unpushed commit landed ahead of the publish (%s), and ox pushes only its own publish commits", err)}
 		}
-		slog.Warn("team skill publish push failed", "team_context", teamPath, "error", err)
+		if _, refused := errors.AsType[*secretguard.RefusedError](err); refused {
+			return teamPublishPush{reason: err.Error(), requiresRedaction: true}
+		}
+		slog.Warn("team context publish push failed", "team_context", teamPath, "error", err)
 		reason := strings.Join(strings.Fields(err.Error()), " ")
 		// Only the daemon retries a failed publish push; with it disabled,
 		// promising "ox retries" would leave the skill local forever.
@@ -91,7 +93,7 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 		}
 		return teamPublishPush{reason: reason, retried: true}
 	}
-	slog.Info("team skill publish pushed", "team_context", teamPath)
+	slog.Info("team context publish pushed", "team_context", teamPath)
 	return teamPublishPush{pushed: true}
 }
 
@@ -99,6 +101,20 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 // publish push. A var so tests do not depend on the host's runtime
 // capabilities, which can disable the daemon on their own.
 var teamPublishDaemonRetries = func() bool { return !daemon.IsDaemonDisabled() }
+
+// teamWritePushGuidance reports delivery for a write that has already committed.
+func teamWritePushGuidance(teamPath string, result teamPublishPush) string {
+	switch {
+	case result.pushed:
+		return "Pushed to the Team Context remote."
+	case result.requiresRedaction:
+		return fmt.Sprintf("Committed locally. Clean the sensitive content from the unpushed history before retrying. %s", result.reason)
+	case result.retried:
+		return fmt.Sprintf("Committed locally, not pushed: %s. Run `ox sync` to retry now.", result.reason)
+	default:
+		return fmt.Sprintf("Committed locally, not pushed: %s. After resolving this, run `git -C %s push`.", result.reason, shellQuote(teamPath))
+	}
+}
 
 // teamPublishGuidance tells the publisher where the skills actually are. It
 // never says distribution happened unless the push did.
@@ -108,6 +124,8 @@ func teamPublishGuidance(names []string, out skillsChangeOutput) string {
 	switch {
 	case out.Pushed:
 		return fmt.Sprintf("%s published to your Team Context and pushed, without changing the repository copies; coworkers receive it on their next sync. %s", subject, after)
+	case out.requiresRedaction:
+		return fmt.Sprintf("%s committed locally. Clean the sensitive content from the unpushed history before retrying. %s", subject, out.NotPushedReason)
 	case out.pushRetried:
 		return fmt.Sprintf("%s committed to your Team Context but NOT pushed yet, so no coworker has it: %s. ox retries the push on its next Team Context sync; run `ox sync` to retry now. %s", subject, out.NotPushedReason, after)
 	default:

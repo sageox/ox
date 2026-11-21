@@ -2,10 +2,12 @@ package adapterruntime
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -61,6 +63,33 @@ func (s TailStats) AllLinesFailedToParse() bool {
 
 // TailJSONLWithStats is TailJSONL plus the read counts.
 func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
+	return tailJSONL(path, offset, parse, nil)
+}
+
+// TailJSONLUntil is TailJSONL that can end a read early, at a record boundary:
+// it stops before the first record whose entries fits rejects and returns that
+// record's offset, so the caller's next read starts with it. fits is asked once
+// about each parsed record that yields entries, in file order. The read's first
+// record is taken even when rejected, and the read ends right after it, so a
+// record no response could hold still moves the cursor instead of wedging it.
+//
+// It exists for an adapter whose entries can be far larger than one record's
+// text suggests (ox-adapter-claude-code carries pasted images and whole tool
+// outputs) and must keep one read-from-offset response under the protocol's
+// output limit. A read that stops early is only correct because its reader
+// (the external adapter) drains pages until the cursor reaches the end: a
+// budgeted read that callers treat as the whole tail loses the rest of it.
+func TailJSONLUntil(path string, offset int64, parse LineParser, fits func([]adapterprotocol.RawEntry) bool) ([]adapterprotocol.RawEntry, int64, error) {
+	if fits == nil {
+		return nil, offset, errors.New("TailJSONLUntil requires a fits check")
+	}
+	entries, newOffset, _, err := tailJSONL(path, offset, parse, fits)
+	return entries, newOffset, err
+}
+
+// tailJSONL is TailJSONLWithStats with an optional fits check; a nil one reads
+// every complete record, which is what TailJSONL promises.
+func tailJSONL(path string, offset int64, parse LineParser, fits func([]adapterprotocol.RawEntry) bool) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
 	var stats TailStats
 	if parse == nil {
 		return nil, offset, stats, errors.New("TailJSONL requires a line parser")
@@ -95,6 +124,7 @@ func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterp
 	var (
 		entries  []adapterprotocol.RawEntry
 		consumed = offset
+		start    = offset
 		reader   = bufio.NewReaderSize(f, 64*1024)
 	)
 
@@ -114,20 +144,32 @@ func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterp
 			continue
 		}
 
-		consumed += int64(n)
-		stats.LinesRead++
-
 		if oversize {
 			// truncating would hand the parser a fragment and call it a
 			// record; skipping keeps the offset moving without inventing data
+			consumed += int64(n)
+			stats.LinesRead++
 			stats.ParseErrors++
 			continue
 		}
-		if parsed, parseErr := parse(trimNewline(line)); parseErr == nil {
-			entries = append(entries, parsed...)
-			stats.EntriesParsed += len(parsed)
-		} else {
+		parsed, parseErr := parse(trimNewline(line))
+		last := false
+		if parseErr == nil && fits != nil && len(parsed) > 0 && !fits(parsed) {
+			if consumed > start {
+				break // the next read starts at this record
+			}
+			last = true // the read's first record: taken alone, so the cursor moves
+		}
+		consumed += int64(n)
+		stats.LinesRead++
+		if parseErr != nil {
 			stats.ParseErrors++
+			continue
+		}
+		entries = append(entries, parsed...)
+		stats.EntriesParsed += len(parsed)
+		if last {
+			break
 		}
 	}
 
@@ -142,6 +184,60 @@ func endsRecordBoundary(f *os.File, offset int64) bool {
 		return false // past EOF, or unreadable — either way, do not trust it
 	}
 	return b[0] == '\n'
+}
+
+// recordWaitPoll is how often WaitForCompleteRecord looks again. An agent
+// flushes a record in milliseconds; 25 ms keeps the wait short without
+// spinning on stat.
+const recordWaitPoll = 25 * time.Millisecond
+
+// WaitForCompleteRecord waits until the file at path ends on a record
+// boundary (empty, or its last byte a newline), at most timeout, and reports
+// false only when it still ends mid-record at the deadline.
+//
+// TailJSONL leaves an unterminated last record unread, which is right for a
+// read that will run again and wrong for the last one: a final drain that
+// lands while the agent is still writing its last record loses that record
+// for good. A file that cannot be read has nothing to wait for; the read that
+// follows reports why.
+func WaitForCompleteRecord(ctx context.Context, path string, timeout time.Duration) bool {
+	return waitForCompleteRecord(ctx, timeout, func() bool { return endsOnRecordBoundary(path) })
+}
+
+// waitForCompleteRecord is WaitForCompleteRecord with its probe passed in, so
+// a test can act between one probe and the next.
+func waitForCompleteRecord(ctx context.Context, timeout time.Duration, complete func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(recordWaitPoll)
+	defer ticker.Stop()
+	for {
+		if complete() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// endsOnRecordBoundary reports whether path ends on a record boundary, or
+// cannot be read (and so has no partial record to wait for).
+func endsOnRecordBoundary(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return true
+	}
+	return endsRecordBoundary(f, info.Size())
 }
 
 // readLine returns one newline-terminated record.

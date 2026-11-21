@@ -225,7 +225,11 @@ func (m *CodeDBManager) clearHistoryDebt(dataDir string, refs []string) {
 // several daemons share one data dir, and whichever finishes a ref's backfill
 // clears it for all of them.
 func (m *CodeDBManager) historyOwedFor(fingerprint string) bool {
-	return loadIndexState(m.logger, m.resolveSharedDataDir()).owes(refOfFingerprint(fingerprint))
+	dir := m.resolveSharedDataDir()
+	if dir == "" {
+		return false // refused: nothing is indexed, so nothing is owed
+	}
+	return loadIndexState(m.logger, dir).owes(refOfFingerprint(fingerprint))
 }
 
 // seedFreshnessFromDisk fills lastIndexedHead and lastIndexedBoard from the

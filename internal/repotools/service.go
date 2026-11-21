@@ -132,11 +132,17 @@ func GetRemoteURLsForDir(dir string) ([]string, error) {
 // Returns empty string if origin doesn't exist or git fails.
 // offline-safe: returns "" for local-only repos
 func getOriginURL(dir string) string {
+	return getRemoteURL(dir, "origin")
+}
+
+// getRemoteURL returns the normalized URL of the named remote, "" when it
+// doesn't exist or git fails.
+func getRemoteURL(dir, remote string) string {
 	var cmd *exec.Cmd
 	if dir != "" {
-		cmd = exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+		cmd = exec.Command("git", "-C", dir, "remote", "get-url", remote)
 	} else {
-		cmd = exec.Command("git", "remote", "get-url", "origin")
+		cmd = exec.Command("git", "remote", "get-url", remote)
 	}
 	output, err := cmd.Output()
 	if err != nil {

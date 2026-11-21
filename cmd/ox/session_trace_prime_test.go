@@ -52,9 +52,9 @@ func testTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T, agentType stri
 	project, ledgerPath := tracePrimeEnvironment(t)
 	const agentID = "OxTracePausedPrime"
 	const nativeID = "55555555-5555-4555-8555-555555555555"
-	require.NoError(t, session.MarkExplicitPause(project, agentID, 7))
+	require.NoError(t, session.MarkExplicitPause(project, agentID, 7, session.PauseAnchor{}))
 
-	status := startSessionRecording(project, agentID, agentType, "", "", nativeID)
+	status := startSessionRecording(project, agentID, agentType, inheritedParent{}, "", nativeID)
 	require.NotNil(t, status)
 	require.True(t, status.AutoStarted)
 	state, err := session.LoadRecordingStateForAgent(project, agentID)
@@ -102,7 +102,7 @@ func TestTracePrimeAliasMaterializesCapturedSpans(t *testing.T) {
 	project, ledgerPath := tracePrimeEnvironment(t)
 	const agentID = "OxTraceAlias"
 	const nativeID = "66666666-6666-4666-8666-666666666666"
-	status := startSessionRecording(project, agentID, "claude", "", "", nativeID)
+	status := startSessionRecording(project, agentID, "claude", inheritedParent{}, "", nativeID)
 	require.NotNil(t, status)
 	require.True(t, status.AutoStarted)
 	state, err := session.LoadRecordingStateForAgent(project, agentID)

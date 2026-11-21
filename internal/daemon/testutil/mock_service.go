@@ -45,6 +45,7 @@ type MockService struct {
 	SessionFinalizeFunc   func(payload daemon.SessionFinalizeIPCPayload)
 	SessionWatchStartFunc func(payload daemon.SessionWatchStartPayload)
 	SessionWatchStopFunc  func(payload daemon.SessionWatchStopPayload)
+	LiveSessionDrainFunc  func(payload daemon.LiveSessionDrainPayload)
 
 	// settings
 	SettingsGetFunc func() *flags.CLISettingsResponse
@@ -215,6 +216,24 @@ func (m *MockService) SessionWatchStart(payload daemon.SessionWatchStartPayload)
 	if m.SessionWatchStartFunc != nil {
 		m.SessionWatchStartFunc(payload)
 	}
+}
+
+func (m *MockService) LiveSessionDrain(payload daemon.LiveSessionDrainPayload) {
+	if m.LiveSessionDrainFunc != nil {
+		m.LiveSessionDrainFunc(payload)
+	}
+}
+
+// TeammateCommentsTake satisfies the Service interface; no test drives teammate
+// notes through this mock, so it holds no knob (the daemon's own tests use the
+// real inbox).
+func (m *MockService) TeammateCommentsTake(daemon.TeammateCommentsTakePayload) (daemon.TeammateCommentsTakeResponse, error) {
+	return daemon.TeammateCommentsTakeResponse{}, nil
+}
+
+// TeammateCommentsConfirm satisfies the Service interface (see TeammateCommentsTake).
+func (m *MockService) TeammateCommentsConfirm(daemon.TeammateCommentsConfirmPayload) error {
+	return nil
 }
 
 func (m *MockService) SessionWatchStop(payload daemon.SessionWatchStopPayload) {

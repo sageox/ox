@@ -11,11 +11,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +41,8 @@ var (
 	reStripCommandName             = regexp.MustCompile(`(?s)<command-name>.*?</command-name>`)
 	reStripCommandMessage          = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
 	reStripCommandArgs             = regexp.MustCompile(`(?s)<command-args>.*?</command-args>`)
+	reCommandName                  = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>`)
+	reCommandArgs                  = regexp.MustCompile(`(?s)<command-args>\s*(.*?)\s*</command-args>`)
 	reStripTaskNotification        = regexp.MustCompile(`(?s)<task-notification>.*?</task-notification>`)
 )
 
@@ -113,6 +121,9 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 		if err != nil {
 			return nil, err
 		}
+		// a whole-file read cannot be chunked, and its consumers (import,
+		// finalize) do not stream, so images stay out of it
+		parsed = slices.DeleteFunc(parsed, func(e adapterprotocol.RawEntry) bool { return e.Role == adapterprotocol.RoleMedia })
 		var raw claudeCodeEntry
 		if json.Unmarshal(line, &raw) == nil {
 			if raw.Version != "" && meta.AgentVersion == "" {
@@ -128,9 +139,107 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 }
 
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	// Keep a trailing partial record unconsumed; otherwise a concurrent Claude
-	// write can make validation pass while this reader silently drops the turn.
-	return adapterruntime.TailJSONL(path, offset, parseLine)
+	return readPage(path, offset, maxReadResponseBytes)
+}
+
+// maxReadResponseBytes bounds one read-from-offset response as serialized. The
+// daemon cancels an adapter whose one-shot output (stdout and stderr together)
+// passes 64 MiB and keeps the old cursor, so a catch-up that ever serialized
+// past it would fail on every retry and capture would never advance. Pasted
+// images ride the response as bytes and tool results are whole file contents,
+// so a backlog of either crosses it easily. Smaller pages cost one more
+// adapter subprocess per page; 48 MiB keeps a 16 MiB margin for the JSON
+// framing, stderr, and encoder drift, which the tests check against the real
+// response.
+const maxReadResponseBytes = 48 << 20
+
+// responseFramingBytes covers what the response adds around its entries:
+// {"entries":[ ... ],"new_offset":<int64>} and the trailing newline.
+const responseFramingBytes = 64
+
+// readPage reads complete records from offset while the response stays under
+// limit bytes, and returns the offset of the first record it left for the next
+// read. Records are never cut: the external adapter drains pages until the
+// cursor reaches the end, so a stop or recovery still sees every record. A
+// trailing partial record stays unconsumed, as in every read: a concurrent
+// Claude write could otherwise make validation pass while the turn is dropped.
+func readPage(path string, offset, limit int64) ([]adapterprotocol.RawEntry, int64, error) {
+	room := limit - responseFramingBytes
+	var used int64
+	parse := func(line []byte) ([]adapterprotocol.RawEntry, error) {
+		entries, err := parseLine(line)
+		if err != nil {
+			return nil, err
+		}
+		if n := responseBytes(entries); n > room {
+			// no page could ever carry it; without this every read would stop
+			// before it again, or carry it past the daemon's limit and fail
+			entries = omitOversizedRecord(entries)
+			log.Printf("read-from-offset: a %d-byte record exceeds the %d-byte response budget; its text and image bytes are replaced by a gap marker", n, room)
+		}
+		return entries, nil
+	}
+	fits := func(entries []adapterprotocol.RawEntry) bool {
+		n := responseBytes(entries)
+		if used+n > room {
+			return false
+		}
+		used += n
+		return true
+	}
+	return adapterruntime.TailJSONLUntil(path, offset, parse, fits)
+}
+
+// responseBytes is the size entries add to a response, encoded the way
+// adapterruntime writes it (no HTML escaping). Each Encode ends in a newline,
+// which stands in for the separating comma.
+func responseBytes(entries []adapterprotocol.RawEntry) int64 {
+	var w countingWriter
+	enc := json.NewEncoder(&w)
+	enc.SetEscapeHTML(false)
+	for i := range entries {
+		// a RawEntry holds only strings, bools, ints and bytes, which always
+		// encode; the writer never fails
+		_ = enc.Encode(&entries[i])
+	}
+	return w.n
+}
+
+type countingWriter struct{ n int64 }
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
+}
+
+// omittedRecordText replaces the text of a record no response could carry.
+// Only a record that serializes far larger than its line can reach this: a
+// line is at most 10 MiB, and a tool input dense in "<", ">" or "&" is escaped
+// twice, up to seven bytes for each one in the transcript.
+const omittedRecordText = "[ox: this transcript record was too large to capture]"
+
+// omitOversizedRecord keeps a record's entries, their roles, tools and call
+// ids, so the turn and its tool pairing survive as a declared gap; their text
+// and image bytes do not.
+func omitOversizedRecord(entries []adapterprotocol.RawEntry) []adapterprotocol.RawEntry {
+	out := make([]adapterprotocol.RawEntry, len(entries))
+	for i, e := range entries {
+		for _, field := range []*string{&e.Content, &e.ToolInput, &e.ToolOutput} {
+			if *field != "" {
+				*field = omittedRecordText
+			}
+		}
+		if e.Media != nil {
+			m := *e.Media
+			m.Data = nil
+			if m.Skipped == "" {
+				m.Skipped = adapterprotocol.MediaSkippedReadLimit
+			}
+			e.Media = &m
+		}
+		out[i] = e
+	}
+	return out
 }
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
@@ -160,8 +269,8 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		}
 		candidate := filepath.Join(projectDir, agentSessionID+".jsonl")
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
-			if claudesource.Validate(candidate, repoRoot, agentSessionID) != nil {
-				return "", 0, fmt.Errorf("session %s has invalid repository metadata", agentSessionID)
+			if err := claudesource.Validate(candidate, repoRoot, agentSessionID); err != nil {
+				return "", 0, fmt.Errorf("session %s at %s has invalid repository metadata: %w", agentSessionID, candidate, err)
 			}
 			return candidate, findStartOffset(candidate, parseSessionSince(since)), nil
 		}
@@ -257,19 +366,29 @@ func findClaudeSessionInOtherBucket(projectsDir, ownBucket, repoRoot, sessionID 
 		return "", err
 	}
 	var match string
+	var rejected []string
 	for _, dir := range dirs {
 		if !dir.IsDir() || dir.Name() == ownBucket {
 			continue
 		}
 		path := filepath.Join(projectsDir, dir.Name(), sessionID+".jsonl")
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || claudesource.Validate(path, repoRoot, sessionID) != nil {
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if err := claudesource.Validate(path, repoRoot, sessionID); err != nil {
+			rejected = append(rejected, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
 		if match != "" {
 			return "", fmt.Errorf("session %s has multiple valid project buckets", sessionID)
 		}
 		match = path
+	}
+	if match == "" && len(rejected) > 0 {
+		// the transcript exists but is not this repo's: say why, or a stop
+		// reports "not found" and leaves nothing to act on
+		return "", fmt.Errorf("session %s found but not accepted for project %s: %s", sessionID, repoRoot, strings.Join(rejected, "; "))
 	}
 	return match, nil
 }
@@ -281,16 +400,19 @@ func sessionContainsAgentID(path, agentID string) bool {
 	}
 	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), agentID) {
+	// no line cap: a transcript line holding a screenshot can pass 1 MiB, and
+	// a scanner would stop there without reading the rest of the session
+	reader := bufio.NewReaderSize(f, 64*1024)
+	needle := []byte(agentID)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if bytes.Contains(line, needle) {
 			return true
 		}
+		if err != nil {
+			return false
+		}
 	}
-	return false
 }
 
 // findStartOffset locates the byte offset where entries after sinceTime begin.
@@ -304,13 +426,16 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 	}
 	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
+	// no line cap: stopping at the first line over a scanner's limit would
+	// return that line's offset as the recording's start
+	reader := bufio.NewReaderSize(f, 64*1024)
 	var offset int64
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			// an unterminated tail is still being written: start no later than it
+			return offset
+		}
 		var entry struct {
 			Timestamp string `json:"timestamp"`
 		}
@@ -321,9 +446,8 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 				}
 			}
 		}
-		offset += int64(len(line)) + 1 // +1 for newline
+		offset += int64(len(line))
 	}
-	return offset
 }
 
 // --- line parsing ---
@@ -372,6 +496,12 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 	var entries []adapterprotocol.RawEntry
 
 	content, class := classifyUserContent(raw)
+	images := extractImages(raw, ts)
+	if class == userContentSkip && len(images) > 0 && !hasToolResultBlock(raw) {
+		// a screenshot with no words is still the person speaking: the live
+		// stream opens on a user turn, and a media line alone is not one
+		class, content = userContentUser, imageOnlyPrompt
+	}
 	switch class {
 	case userContentSkip:
 		// still extract tool_result blocks below
@@ -381,6 +511,9 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		entries = append(entries, adapterruntime.UserEntry(ts, content))
 	}
 
+	// pasted screenshots follow the turn's text, so a viewer places them at it
+	entries = append(entries, images...)
+
 	// extract tool_result blocks from user content arrays
 	entries = append(entries, extractToolResults(raw, ts)...)
 
@@ -388,6 +521,72 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		return nil, nil
 	}
 	return entries, nil
+}
+
+func hasToolResultBlock(raw *claudeCodeEntry) bool {
+	content, _ := raw.Message.Content.([]interface{})
+	for _, item := range content {
+		if block, ok := item.(map[string]interface{}); ok && block["type"] == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+// imageOnlyPrompt stands in for the text of a turn that is only a pasted image.
+const imageOnlyPrompt = "[pasted image]"
+
+// extractImages returns one media entry per base64 image block in a user
+// message: a screenshot pasted into the prompt. Bytes are carried once, to the
+// daemon, which stages them for upload; they are never part of any text entry.
+// An image over the size cap or of a type the live session does not accept is
+// returned as a skipped entry, so the loss is declared downstream.
+func extractImages(raw *claudeCodeEntry, ts time.Time) []adapterprotocol.RawEntry {
+	if raw.Message == nil {
+		return nil
+	}
+	content, ok := raw.Message.Content.([]interface{})
+	if !ok {
+		return nil
+	}
+	var entries []adapterprotocol.RawEntry
+	for position, item := range content {
+		block, ok := item.(map[string]interface{})
+		if !ok || block["type"] != "image" {
+			continue
+		}
+		source, _ := block["source"].(map[string]interface{})
+		if kind, _ := source["type"].(string); kind != "base64" {
+			continue // a URL source carries no bytes to upload
+		}
+		mime, _ := source["media_type"].(string)
+		encoded, _ := source["data"].(string)
+		entries = append(entries, adapterruntime.MediaEntry(ts, imageRef(position, mime, encoded)))
+	}
+	return entries
+}
+
+// imageRef validates one pasted image against the live session's limits.
+func imageRef(position int, mime, encoded string) adapterprotocol.MediaRef {
+	ref := adapterprotocol.MediaRef{Position: position, MIME: mime}
+	if !adapterprotocol.AllowedMediaMIME(mime) {
+		ref.Skipped = adapterprotocol.MediaSkippedUnsupportedType
+		return ref
+	}
+	// checked before decoding so a huge block is never expanded
+	if int64(base64.StdEncoding.DecodedLen(len(encoded))) > adapterprotocol.MaxMediaBytes {
+		ref.Skipped = adapterprotocol.MediaSkippedTooLarge
+		ref.Size = int64(base64.StdEncoding.DecodedLen(len(encoded)))
+		return ref
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 {
+		ref.Skipped = adapterprotocol.MediaSkippedMalformed
+		return ref
+	}
+	sum := sha256.Sum256(data)
+	ref.SHA256, ref.Size, ref.Data = hex.EncodeToString(sum[:]), int64(len(data)), data
+	return ref
 }
 
 // extractToolResults extracts tool_result content blocks from a user message.
@@ -452,8 +651,36 @@ func extractToolResultContent(block map[string]interface{}) string {
 	return strings.Join(parts, "\n")
 }
 
+// Claude Code writes this assistant line itself when a conversation is
+// resumed (claude --continue / --resume), tagged with the model "<synthetic>".
+// No model said it, so it is not a turn: captured, it showed teammates a
+// stray "No response requested." between the two parts of a resumed session.
+const (
+	syntheticModel    = "<synthetic>"
+	resumePlaceholder = "No response requested."
+)
+
+// isResumePlaceholder reports whether raw is exactly that placeholder: the
+// synthetic model and one text block holding only it. Any other synthetic
+// line (an API error Claude Code reports, say) is still captured.
+func isResumePlaceholder(raw *claudeCodeEntry) bool {
+	if raw.Message == nil || raw.Message.Model != syntheticModel {
+		return false
+	}
+	blocks, ok := raw.Message.Content.([]interface{})
+	if !ok || len(blocks) != 1 {
+		return false
+	}
+	block, ok := blocks[0].(map[string]interface{})
+	if !ok || block["type"] != "text" {
+		return false
+	}
+	text, _ := block["text"].(string)
+	return strings.TrimSpace(text) == resumePlaceholder
+}
+
 func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
-	if raw.Message == nil {
+	if raw.Message == nil || isResumePlaceholder(raw) {
 		return nil, nil
 	}
 
@@ -562,6 +789,16 @@ func classifyTextContent(text string) (string, userContentClass) {
 		return "", userContentSkip
 	}
 
+	// A slash command that carries its own request ("/review the auth change")
+	// is a person asking for work, so it is their prompt, written as typed.
+	// Stripping its tags left nothing, so a session driven only by skills never
+	// counted as prompted and never went live. A bare command ("/clear",
+	// "/compact") stays system: it asks for nothing, and counting it would open
+	// a live stream for a session that may never get a prompt.
+	if prompt, ok := slashCommandPrompt(text); ok {
+		return prompt, userContentUser
+	}
+
 	if strings.Contains(text, "<!-- ox-hash:") {
 		return text, userContentSystem
 	}
@@ -592,6 +829,31 @@ func classifyTextContent(text string) (string, userContentClass) {
 	}
 
 	return cleanedTrimmed, userContentUser
+}
+
+// slashCommandPrompt returns "/name args" for a slash-command message whose
+// <command-args> is non-empty, the shape the server and web viewer count as a
+// prompt (sageox-monorepo packages/sessionturns isRealPrompt).
+func slashCommandPrompt(text string) (string, bool) {
+	// Only a message that IS a command envelope: one that quotes command tags
+	// inside a question ("why did <command-name>... fail?") keeps its own text
+	// through the normal path, so the person's words are never replaced.
+	rest := reStripCommandName.ReplaceAllString(text, "")
+	rest = reStripCommandMessage.ReplaceAllString(rest, "")
+	rest = reStripCommandArgs.ReplaceAllString(rest, "")
+	if strings.TrimSpace(rest) != "" {
+		return "", false
+	}
+	name := reCommandName.FindStringSubmatch(text)
+	args := reCommandArgs.FindStringSubmatch(text)
+	if name == nil || args == nil || name[1] == "" || args[1] == "" {
+		return "", false
+	}
+	cmd := name[1]
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+	return cmd + " " + args[1], true
 }
 
 func stripSystemTags(text string) string {

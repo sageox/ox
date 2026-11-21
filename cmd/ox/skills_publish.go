@@ -464,8 +464,9 @@ type skillsChangeOutput struct {
 	// remote, which is where every coworker's sync reads it from.
 	Pushed bool `json:"pushed"`
 	// NotPushedReason says why the commit is still only local; empty when pushed.
-	NotPushedReason string `json:"not_pushed_reason,omitempty"`
-	pushRetried     bool
+	NotPushedReason   string `json:"not_pushed_reason,omitempty"`
+	pushRetried       bool
+	requiresRedaction bool
 	// TeamContext is the checkout this publish wrote into, and empty otherwise.
 	// Always present, so a reader can tell "published nowhere" from "this ox
 	// does not report where."

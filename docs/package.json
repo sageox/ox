@@ -1,5 +1,9 @@
 {
   "description": "Generated CLI reference docs for ox",
+  "devDependencies": {
+    "@mdx-js/mdx": "3.1.1",
+    "remark-frontmatter": "5.0.0"
+  },
   "files": [
     "reference/**/*.mdx"
   ],
@@ -13,5 +17,8 @@
     "type": "git",
     "url": "https://github.com/sageox/ox.git"
   },
-  "version": "0.25.0"
+  "scripts": {
+    "check:mdx": "node check-mdx.mjs"
+  },
+  "version": "0.26.0"
 }

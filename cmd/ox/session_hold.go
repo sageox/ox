@@ -80,9 +80,24 @@ func heldSessionWarning(sessionName string) string {
 // finalize request bypasses the daemon's scan and would summarize and upload
 // it (GH #1093). Call it before the recording state is cleared, and keep the
 // state when it returns an error: the hold could not be recorded.
+//
+// The recording's live stream ends here too (C1): a held session's live copy is
+// deleted (bounded by liveEndCloseBudget), any other stream is asked to close
+// and the daemon closes it with the session summary. The daemon's close is what
+// may hear the session was deleted on SageOx, and publication reads that
+// verdict when it publishes (C3), not here.
 func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, phase string) error {
 	if state.SessionPath == "" {
 		return nil
+	}
+	liveSessionFinishAtHook(ctx.ProjectRoot, state, liveEndCloseBudget)
+	// a hook has no one to tell about a withheld secret: the stream stays
+	// marked, and the next session start or stop in this project says it
+	settleLiveSecretWithheldNotice(state)
+	if held, err := holdIfDeletedOnServer(state.SessionPath, "hook_"+phase); held || err != nil {
+		// deleted on SageOx while it streamed: no finalize request, which would
+		// summarize and upload it. Silent: a hook has no one to tell.
+		return err
 	}
 	if stopHoldsSession(ctx.ProjectRoot, state) {
 		recordErr := recordManualPublishing(state)
@@ -93,6 +108,11 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 	}
 	ledgerPath := deriveLedgerPath(state.SessionPath)
 	if ledgerPath == "" {
+		return nil
+	}
+	// the last read before automatic publication (C3): a drain of this stream
+	// that heard of a delete writes the hold first
+	if session.IsHeld(state.SessionPath) {
 		return nil
 	}
 	if ipcErr := sendHookFinalizeIPC(daemon.SessionFinalizeIPCPayload{

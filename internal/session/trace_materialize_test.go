@@ -74,6 +74,55 @@ func TestMaterializeTracesUsesDurableRecordingWindows(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(ledger, "sessions", name), "trace materialization must never populate the tracked session path")
 }
 
+// A spool selected by the recording's stop offsets can disappear before the
+// finalizer reads it. Treat that as an omitted attachment and let a later
+// attempt use the same capture window if the spool becomes available again.
+func TestMaterializeTracesSkipsADisappearingSelectedSpool(t *testing.T) {
+	for _, missing := range []string{"root", "native directory", "signal"} {
+		t.Run(missing, func(t *testing.T) {
+			traceBoundaryEnvironment(t, true)
+			ledger := t.TempDir()
+			store, err := NewStore(ledger)
+			require.NoError(t, err)
+			cache := store.CacheSessionPath("trace-selected-spool")
+			spoolRoot := paths.TraceSpoolDir()
+			spool := filepath.Join(spoolRoot, traceBoundaryID)
+			path := filepath.Join(spool, "traces.jsonl")
+			require.NoError(t, os.MkdirAll(spool, 0o700))
+			state := &RecordingState{SessionPath: cache, AgentType: "claude-code", AgentSessionID: traceBoundaryID, StartedAt: time.Now().UTC()}
+			state.initializeTraceCapture()
+			const span = "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"name\":\"selected\"}]}]}]}\n"
+			require.NoError(t, os.WriteFile(path, []byte(span), 0o600))
+			state.RecordTraceBoundary("stop", time.Now())
+			require.NoError(t, os.MkdirAll(cache, 0o700))
+			raw := filepath.Join(cache, "raw.jsonl")
+			require.NoError(t, os.WriteFile(raw, []byte("{\"type\":\"header\",\"metadata\":{}}\n"), 0o600))
+			require.NoError(t, StampRawCarrier(raw, CarrierStamp{TraceCapture: state.Trace}))
+
+			switch missing {
+			case "root":
+				require.NoError(t, os.RemoveAll(spoolRoot))
+			case "native directory":
+				require.NoError(t, os.RemoveAll(spool))
+			case "signal":
+				require.NoError(t, os.Remove(path))
+			}
+			_, meta, err := MaterializeTraces(ledger, cache, state.Trace)
+			require.NoError(t, err)
+			require.Nil(t, meta)
+			require.NoFileExists(t, filepath.Join(cache, materialize.SpansFile))
+			require.NoFileExists(t, filepath.Join(cache, materialize.EventsFile))
+
+			require.NoError(t, os.MkdirAll(spool, 0o700))
+			require.NoError(t, os.WriteFile(path, []byte(span), 0o600))
+			_, recovered, err := MaterializeTraces(ledger, cache, state.Trace)
+			require.NoError(t, err)
+			require.NotNil(t, recovered)
+			require.EqualValues(t, 1, recovered.Spans)
+		})
+	}
+}
+
 func TestMaterializeTracesRejectsUnprovenOrCorruptCapture(t *testing.T) {
 	for _, missingStop := range []bool{true, false} {
 		t.Run(fmt.Sprintf("missing-stop=%t", missingStop), func(t *testing.T) {

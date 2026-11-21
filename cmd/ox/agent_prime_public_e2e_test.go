@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -142,4 +143,87 @@ func TestRunAgentPrime_SageoxDirWithoutConfigIsNotInitialized(t *testing.T) {
 	assert.NotContains(t, out, `status="fresh"`)
 	_, err := os.Stat(filepath.Join(sageoxDir, "agent_instances"))
 	assert.True(t, os.IsNotExist(err), "prime must not register an AI coworker in an uninitialized repo")
+}
+
+// servePublicPrimeAs answers the readest key with the golden bundle, as the
+// server answers a caller it sees as viewer, carrying one public rule.
+func servePublicPrimeAs(t *testing.T, env *oxE2E, viewer string) {
+	t.Helper()
+	raw, err := os.ReadFile(publicPrimeGoldenPath())
+	require.NoError(t, err)
+	var bundle map[string]any
+	require.NoError(t, json.Unmarshal(raw, &bundle))
+	bundle["viewer"] = viewer
+	body, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	env.Handle("/api/v1/public/prime", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("repo_sha256") != readestPublicKey {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(body)
+	})
+}
+
+// runInitializedPrime runs the real `ox agent prime` in a repo the project
+// initialized (committed .sageox/), whose Team Context this machine never got.
+func runInitializedPrime(t *testing.T, env *oxE2E) (out, statusBefore string) {
+	t.Helper()
+	withInitFlags(t, env.TeamID)
+	require.NoError(t, runInit(), "harness setup: ox init must succeed")
+	gitCmd := exec.Command("git", "remote", "add", "origin", "https://github.com/readest/readest.git")
+	gitCmd.Dir = env.Root
+	o, err := gitCmd.CombinedOutput()
+	require.NoError(t, err, string(o))
+	statusBefore = gitStatusPorcelain(t, env.Root)
+
+	var buf bytes.Buffer
+	cmd := agentPrimeCmd
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	require.NoError(t, cmd.Flags().Set("agent", "claude-code"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("agent", "")
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+	require.NoError(t, runAgentPrime(cmd, nil))
+	return buf.String(), statusBefore
+}
+
+// TestRunAgentPrime_OutsideContributorInInitializedRepoGetsPublicPrime —
+// Failure prevented (#8331): an open-source project that committed .sageox/
+// gives an outside contributor's AI coworker nothing, because they cannot get
+// its Team Context, while a clone of a project that never ran ox init primes
+// from its public plans.
+func TestRunAgentPrime_OutsideContributorInInitializedRepoGetsPublicPrime(t *testing.T) {
+	env := newOxE2E(t)
+	servePublicPrimeAs(t, env, api.PublicPrimeViewerSignedIn)
+
+	out, before := runInitializedPrime(t, env)
+
+	assert.True(t, strings.HasPrefix(out, "<ox-prime mode=\"public\">\n"), out)
+	assert.Contains(t, out, "you are not on its team")
+	assert.Contains(t, out, "set aside Dolt as the only remote\n")
+	assert.Contains(t, out, "<public-rules>\nRule: contributing\nOpen an issue before a large PR.\nRun make test before you push.\nRule: go-style (when editing **/*.go)\nRun gofmt.\n</public-rules>\n")
+	assert.NotContains(t, out, "agent_id")
+
+	// read-only: no AI coworker registered, nothing repaired into their clone
+	_, err := os.Stat(filepath.Join(env.Root, ".sageox", "agent_instances"))
+	assert.True(t, os.IsNotExist(err), "a non-member's prime must not register an AI coworker")
+	assert.Equal(t, before, gitStatusPorcelain(t, env.Root), "the clone's working tree is untouched")
+}
+
+// TestRunAgentPrime_MemberWithoutLocalTeamContextKeepsTheFullPrime — Failure
+// prevented: a member whose Team Context has not synced yet is demoted to the
+// public slice of their own project.
+func TestRunAgentPrime_MemberWithoutLocalTeamContextKeepsTheFullPrime(t *testing.T) {
+	env := newOxE2E(t)
+	servePublicPrimeAs(t, env, api.PublicPrimeViewerMember)
+
+	out, _ := runInitializedPrime(t, env)
+
+	assert.NotContains(t, out, "mode=\"public\"")
+	assert.NotContains(t, out, "SageOx primed from")
+	assert.Contains(t, out, "agent_id")
 }

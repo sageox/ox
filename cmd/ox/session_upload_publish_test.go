@@ -40,7 +40,7 @@ func TestFindPublishableCacheSession(t *testing.T) {
 		}, true, ""},
 		{"earlier publish left a pending retry", func(t *testing.T, cacheDir, ledgerDir string) {
 			writeLedgerMeta(t, ledgerDir, `{"version":"1.0","title":"done"}`)
-			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, sessionUploadRetryPendingFile), []byte("{}"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, session.UploadRetryPendingFile), []byte("{}"), 0o644))
 		}, true, ""},
 		{"already published", func(t *testing.T, _, ledgerDir string) {
 			writeLedgerMeta(t, ledgerDir, `{"version":"1.0","title":"done"}`)
@@ -175,7 +175,7 @@ func TestUpload_NeverPublishesOverADifferentSession(t *testing.T) {
 
 	err = sessionUploadCmd.RunE(sessionUploadCmd, []string{name})
 
-	require.ErrorIs(t, err, errRecoveryRefused)
+	require.ErrorIs(t, err, session.ErrLedgerSessionOverwrite)
 	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the published session is untouched on the remote")
 	rawAfter, err := os.ReadFile(filepath.Join(ledgerDir, ledgerFileRaw))
 	require.NoError(t, err)
@@ -249,6 +249,11 @@ func TestFilesNotPublished_ComparesContentNotPresence(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "context-trace.jsonl"), trace, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.json"), summary, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".held"), []byte("{}"), 0o644)) // local state, never content
+			// the live stream's files are local state too (C5): staging never
+			// carries them, so they must not keep the cache copy forever
+			for _, live := range []string{"spool.jsonl", "stream-state.json", "close-requested"} {
+				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, live), []byte("{}"), 0o600))
+			}
 
 			ref := lfs.NewFileRef(tc.ledgerTrace)
 			require.NoError(t, lfs.WritePointerFile(filepath.Join(ledgerDir, "context-trace.jsonl"), lfs.AssertUploaded(ref)))

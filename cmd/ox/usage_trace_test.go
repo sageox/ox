@@ -310,10 +310,13 @@ func TestAfterTool_StdoutIdenticalWithTraceOnAndOff(t *testing.T) {
 			assert.True(t, json.Valid([]byte(out)), "page nudge stdout is one JSON document: %q", out)
 		}},
 		{"codex single JSON document", "codex", func(t *testing.T, _ string) *agentx.HookInput {
-			return &agentx.HookInput{ToolName: "exec_command", ToolInput: shellInput(t, "cmd", "ox murmur list"), ToolResponse: jsonString(t, "x")}
+			// An ox call that moves no team data: it is traced, and draws no
+			// flow lane, so the trace must not change a byte. (A call that
+			// does move data shows its lane from the trace; flow_lanes_test.go.)
+			return &agentx.HookInput{ToolName: "exec_command", ToolInput: shellInput(t, "cmd", "ox status"), ToolResponse: jsonString(t, "x")}
 		}, func(t *testing.T, out string) {
 			doc := decodeCodexHookDoc(t, out)
-			assert.Empty(t, doc.SystemMessage, "ox sends Codex no coworker-visible notice")
+			assert.Empty(t, doc.SystemMessage, "a call that moved no team data shows no notice")
 			require.NotNil(t, doc.HookSpecificOutput)
 		}},
 	}
@@ -390,4 +393,76 @@ func TestAfterTool_OptOutWritesNoInvokedEvent(t *testing.T) {
 	assert.Empty(t, invokedEvents(t, sessionTracePath(state)))
 	assert.NoFileExists(t, filepath.Join(agentTraceCacheDir(root), usageAgentID+".jsonl"))
 	assert.Equal(t, 1, oxactivity.LoadState(root, usageAgentID).Plans, "the status line is a separate setting")
+}
+
+// TestHandleAfterTool_CountsMCPItemReads drives the real PostToolUse handler
+// with SageOx MCP reads. Failure prevented: a plan or discussion read through
+// the SageOx MCP server never reaching the status line, because the MCP tool's
+// input (the item id) was never inspected, while the same read through the
+// shell (`ox plan view <slug>`) was counted.
+func TestHandleAfterTool_CountsMCPItemReads(t *testing.T) {
+	const (
+		pln = "pln_019ffe10-0000-7000-8000-000000000021"
+		cnv = "cnv_019ffe10-0000-7000-8000-000000000011"
+		rec = "rec_019ffe10-0000-7000-8000-000000000011"
+	)
+	mcp := func(tool, input string) *agentx.HookInput {
+		return &agentx.HookInput{SessionID: hookSessionID, ToolName: tool, ToolInput: json.RawMessage(input)}
+	}
+	tests := []struct {
+		name       string
+		inputs     []*agentx.HookInput
+		want       oxactivity.Counts
+		wantNoFile bool
+	}{
+		{
+			name:   "GetPlan counts a plan",
+			inputs: []*agentx.HookInput{mcp("mcp__claude_ai_sageox__GetPlan", `{"plan_id":"`+pln+`"}`)},
+			want:   oxactivity.Counts{Plans: 1},
+		},
+		{
+			name:   "Conversation counts a discussion",
+			inputs: []*agentx.HookInput{mcp("mcp__sageox__Conversation", `{"conversation_id":"`+cnv+`"}`)},
+			want:   oxactivity.Counts{Discussions: 1},
+		},
+		{
+			name: "rec_ and cnv_ forms of one discussion count once",
+			inputs: []*agentx.HookInput{
+				mcp("mcp__sageox__Conversation", `{"conversation_id":"`+cnv+`"}`),
+				mcp("mcp__claude_ai_sageox__Conversation", `{"conversation_id":"`+rec+`"}`),
+			},
+			want: oxactivity.Counts{Discussions: 1},
+		},
+		{
+			name:       "GetPlan without an id counts nothing",
+			inputs:     []*agentx.HookInput{mcp("mcp__claude_ai_sageox__GetPlan", `{}`)},
+			wantNoFile: true,
+		},
+		{
+			name:       "GetPlan with a hostile id counts nothing",
+			inputs:     []*agentx.HookInput{mcp("mcp__claude_ai_sageox__GetPlan", `{"plan_id":"../../etc/passwd"}`)},
+			wantNoFile: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newStatuslineHookProject(t)
+			const agentID = "OxHk01"
+			for _, in := range tt.inputs {
+				require.NoError(t, handleAfterTool(&HookContext{
+					Phase:       phaseAfterTool,
+					AgentType:   "claude-code",
+					ProjectRoot: root,
+					Marker:      &SessionMarker{AgentID: agentID},
+					Input:       in,
+				}))
+			}
+			key := oxactivity.StateKey(agentID, hookSessionID)
+			if tt.wantNoFile {
+				assert.NoFileExists(t, oxactivity.StatePath(root, key), "nothing countable was read")
+				return
+			}
+			assert.Equal(t, tt.want, oxactivity.LoadState(root, key).Counts())
+		})
+	}
 }

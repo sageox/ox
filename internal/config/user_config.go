@@ -292,6 +292,7 @@ type UserConfig struct {
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	StatuslineEnabled *bool        `yaml:"statusline_enabled,omitempty"` // ox row in the Claude Code status line; nil = on
+	FlowLanesEnabled  *bool        `yaml:"flow_lanes_enabled,omitempty"` // flow lanes in Codex and `ox statusline --watch`; nil = on
 	// SessionReportPaneEnabled is the /ox-session-report pane in Claude Code;
 	// nil = BriefPaneEnabled, then on.
 	SessionReportPaneEnabled *bool `yaml:"session_report_pane_enabled,omitempty"`
@@ -326,6 +327,11 @@ type UserConfig struct {
 	// /c/<session_id> link resolves before session stop. "on" (default) or
 	// "off". See internal/config/session_draft.go and ADR-029.
 	SessionDraft string `yaml:"session_draft,omitempty"`
+
+	// SessionTeammateNotes controls whether notes from a teammate watching a
+	// live session reach this machine's agent: "on" (default) or "off". See
+	// internal/config/teammate_notes.go.
+	SessionTeammateNotes string `yaml:"session_teammate_notes,omitempty"`
 
 	// SessionPublishing controls what happens to a recording when the
 	// session stops: "auto" (default) uploads it to the ledger; "manual"
@@ -461,6 +467,17 @@ func (c *UserConfig) AreTipsEnabled() bool {
 		return true
 	}
 	return *c.TipsEnabled
+}
+
+// IsFlowLanesEnabled reports whether ox draws flow lanes (what each ox call
+// moved between SageOx and the session) under ox calls in Codex, in
+// Conductor's turn-end notice and in `ox statusline --watch` (default: true). The Claude Code plugin's lanes
+// have their own switch, /ox-session-report flow.
+func (c *UserConfig) IsFlowLanesEnabled() bool {
+	if c.FlowLanesEnabled == nil {
+		return true
+	}
+	return *c.FlowLanesEnabled
 }
 
 // IsStatuslineEnabled reports whether ox should show its team-context counts

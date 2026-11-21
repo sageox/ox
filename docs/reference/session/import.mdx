@@ -18,7 +18,7 @@ skipped and why. At a terminal, browse opening requests, human prompts and
 the last AI reply, then choose sessions with Space. Press b for a local browser,
 or start with --browse. The browser returns your selection to the terminal;
 nothing is uploaded until you confirm there. Previewing calls no summarizer.
-Use --preview --session <id> to read one session without importing it.
+Use --preview --session \<id> to read one session without importing it.
 Each imported session is
 summarized on this computer by your own claude or codex CLI, in an isolated
 mode with no tools, and then uploaded once. A session the summarizer judges
@@ -36,7 +36,7 @@ already_imported, recorded_live, aborted, not_shared, needs_summarizer or
 ineligible, and counts has a key for each state present. Only ready sessions
 are uploaded; treat any other value, including one added later, as skipped.
 
-This is not 'ox agent <id> session import', which adds a planning
+This is not 'ox agent \<id> session import', which adds a planning
 conversation to the current recording.
 
 ```

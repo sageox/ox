@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/secretguard/secretguardtest"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -103,7 +104,7 @@ func TestMain(m *testing.M) {
 	// Capture and finalize tests upload and push for real; serve the publication
 	// catalog offline rather than depend on raw.githubusercontent.com.
 	secretguardtest.InstallOfflineCatalog()
-	os.Exit(m.Run())
+	os.Exit(testguard.RunWithDataSandbox(m))
 }
 
 // Failure prevented: agentwork publication tests depend on raw.githubusercontent.com.

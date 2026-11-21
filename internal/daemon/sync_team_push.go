@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 
+	"github.com/sageox/ox/internal/addons"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // TeamPublishCommitPrefix is the subject `ox skills publish` gives the commit
@@ -16,6 +19,50 @@ import (
 // the CLI's own push right after the commit, and this daemon's retry — recognize
 // a commit ox may publish.
 const TeamPublishCommitPrefix = "add team skill: "
+
+// TeamObservationCommitPrefix and TeamObservationDir identify the commits and
+// paths written by the Team Context observation recorder.
+const (
+	TeamObservationCommitPrefix = "observation: "
+	TeamObservationDir          = gitutil.TeamObservationDir
+)
+
+type teamPublishScope int
+
+const (
+	foreignCommit teamPublishScope = iota
+	skillCommit
+	addonCommit
+	observationCommit
+)
+
+func teamPublishScopeForSubject(subject string) teamPublishScope {
+	switch {
+	case strings.HasPrefix(subject, TeamPublishCommitPrefix):
+		return skillCommit
+	case strings.HasPrefix(subject, TeamObservationCommitPrefix):
+		return observationCommit
+	case strings.HasPrefix(subject, addons.CommitSubjectPrefix+"install "),
+		strings.HasPrefix(subject, addons.CommitSubjectPrefix+"update "),
+		strings.HasPrefix(subject, addons.CommitSubjectPrefix+"remove "):
+		return addonCommit
+	default:
+		return foreignCommit
+	}
+}
+
+func (s teamPublishScope) allowsPath(path string) bool {
+	switch s {
+	case skillCommit:
+		return strings.HasPrefix(path, "agents/skills/")
+	case addonCommit:
+		return addons.IsTeamWritePath(path)
+	case observationCommit:
+		return strings.HasPrefix(path, TeamObservationDir+"/") && strings.HasSuffix(path, ".jsonl")
+	default:
+		return false
+	}
+}
 
 // TeamPublishLogArgs lists the unpushed commits' subjects, one NUL-terminated
 // record per commit. A newline-separated %s cannot tell a commit whose message
@@ -44,7 +91,7 @@ func ShouldPushTeamPublishes(logOutput string) (blockingSubject string, ok bool)
 	}
 	for _, record := range records {
 		subject := strings.TrimSpace(record) // drops the newline git writes between records
-		if strings.HasPrefix(subject, TeamPublishCommitPrefix) {
+		if teamPublishScopeForSubject(subject) != foreignCommit {
 			continue
 		}
 		if subject == "" {
@@ -55,64 +102,63 @@ func ShouldPushTeamPublishes(logOutput string) (blockingSubject string, ok bool)
 	return "", true
 }
 
-// ErrForeignCommitAhead means a commit other than a skill publish is ahead of
+// ErrForeignCommitAhead means a commit outside the team publish scope is ahead of
 // the remote, so a publish push must not run.
-var ErrForeignCommitAhead = errors.New("a commit other than a skill publish is ahead of the remote")
+var ErrForeignCommitAhead = errors.New("a commit outside the Team Context publish scope is ahead of the remote")
 
 // ValidateTeamPublishPush is the PushOpts.ValidatePush for both publish push
 // legs. It repeats ShouldPushTeamPublishes under the repository lock that
 // PushWithRetry holds through the push, so a commit made after the caller's own
 // check, or during a retry's rebase, can never ride a publish out.
 func ValidateTeamPublishPush(ctx context.Context, repoPath string) (alreadyPublished bool, err error) {
-	out, err := gitutil.RunGit(ctx, repoPath, TeamPublishLogArgs...)
+	// Read Git's local plumbing output directly. RunGit sanitizes human-facing
+	// output, which can remove or rewrite records that must be checked here.
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "-z",
+		"--format=%H%x00%P%x00%s%x00%B", "@{upstream}..HEAD").Output()
 	if err != nil {
 		return false, fmt.Errorf("list unpushed commits: %w", err)
 	}
-	blocker, ok := ShouldPushTeamPublishes(out)
-	switch {
-	case blocker != "":
-		return false, fmt.Errorf("%w: %q", ErrForeignCommitAhead, blocker)
-	case !ok:
+	if len(out) == 0 {
 		return true, nil // a concurrent sync already pushed it
 	}
-	// The subject is only a claim. Every path a pushed commit touches must sit
-	// under the skills root, so a commit that borrowed the publish subject while
-	// changing other Team Context files cannot ride the push out.
-	paths, err := gitutil.RunGit(ctx, repoPath, teamPublishPathLogArgs...)
-	if err != nil {
-		return false, fmt.Errorf("list paths of unpushed commits: %w", err)
+	records := strings.Split(string(out), "\x00")
+	if len(records)%4 != 1 || records[len(records)-1] != "" {
+		return false, fmt.Errorf("%w: could not read the unpushed history", ErrForeignCommitAhead)
 	}
-	if outside := firstPathOutsidePublishRoot(paths); outside != "" {
-		return false, fmt.Errorf("%w: a publish commit changes %q, outside %s", ErrForeignCommitAhead, outside, TeamPublishPathRoot)
+	for i := 0; i < len(records)-1; i += 4 {
+		hash, parents, subject := records[i], records[i+1], strings.TrimSpace(records[i+2])
+		scope := teamPublishScopeForSubject(subject)
+		// These writers never create merge commits. A merge can carry changes
+		// hidden from a per-commit path listing, so it must stay local.
+		if scope == foreignCommit || len(strings.Fields(parents)) != 1 {
+			return false, fmt.Errorf("%w: commit %s", ErrForeignCommitAhead, hash)
+		}
+		if scope == observationCommit {
+			if err := secretguard.ValidateContent("observation-commit.txt", []byte(records[i+3])); err != nil {
+				return false, fmt.Errorf("observation commit message refused: %w", err)
+			}
+		}
+		// Validate each commit against its own scope. --no-renames exposes
+		// both source and destination.
+		paths, err := exec.CommandContext(ctx, "git", "-C", repoPath, "diff-tree", "--name-only", "-r", "-z", "--no-renames",
+			"--ignore-submodules=none", hash, "--").Output()
+		if err != nil {
+			return false, fmt.Errorf("list paths of unpushed commit %s: %w", hash, err)
+		}
+		changed := strings.Split(string(paths), "\x00")
+		if len(changed) < 3 || changed[0] != hash || changed[len(changed)-1] != "" {
+			return false, fmt.Errorf("%w: no verifiable paths for commit %s", ErrForeignCommitAhead, hash)
+		}
+		for _, path := range changed[1 : len(changed)-1] {
+			if !scope.allowsPath(path) {
+				return false, fmt.Errorf("%w: commit %s changes a path outside its publish scope", ErrForeignCommitAhead, hash)
+			}
+		}
 	}
 	return false, nil
 }
 
-// TeamPublishPathRoot is the only directory `ox skills publish` writes in a
-// Team Context.
-const TeamPublishPathRoot = "agents/skills/"
-
-// teamPublishPathLogArgs lists every path each unpushed commit touches,
-// NUL-separated. --no-renames reports a rename as a delete plus an add, so a
-// file moved out of another directory still shows its source path.
-var teamPublishPathLogArgs = []string{"log", "--format=", "--name-only", "--no-renames", "-z", "@{upstream}..HEAD"}
-
-// firstPathOutsidePublishRoot returns the first path in NUL-separated git
-// output that is not under TeamPublishPathRoot, or "" when every path is.
-func firstPathOutsidePublishRoot(out string) string {
-	for _, p := range strings.Split(out, "\x00") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if !strings.HasPrefix(p, TeamPublishPathRoot) {
-			return p
-		}
-	}
-	return ""
-}
-
-// pushTeamPublishCommits is the daemon's leg of `ox skills publish`: it pushes a
+// pushTeamPublishCommits is the daemon's retry for Team Context writes: it pushes a
 // publish commit the CLI could not push itself (offline, an expired credential,
 // a remote that moved underneath it). Without it the commit sat one ahead
 // forever while publish told the human distribution was automatic (ox#1477).
@@ -144,10 +190,11 @@ func (s *SyncScheduler) pushTeamPublishCommits(ctx context.Context, teamPath str
 	if err := gitutil.PushWithRetry(ctx, teamPath, gitutil.PushOpts{
 		// Matches this daemon's pull of the same clone (pullTeamContext): its
 		// look-alike discussion dirs pair as false renames.
-		ImmutablePaths:    true,
-		Logger:            s.logger,
-		SuspendWhenWedged: true,
-		ValidatePush:      ValidateTeamPublishPush,
+		ImmutablePaths:        true,
+		Logger:                s.logger,
+		SuspendWhenWedged:     true,
+		ValidatePush:          ValidateTeamPublishPush,
+		PreserveCommitHistory: true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)

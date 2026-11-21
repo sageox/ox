@@ -89,7 +89,7 @@ func init() {
 		Slug:        CheckSlugReadme,
 		Name:        ".sageox/README.md",
 		Category:    "Project Structure",
-		FixLevel:    FixLevelAuto,
+		FixLevel:    FixLevelSuggested,
 		Description: "Checks if .sageox/README.md exists and is up to date",
 		Run:         checkReadmeFile,
 	})
@@ -103,9 +103,27 @@ func init() {
 		Run:         func(fix bool) checkResult { return checkRepoMarker() },
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugMarkerTeamURLs,
+		Name:        "Marker team URLs",
+		Category:    "Project Structure",
+		FixLevel:    FixLevelSuggested,
+		Description: "Removes team_urls (names of every team the user belongs to) from committed .repo_* markers",
+		Run:         checkMarkerTeamURLs,
+	})
+
 	// ============================================================
 	// Git Status checks
 	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSageoxFilesTracked,
+		Name:        ".sageox/ files staged",
+		Category:    "Git Status",
+		FixLevel:    FixLevelSuggested,
+		Description: "Checks that SageOx configuration files are tracked",
+		Run:         checkSageoxFilesTracked,
+	})
 
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitignore,
@@ -357,6 +375,17 @@ func init() {
 		Description: "Ensures .claude/settings.json runs the ox status line, leaving a custom statusLine in place",
 		Run: func(fix bool) checkResult {
 			return checkClaudeStatusLine(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugConductorStatusLine,
+		Name:        conductorRunScriptCheck,
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Adds an \"ox\" run script to .conductor/settings.local.toml so ox's status line shows in Conductor's Run pane",
+		Run: func(fix bool) checkResult {
+			return checkConductorRunScript(fix)
 		},
 	})
 

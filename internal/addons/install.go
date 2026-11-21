@@ -104,7 +104,7 @@ func Install(ctx context.Context, teamPath string, p Provider, name, version str
 		Addon: name, Op: OpInstall, Source: resolved.Source, Version: resolved.Version,
 		Written: []string{}, Removed: []string{},
 	}
-	return runTeamTransaction(ctx, teamPath, "add-ons: install "+name+" "+resolved.Version, result,
+	return runTeamTransaction(ctx, teamPath, CommitSubjectPrefix+"install "+name+" "+resolved.Version, result,
 		func(tx *transaction) error {
 			if _, ok := tx.lock.Find(name); ok {
 				return fmt.Errorf("%w: %q — run `ox addons update` instead", ErrAlreadyInstalled, name)
@@ -161,7 +161,7 @@ func Update(ctx context.Context, teamPath string, p Provider, name string) (Resu
 		Addon: name, Op: OpUpdate, Source: resolved.Source, Version: resolved.Version,
 		Written: []string{}, Removed: []string{},
 	}
-	return runTeamTransaction(ctx, teamPath, "add-ons: update "+name+" to "+resolved.Version, result,
+	return runTeamTransaction(ctx, teamPath, CommitSubjectPrefix+"update "+name+" to "+resolved.Version, result,
 		func(tx *transaction) error {
 			old, ok := tx.lock.Find(name)
 			if !ok {
@@ -238,7 +238,7 @@ func Update(ctx context.Context, teamPath string, p Provider, name string) (Resu
 // neighboring add-on's or hand-authored file sharing a directory.
 func Remove(ctx context.Context, teamPath string, name string) (Result, error) {
 	result := &Result{Addon: name, Op: OpRemove, Written: []string{}, Removed: []string{}}
-	return runTeamTransaction(ctx, teamPath, "add-ons: remove "+name, result,
+	return runTeamTransaction(ctx, teamPath, CommitSubjectPrefix+"remove "+name, result,
 		func(tx *transaction) error {
 			old, ok := tx.lock.Find(name)
 			if !ok {
@@ -324,6 +324,16 @@ func validateResolved(name string, resolved Resolved) ([]File, error) {
 		files[i] = f
 	}
 	return files, nil
+}
+
+// IsTeamWritePath reports whether an add-on transaction can have changed this
+// path. The push validator and the transaction must agree on destination paths.
+func IsTeamWritePath(p string) bool {
+	if p == LockRelativePath {
+		return true
+	}
+	_, err := cleanAddonPath(p)
+	return err == nil
 }
 
 // cleanAddonPath validates a provider-supplied or locked destination path per
