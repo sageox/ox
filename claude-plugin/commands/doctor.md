@@ -1,3 +1,7 @@
+---
+description: Run diagnostic checks on SageOx configuration and integrations.
+allowed-tools: Bash(ox:*)
+---
 Run diagnostic checks on SageOx configuration and integrations.
 
 Use when:
