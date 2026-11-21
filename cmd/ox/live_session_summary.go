@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/livesummary"
 	"github.com/sageox/ox/internal/session"
@@ -29,17 +31,38 @@ func liveCloseSummary(state *session.RecordingState, raw []map[string]any) strin
 // left out. Any other stream, or a spool that cannot be read, summarizes raw
 // as before.
 func liveConversationEntries(dir string, raw []map[string]any) []map[string]any {
+	var entries []map[string]any
+	// Read state and spool under the stream's live.lock: a drain withholds a
+	// batch under it (saving the flag, then rewriting the spool), so outside it
+	// a read could pair the old spool, which still holds the batch, with
+	// either state. The summary runs before the close takes the lock, so this
+	// never waits on itself. If the lock cannot be had, nothing is quoted.
+	ctx, cancel := context.WithTimeout(context.Background(), liveSummaryLockWait)
+	defer cancel()
+	err := fileutil.WithFileLockTimeout(ctx, livesession.LockTarget(dir), liveSummaryLockWait, func() error {
+		entries = carriedEntries(dir, raw)
+		return nil
+	})
+	if err != nil {
+		slog.Warn("live_session_summary_entries_unlocked", "session", filepath.Base(dir), "impact", "summary quotes no prompt", "error", err)
+		return nil
+	}
+	return entries
+}
+
+// liveSummaryLockWait bounds the wait for live.lock before the stop
+// summarizes: a drain holds it for at most its own budget, and the stop is
+// already waiting on the model, so a few seconds cost nothing. A var so a
+// test can shorten it.
+var liveSummaryLockWait = 5 * time.Second
+
+// carriedEntries applies the rule above; the caller holds live.lock.
+func carriedEntries(dir string, raw []map[string]any) []map[string]any {
 	st, err := livesession.ReadState(dir)
 	if err != nil {
 		return raw
 	}
 	stored, err := session.ReadSessionFromPath(filepath.Join(dir, "spool.jsonl"))
-	// Neither read takes a lock, and withhold saves the flag before it
-	// rewrites the spool: a state read after the spool read sees the flag
-	// whenever the spool already shows the rewrite.
-	if after, aerr := livesession.ReadState(dir); aerr == nil {
-		st = after
-	}
 	switch {
 	case st.SecretWithheld && err != nil:
 		return nil
