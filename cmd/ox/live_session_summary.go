@@ -18,19 +18,28 @@ func liveCloseSummary(state *session.RecordingState, raw []map[string]any) strin
 	return livesummary.Bounded(context.Background(), slog.With("session_id", state.SessionID), state.AdapterName, raw)
 }
 
-// liveConversationEntries is what the live close summarizes. A stream resumed
-// after the agent exited restates the whole conversation (earlier recordings
-// first), so its summary must cover all of it, while raw holds only this
-// recording's lines. The spool carries exactly what the stream carries:
-// redacted, with paused content already left out. Any other stream, or a spool
-// that cannot be read, summarizes raw as before.
+// liveConversationEntries is what the live close summarizes: what the stream
+// carried. A stream resumed after the agent exited restates the whole
+// conversation (earlier recordings first), so its summary must cover all of
+// it, while raw holds only this recording's lines. A stream that withheld a
+// batch as a secret carries a gap line where raw.jsonl keeps the original, so
+// its summary is built from the spool, never raw, or from nothing when the
+// spool cannot be read: a summary may quote prompts, and the secret must not
+// reach SageOx through it. The spool is also redacted, with paused content
+// left out. Any other stream, or a spool that cannot be read, summarizes raw
+// as before.
 func liveConversationEntries(dir string, raw []map[string]any) []map[string]any {
 	st, err := livesession.ReadState(dir)
-	if err != nil || st.SeedBytes == 0 {
+	if err != nil {
 		return raw
 	}
 	stored, err := session.ReadSessionFromPath(filepath.Join(dir, "spool.jsonl"))
-	if err != nil || len(stored.Entries) < len(raw) {
+	switch {
+	case st.SecretWithheld && err != nil:
+		return nil
+	case st.SecretWithheld:
+		return stored.Entries
+	case st.SeedBytes == 0 || err != nil || len(stored.Entries) < len(raw):
 		return raw
 	}
 	return stored.Entries

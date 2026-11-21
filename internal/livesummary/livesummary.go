@@ -65,11 +65,12 @@ func Runner(agent string) agentwork.Runner {
 // attempt: the stop is waiting, and a rejected or failed answer is not worth a
 // retry the budget may not cover.
 func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entries []sessionsummary.Entry) (string, error) {
-	if stub, thin := sessionsummary.MaybeBuildSkipSummary(entries); thin {
+	if _, thin := sessionsummary.MaybeBuildSkipSummary(entries); thin {
 		// every close carries a summary (owner ruling, 2026-11-20): a session
-		// too thin to be worth a model call gets the deterministic one the
-		// Ledger already writes for such sessions
-		return markdownOrSkipped(stub)
+		// too thin to be worth a model call is summarized by what the person
+		// asked. Not the Ledger's stub: it echoes whole prompts, and a long one
+		// would push the summary past the wire limit, which drops it.
+		return markdownOrSkipped(promptSummary(entries, "Brief session", "A brief session."))
 	}
 	if runner == nil || !runner.Available() {
 		return "", fmt.Errorf("no summarizer CLI available for agent %q", agent)
@@ -113,7 +114,7 @@ func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entri
 		if md := Markdown(resp); md != "" {
 			return md, nil
 		}
-		return markdownOrSkipped(routineSummary(entries))
+		return markdownOrSkipped(promptSummary(entries, "Routine session", "A routine session."))
 	}
 	md := Markdown(resp)
 	if md == "" {
@@ -134,18 +135,21 @@ func markdownOrSkipped(resp *sessionsummary.SummarizeResponse) (string, error) {
 	return "", livesession.ErrSummarySkipped
 }
 
-// routinePromptsShown and routinePromptRunes bound routineSummary: a session
-// the model judged routine is summarized by what the person asked, and the
-// first few prompts, each cut to a sentence or two, say that without
-// restating the transcript the page already shows.
+// promptsShown and promptRunes bound promptSummary: a session summarized by
+// what the person asked shows the first few prompts, each cut to a sentence
+// or two. That says what the session was about without restating the
+// transcript the page already shows, and keeps the summary far below the
+// close's wire limit (sessionstream.MaxSummaryBytes) however long a prompt is.
 const (
-	routinePromptsShown = 3
-	routinePromptRunes  = 200
+	promptsShown = 3
+	promptRunes  = 200
 )
 
-// routineSummary is the summary of a session the model judged not worth one
-// and wrote none for: the person's first prompts, in order.
-func routineSummary(entries []sessionsummary.Entry) *sessionsummary.SummarizeResponse {
+// promptSummary is the summary of a session no model summary covers: lead,
+// then the person's first prompts, in order. Nil when there is no prompt.
+// The entries are what the stream carried (see the callers), so a prompt the
+// stream withheld as a secret is never copied here.
+func promptSummary(entries []sessionsummary.Entry, title, lead string) *sessionsummary.SummarizeResponse {
 	var prompts []string
 	total := 0
 	for _, e := range entries {
@@ -154,9 +158,9 @@ func routineSummary(entries []sessionsummary.Entry) *sessionsummary.SummarizeRes
 			continue
 		}
 		total++
-		if len(prompts) < routinePromptsShown {
-			if r := []rune(c); len(r) > routinePromptRunes {
-				c = strings.TrimSpace(string(r[:routinePromptRunes])) + "…"
+		if len(prompts) < promptsShown {
+			if r := []rune(c); len(r) > promptRunes {
+				c = strings.TrimSpace(string(r[:promptRunes])) + "…"
 			}
 			prompts = append(prompts, c)
 		}
@@ -165,14 +169,14 @@ func routineSummary(entries []sessionsummary.Entry) *sessionsummary.SummarizeRes
 		return nil
 	}
 	var b strings.Builder
-	b.WriteString("A routine session. Asked:")
+	b.WriteString(lead + " Asked:")
 	for _, p := range prompts {
-		b.WriteString("\n- " + strings.ReplaceAll(p, "\n", " "))
+		b.WriteString("\n- " + strings.Join(strings.Fields(p), " "))
 	}
 	if more := total - len(prompts); more > 0 {
 		fmt.Fprintf(&b, "\n\n(and %d more)", more)
 	}
-	return &sessionsummary.SummarizeResponse{Title: "Routine session", Summary: b.String()}
+	return &sessionsummary.SummarizeResponse{Title: title, Summary: b.String()}
 }
 
 // Markdown is the summary.md body the viewer shows: title, one

@@ -54,3 +54,30 @@ func TestLiveConversationEntriesCoverTheRestatedSession(t *testing.T) {
 	// a stream that was never reopened summarizes its own lines, as before
 	require.Equal(t, ownLines, liveConversationEntries(first, ownLines))
 }
+
+// Failure prevented (ox #2009 review): a summary built from raw.jsonl could
+// quote a prompt the stream withheld as a secret, since only the spool holds
+// the gap line in its place. A stream that withheld a batch is summarized from
+// its spool, or from nothing when that cannot be read.
+func TestLiveConversationEntriesOfAWithheldStreamNeverComeFromRaw(t *testing.T) {
+	cfg := livesessiontest.New(t).Config(t)
+	dir := filepath.Join(t.TempDir(), "withheld")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	_, err := livesession.Prepare(t.Context(), cfg, dir, livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "withheld", RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()})
+	require.NoError(t, err)
+	carried := `{"type":"header","metadata":{"session_id":"withheld"}}` + "\n" + `{"type":"user","content":"what the stream carried"}` + "\n"
+	_, err = livesession.Spool(t.Context(), dir, []byte(carried), livesession.SpoolOptions{})
+	require.NoError(t, err)
+	markStreamWithheld(t, dir)
+
+	raw := []map[string]any{{"type": "user", "content": "the prompt the stream withheld"}, {"type": "user", "content": "what the stream carried"}}
+	var text strings.Builder
+	for _, e := range liveConversationEntries(dir, raw) {
+		fmt.Fprint(&text, e["content"])
+	}
+	require.NotContains(t, text.String(), "the prompt the stream withheld")
+	require.Contains(t, text.String(), "what the stream carried")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "spool.jsonl")))
+	require.Empty(t, liveConversationEntries(dir, raw), "an unreadable spool must not fall back to raw")
+}

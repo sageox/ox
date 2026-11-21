@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/sessionstream"
 	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
@@ -220,5 +221,24 @@ func TestRunnerErrorNeverCarriesCLIOutput(t *testing.T) {
 	}
 	if calls := runner.calls.Load(); calls != 1 {
 		t.Fatalf("runner calls = %d, want 1", calls)
+	}
+}
+
+// Failure prevented (ox #2009 review): a thin session's summary echoed whole
+// prompts, so one long unanswered prompt pushed it past the close's wire
+// limit, and the close dropped it. The prompt is cut, and the summary stays
+// far below the limit.
+func TestABriefSessionsSummaryStaysUnderTheWireLimit(t *testing.T) {
+	huge := strings.Repeat("log line from a pasted diagnostic dump ", 2000) // ~78 KiB
+	entries := []sessionsummary.Entry{{Type: sessionsummary.EntryTypeUser, Content: huge}}
+	got, err := Summarize(t.Context(), &fakeSummaryRunner{available: true}, "claude-code", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "# Brief session") || !strings.Contains(got, "…") {
+		t.Fatalf("summary = %.120q, want the brief heading and a cut prompt", got)
+	}
+	if len(got) > sessionstream.MaxSummaryBytes/16 {
+		t.Fatalf("summary is %d bytes, want far below the %d-byte wire limit", len(got), sessionstream.MaxSummaryBytes)
 	}
 }
