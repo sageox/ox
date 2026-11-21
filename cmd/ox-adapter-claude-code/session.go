@@ -651,8 +651,36 @@ func extractToolResultContent(block map[string]interface{}) string {
 	return strings.Join(parts, "\n")
 }
 
+// Claude Code writes this assistant line itself when a conversation is
+// resumed (claude --continue / --resume), tagged with the model "<synthetic>".
+// No model said it, so it is not a turn: captured, it showed teammates a
+// stray "No response requested." between the two parts of a resumed session.
+const (
+	syntheticModel    = "<synthetic>"
+	resumePlaceholder = "No response requested."
+)
+
+// isResumePlaceholder reports whether raw is exactly that placeholder: the
+// synthetic model and one text block holding only it. Any other synthetic
+// line (an API error Claude Code reports, say) is still captured.
+func isResumePlaceholder(raw *claudeCodeEntry) bool {
+	if raw.Message == nil || raw.Message.Model != syntheticModel {
+		return false
+	}
+	blocks, ok := raw.Message.Content.([]interface{})
+	if !ok || len(blocks) != 1 {
+		return false
+	}
+	block, ok := blocks[0].(map[string]interface{})
+	if !ok || block["type"] != "text" {
+		return false
+	}
+	text, _ := block["text"].(string)
+	return strings.TrimSpace(text) == resumePlaceholder
+}
+
 func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
-	if raw.Message == nil {
+	if raw.Message == nil || isResumePlaceholder(raw) {
 		return nil, nil
 	}
 

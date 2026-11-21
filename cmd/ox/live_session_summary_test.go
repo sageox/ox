@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/livesession/livesessiontest"
 	"github.com/sageox/ox/internal/sessionid"
@@ -53,4 +55,62 @@ func TestLiveConversationEntriesCoverTheRestatedSession(t *testing.T) {
 
 	// a stream that was never reopened summarizes its own lines, as before
 	require.Equal(t, ownLines, liveConversationEntries(first, ownLines))
+}
+
+// Failure prevented (ox #2009 review): a summary built from raw.jsonl could
+// quote a prompt the stream withheld as a secret, since only the spool holds
+// the gap line in its place. A stream that withheld a batch is summarized from
+// its spool, or from nothing when that cannot be read.
+func TestLiveConversationEntriesOfAWithheldStreamNeverComeFromRaw(t *testing.T) {
+	cfg := livesessiontest.New(t).Config(t)
+	dir := filepath.Join(t.TempDir(), "withheld")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	_, err := livesession.Prepare(t.Context(), cfg, dir, livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "withheld", RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()})
+	require.NoError(t, err)
+	carried := `{"type":"header","metadata":{"session_id":"withheld"}}` + "\n" + `{"type":"user","content":"what the stream carried"}` + "\n"
+	_, err = livesession.Spool(t.Context(), dir, []byte(carried), livesession.SpoolOptions{})
+	require.NoError(t, err)
+	markStreamWithheld(t, dir)
+
+	raw := []map[string]any{{"type": "user", "content": "the prompt the stream withheld"}, {"type": "user", "content": "what the stream carried"}}
+	var text strings.Builder
+	for _, e := range liveConversationEntries(dir, raw) {
+		fmt.Fprint(&text, e["content"])
+	}
+	require.NotContains(t, text.String(), "the prompt the stream withheld")
+	require.Contains(t, text.String(), "what the stream carried")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "spool.jsonl")))
+	require.Empty(t, liveConversationEntries(dir, raw), "an unreadable spool must not fall back to raw")
+}
+
+// Failure prevented (ox #2009 review): the summary read the stream's state
+// and spool without live.lock, so it could pair a spool that still held a
+// withheld batch with a state from before or after the withhold. The reads
+// now wait for live.lock; one that cannot get it quotes nothing.
+func TestLiveConversationEntriesWaitForTheLiveLock(t *testing.T) {
+	cfg := livesessiontest.New(t).Config(t)
+	dir := filepath.Join(t.TempDir(), "locked")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	_, err := livesession.Prepare(t.Context(), cfg, dir, livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "locked", RepoID: "repo_test", Agent: "claude-code", StartedAt: time.Now()})
+	require.NoError(t, err)
+	prev := liveSummaryLockWait
+	liveSummaryLockWait = 200 * time.Millisecond
+	t.Cleanup(func() { liveSummaryLockWait = prev })
+
+	locked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = fileutil.WithFileLockTimeout(context.Background(), livesession.LockTarget(dir), 5*time.Second, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	raw := []map[string]any{{"type": "user", "content": "a prompt"}}
+	require.Empty(t, liveConversationEntries(dir, raw), "a read that could not take live.lock must quote nothing")
+	close(release)
+	<-done
+	require.Equal(t, raw, liveConversationEntries(dir, raw), "with the lock free, a plain stream summarizes raw")
 }

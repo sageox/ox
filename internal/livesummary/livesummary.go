@@ -66,7 +66,11 @@ func Runner(agent string) agentwork.Runner {
 // retry the budget may not cover.
 func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entries []sessionsummary.Entry) (string, error) {
 	if _, thin := sessionsummary.MaybeBuildSkipSummary(entries); thin {
-		return "", livesession.ErrSummarySkipped
+		// every close carries a summary (owner ruling, 2026-11-20): a session
+		// too thin to be worth a model call is summarized by what the person
+		// asked. Not the Ledger's stub: it echoes whole prompts, and a long one
+		// would push the summary past the wire limit, which drops it.
+		return markdownOrSkipped(promptSummary(entries, "Brief session", "A brief session."))
 	}
 	if runner == nil || !runner.Available() {
 		return "", fmt.Errorf("no summarizer CLI available for agent %q", agent)
@@ -104,13 +108,83 @@ func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entri
 		return "", errors.New("summary validation failed")
 	}
 	if sessionsummary.IsSkipCategory(resp) {
-		return "", livesession.ErrSummarySkipped // the model judged it not worth sharing
+		// The model judged it not worth sharing, and may then leave out its
+		// title and summary. A live close still carries one: the model's own
+		// when it wrote a summary, else what the person asked under the
+		// model's title. A title alone is no summary: the viewer's card shows
+		// the body under the title, so it would show nothing.
+		if strings.TrimSpace(resp.Summary) != "" {
+			return Markdown(resp), nil
+		}
+		title := strings.TrimSpace(resp.Title)
+		if title == "" {
+			title = "Routine session"
+		}
+		return markdownOrSkipped(promptSummary(entries, title, "A routine session."))
 	}
 	md := Markdown(resp)
 	if md == "" {
 		return "", errors.New("summary is empty")
 	}
 	return md, nil
+}
+
+// markdownOrSkipped is resp's markdown, or ErrSummarySkipped when it renders
+// to nothing.
+func markdownOrSkipped(resp *sessionsummary.SummarizeResponse) (string, error) {
+	if resp == nil {
+		return "", livesession.ErrSummarySkipped
+	}
+	if md := Markdown(resp); md != "" {
+		return md, nil
+	}
+	return "", livesession.ErrSummarySkipped
+}
+
+// promptsShown and promptRunes bound promptSummary: a session summarized by
+// what the person asked shows the first few prompts, each cut to a sentence
+// or two. That says what the session was about without restating the
+// transcript the page already shows, and keeps the summary far below the
+// close's wire limit (sessionstream.MaxSummaryBytes) however long a prompt is.
+const (
+	promptsShown = 3
+	promptRunes  = 200
+)
+
+// promptSummary is the summary of a session no model summary covers: lead,
+// then the person's first prompts, in order. With no prompt to quote (none
+// typed, or every one withheld as a secret) it is the lead and a fixed line,
+// never nil: every close carries a summary.
+// The entries are what the stream carried (see the callers), so a prompt the
+// stream withheld as a secret is never copied here.
+func promptSummary(entries []sessionsummary.Entry, title, lead string) *sessionsummary.SummarizeResponse {
+	var prompts []string
+	total := 0
+	for _, e := range entries {
+		c := strings.TrimSpace(e.Content)
+		if e.Type != sessionsummary.EntryTypeUser || c == "" {
+			continue
+		}
+		total++
+		if len(prompts) < promptsShown {
+			if r := []rune(c); len(r) > promptRunes {
+				c = strings.TrimSpace(string(r[:promptRunes])) + "…"
+			}
+			prompts = append(prompts, c)
+		}
+	}
+	if len(prompts) == 0 {
+		return &sessionsummary.SummarizeResponse{Title: title, Summary: lead + " No prompt is available to quote."}
+	}
+	var b strings.Builder
+	b.WriteString(lead + " Asked:")
+	for _, p := range prompts {
+		b.WriteString("\n- " + strings.Join(strings.Fields(p), " "))
+	}
+	if more := total - len(prompts); more > 0 {
+		fmt.Fprintf(&b, "\n\n(and %d more)", more)
+	}
+	return &sessionsummary.SummarizeResponse{Title: title, Summary: b.String()}
 }
 
 // Markdown is the summary.md body the viewer shows: title, one

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/sessionstream"
 	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
@@ -38,6 +39,8 @@ func summaryEntries() []sessionsummary.Entry {
 
 const liveSummaryJSON = `{"title":"Retry for the upload client","summary":"Added exponential backoff with jitter to the upload client so transient failures no longer fail a session upload, and kept the existing overall timeout as the outer bound.","key_actions":["Added backoff with jitter","Kept the overall timeout","Covered the retry path with tests"],"outcome":"success"}`
 
+const skipWithTextJSON = `{"title":"Quick question","summary":"Asked how the upload retry backs off; no code changed.","quality_category":"skip"}`
+
 func TestSummarizeBounded(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -58,10 +61,40 @@ func TestSummarizeBounded(t *testing.T) {
 			want: "# Retry for the upload client", wantCalls: 1,
 		},
 		{
-			name:    "trivial session is skipped before any model call",
+			// every close carries a summary: too thin for a model call, it
+			// gets the deterministic one the Ledger writes
+			name:    "trivial session gets the deterministic summary without a model call",
 			entries: summaryEntries()[:1],
 			runner:  &fakeSummaryRunner{available: true, run: nil},
-			want:    "", wantCalls: 0,
+			want:    "# Brief session", wantCalls: 0,
+		},
+		{
+			name:    "a session the model skips keeps the text the model wrote",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: skipWithTextJSON}, nil
+			}},
+			want: "# Quick question", wantCalls: 1,
+		},
+		{
+			// a title alone would show no summary card: the body is what the
+			// person asked, under the model's title
+			name:    "a session the model skips with only a title keeps the title over its prompts",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: `{"title":"Upload retry question","quality_category":"skip"}`}, nil
+			}},
+			want: "# Upload retry question\n\nA routine session. Asked:\n- Please add a retry", wantCalls: 1,
+		},
+		{
+			// the model may leave a skip with no title or summary; the close
+			// still carries what the person asked
+			name:    "a session the model skips without text is summarized by its prompts",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: `{"quality_category":"skip","score_reason":"a single routine question"}`}, nil
+			}},
+			want: "- Please add a retry to the upload client", wantCalls: 1,
 		},
 		{
 			name:    "runner error gives an empty summary",
@@ -198,5 +231,38 @@ func TestRunnerErrorNeverCarriesCLIOutput(t *testing.T) {
 	}
 	if calls := runner.calls.Load(); calls != 1 {
 		t.Fatalf("runner calls = %d, want 1", calls)
+	}
+}
+
+// Failure prevented (ox #2009 review): a thin session's summary echoed whole
+// prompts, so one long unanswered prompt pushed it past the close's wire
+// limit, and the close dropped it. The prompt is cut, and the summary stays
+// far below the limit.
+func TestABriefSessionsSummaryStaysUnderTheWireLimit(t *testing.T) {
+	huge := strings.Repeat("log line from a pasted diagnostic dump ", 2000) // ~78 KiB
+	entries := []sessionsummary.Entry{{Type: sessionsummary.EntryTypeUser, Content: huge}}
+	got, err := Summarize(t.Context(), &fakeSummaryRunner{available: true}, "claude-code", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "# Brief session") || !strings.Contains(got, "…") {
+		t.Fatalf("summary = %.120q, want the brief heading and a cut prompt", got)
+	}
+	if len(got) > sessionstream.MaxSummaryBytes/16 {
+		t.Fatalf("summary is %d bytes, want far below the %d-byte wire limit", len(got), sessionstream.MaxSummaryBytes)
+	}
+}
+
+// Failure prevented (ox #2009 review): a close with no prompt to quote (an
+// assistant-only transcript, or every prompt withheld as a secret) carried no
+// summary at all. It carries the fixed brief line, quoting nothing.
+func TestAPromptlessCloseStillCarriesASummary(t *testing.T) {
+	entries := []sessionsummary.Entry{{Type: sessionsummary.EntryTypeAssistant, Content: "Hello."}}
+	got, err := Summarize(t.Context(), &fakeSummaryRunner{available: true}, "claude-code", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# Brief session") || !strings.Contains(got, "No prompt is available to quote.") {
+		t.Fatalf("summary = %q, want the fixed brief summary", got)
 	}
 }
