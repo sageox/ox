@@ -55,11 +55,15 @@ const (
 // IsLocalFile reports whether name is one of the live-stream files this package
 // keeps in a session folder. They are machine-local state (the spool duplicates
 // raw.jsonl; the rest are ids, offsets and markers), so anything that copies a
-// session folder into the Ledger must skip them.
+// session folder into the Ledger must skip them. The three teammate receipt logs
+// are listed although nothing writes them here any more (they live under the
+// data dir, see ReceiptsDir): one found in a folder is stale or planted, is
+// ignored by every reader, and must still never be copied into the Ledger.
 func IsLocalFile(name string) bool {
 	switch name {
 	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, manualStopFileName, deleteRequestFileName,
-		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName, mediaAttemptsFile:
+		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName, mediaAttemptsFile,
+		teammateAcksFileName, teammateAcksSentFileName, teammateResendsFileName:
 		return true
 	}
 	return false

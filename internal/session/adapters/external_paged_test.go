@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,12 +111,13 @@ func TestExternalAdapter_ReadFromOffsetLaterPageErrorFailsTheRead(t *testing.T) 
 }
 
 // A page that moves the cursor back (the transcript was replaced under the
-// read) ends the read at the last page that was in order.
-func TestExternalAdapter_ReadFromOffsetStopsWhenTheCursorGoesBack(t *testing.T) {
+// read) fails the whole read: reporting the pages before it as a success
+// could skip a prefix of the replacement. The caller retries from its offset.
+func TestExternalAdapter_ReadFromOffsetFailsWhenTheCursorGoesBack(t *testing.T) {
 	ea, _ := pagingAdapter(t, "claude-code", "  0) "+page("a", "100")+";;\n  100) "+page("replaced", "40")+";;\n  *) exit 1;;")
 	entries, next, err := ea.ReadFromOffset(transcriptOfSize(t, 300), 0)
-	if err != nil || contents(entries) != "a" || next != 100 {
-		t.Fatalf("read %q to %d, %v; want a to 100", contents(entries), next, err)
+	if !errors.Is(err, ErrInvalidResponse) || entries != nil || next != 0 {
+		t.Fatalf("entries=%v next=%d err=%v, want no entries, the caller's offset and ErrInvalidResponse", entries, next, err)
 	}
 }
 

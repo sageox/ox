@@ -48,14 +48,20 @@ func TestWriteHoldMarker_WaitsForTheLiveLockOfAStreamingFolder(t *testing.T) {
 	}()
 	<-locked
 
+	attempted := make(chan struct{})
+	session.SetHoldLockAttempt(t, func() { close(attempted) })
 	holdDone := make(chan error, 1)
 	go func() {
 		holdDone <- session.WriteHoldMarkerFor(via, session.HoldManualPublishing, "session_stop", st.SessionID)
 	}()
+	// the writer must reach the lock while the close still holds it, and must
+	// not finish before then
 	select {
+	case <-attempted:
 	case err := <-holdDone:
-		t.Fatalf("the hold was written while a close held live.lock (err=%v)", err)
-	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("the hold finished without asking for live.lock (err=%v)", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hold never asked for live.lock")
 	}
 	require.False(t, session.IsHeld(real), "the hold landed under a close")
 

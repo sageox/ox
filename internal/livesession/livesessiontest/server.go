@@ -49,6 +49,15 @@ type Closed struct {
 	StoredAtClose int64
 }
 
+// AckAttempt is one ack request as its caller experienced it: Status is the
+// answer the client received, 0 when the connection died first (whether or not
+// the server had recorded the acks). A client may settle an ack only on a 2xx or
+// a permanent 4xx, so tests judge settlement by this, not by what was recorded.
+type AckAttempt struct {
+	IDs    []string
+	Status int
+}
+
 type layerState struct{ cur sessionstream.Cursor }
 
 type conversation struct {
@@ -96,6 +105,18 @@ type Server struct {
 	edgeType         string
 	edgeBody         string
 	hangAppendsOver  int
+	// teammate comments, in the order the owner queued them; delivered holds the
+	// first-wins delivered_at_seq per comment id.
+	comments                    []sessionstream.TeammateComment
+	delivered                   map[string]int64
+	ackRefusal                  *reply
+	ackRefusals                 int
+	ackDropBefore, ackDropAfter int
+	ackIgnored                  int
+	ackAttempts                 []AckAttempt
+	listFails                   bool
+	nameTaken                   bool
+	ackBodies                   []sessionstream.AckTeammateCommentsRequest
 
 	inflight, maxInflight int
 
@@ -106,9 +127,10 @@ type Server struct {
 func New(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		Store: sessionstream.NewMemoryStore(),
-		keys:  map[string]ed25519.PublicKey{},
-		convs: map[string]*conversation{},
+		Store:     sessionstream.NewMemoryStore(),
+		keys:      map[string]ed25519.PublicKey{},
+		convs:     map[string]*conversation{},
+		delivered: map[string]int64{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+sessionstream.PathKeys, s.route(s.registerKey))
@@ -117,6 +139,7 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/close", s.route(s.closeSession))
 	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/layers/{layer}/lines", s.route(s.appendLines))
 	s.registerMedia(mux)
+	mux.HandleFunc("POST "+sessionstream.PathSessions+"/{cnv}/teammate-comments/acks", s.route(s.ackTeammateComments))
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	return s
@@ -274,6 +297,9 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 		s.refuseOpen--
 		return refusal(http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry, nil)
 	}
+	if s.nameTaken {
+		return refusal(http.StatusConflict, sessionstream.ReasonSessionNameTaken, sessionstream.ActionStop, nil)
+	}
 	cnv := r.PathValue("cnv")
 	var req sessionstream.OpenSessionRequest
 	if json.Unmarshal(body, &req) != nil || !sessionstream.ValidConversationID(cnv) || !sessionstream.ValidLayerID(req.LayerID) ||
@@ -373,7 +399,78 @@ func (s *Server) appendLines(r *http.Request, body []byte, call *Call) reply {
 		s.dropAfterWrite--
 		return reply{drop: true} // stored, but the client never hears the 200
 	}
-	return reply{status: http.StatusOK, body: sessionstream.AppendResponse{StoredThrough: next.StoredThrough, PrefixSHA256: next.PrefixSHA256}}
+	return reply{status: http.StatusOK, body: sessionstream.AppendResponse{
+		StoredThrough: next.StoredThrough, PrefixSHA256: next.PrefixSHA256, TeammateComments: s.undelivered(),
+		TeammateCommentsListed: !s.listFails,
+	}}
+}
+
+// undelivered is what api-go puts in an append answer: queued comments with no
+// recorded ack, oldest first, at most MaxTeammateCommentsPerAppend. mu held.
+func (s *Server) undelivered() []sessionstream.TeammateComment {
+	if s.listFails {
+		return nil
+	}
+	var out []sessionstream.TeammateComment
+	for _, c := range s.comments {
+		if _, done := s.delivered[c.ID]; done || len(out) == sessionstream.MaxTeammateCommentsPerAppend {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// ackTeammateComments records the first ack per comment id, as api-go does.
+func (s *Server) ackTeammateComments(r *http.Request, body []byte, c *Call) reply {
+	rep := s.ackTeammateCommentsReply(r, body, c)
+	var req sessionstream.AckTeammateCommentsRequest
+	if json.Unmarshal(body, &req) == nil {
+		at := AckAttempt{Status: rep.status}
+		if rep.drop {
+			at.Status = 0 // the caller never heard an answer
+		}
+		for _, a := range req.Acks {
+			at.IDs = append(at.IDs, a.ID)
+		}
+		s.ackAttempts = append(s.ackAttempts, at)
+	}
+	return rep
+}
+
+func (s *Server) ackTeammateCommentsReply(r *http.Request, body []byte, _ *Call) reply {
+	var req sessionstream.AckTeammateCommentsRequest
+	if json.Unmarshal(body, &req) != nil || len(req.Acks) == 0 || len(req.Acks) > sessionstream.MaxTeammateCommentAcks {
+		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
+	}
+	if s.ackDropBefore > 0 { // the connection dies before the server acts
+		s.ackDropBefore--
+		return reply{drop: true}
+	}
+	if s.ackRefusal != nil && s.ackRefusals > 0 {
+		x := *s.ackRefusal
+		if s.ackRefusals--; s.ackRefusals == 0 {
+			s.ackRefusal = nil
+		}
+		return x
+	}
+	s.ackBodies = append(s.ackBodies, req)
+	if s.ackIgnored > 0 { // answered 200, recorded nothing: a lost write
+		s.ackIgnored--
+		return reply{status: http.StatusOK, body: sessionstream.AckTeammateCommentsResponse{}}
+	}
+	recorded := 0
+	for _, a := range req.Acks {
+		if _, done := s.delivered[a.ID]; !done && a.DeliveredAtSeq >= 1 {
+			s.delivered[a.ID] = a.DeliveredAtSeq
+			recorded++
+		}
+	}
+	if s.ackDropAfter > 0 { // recorded, but the caller never hears
+		s.ackDropAfter--
+		return reply{drop: true}
+	}
+	return reply{status: http.StatusOK, body: sessionstream.AckTeammateCommentsResponse{Recorded: recorded}}
 }
 
 // appendKnobs applies the one-shot refusals before the append runs. mu held.
@@ -492,8 +589,6 @@ func (s *Server) recoveredCursor(ctx context.Context, cnv, layer string, row ses
 	case err != nil:
 		x := unavailable("storage is temporarily unavailable")
 		return sessionstream.Cursor{}, &x
-	case cur.StoredThrough <= row.StoredThrough:
-		return row, nil
 	}
 	return cur, nil
 }

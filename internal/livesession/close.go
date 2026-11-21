@@ -91,6 +91,9 @@ func CloseOf(ctx context.Context, cfg Config, dir, sessionID string, summary Sum
 		}
 		if s.st.active() {
 			err = s.finish(ctx, s.summaryFor(ctx, summary), &res)
+			// best effort and independent of how the close went: a receipt owed
+			// must not wait for a sweep that skips closed streams
+			s.sendTeammateAcks(ctx)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
 		res.Done = err == nil && !s.st.active()
@@ -236,6 +239,21 @@ func endIfPromptless(ctx context.Context, dir string, st State) (bool, error) {
 	return empty, err
 }
 
+// heldAtClose reports whether the session is held, logging that the close is
+// left to the daemon's stopHeld. Checked under live.lock: the hold writer takes
+// the same lock (session.WriteHoldMarkerFor), so a hold placed first is seen
+// here and one placed later waits for this close. A held session is never
+// uploaded or summarized by an automatic path, so a close that finds one sends
+// nothing more (no tail, no summary, no close) and the stream stays closing
+// for stopHeld, which deletes the live copy.
+func (s *session) heldAtClose(ctx context.Context) bool {
+	if !oxsession.IsHeld(s.dir) {
+		return false
+	}
+	s.log().InfoContext(ctx, "live_session_close_held", "acked", s.st.Acked, "impact", "close_left_to_held_stop")
+	return true
+}
+
 func (s *session) finish(ctx context.Context, summary string, res *DrainResult) error {
 	if len(summary) > sessionstream.MaxSummaryBytes {
 		summary = "" // too large for the server; the session closes without one
@@ -245,6 +263,9 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 	}
 	checked := false
 	for restarts := 0; ; {
+		if s.heldAtClose(ctx) {
+			return nil
+		}
 		if err := s.drain(ctx, res); err != nil || !s.st.active() {
 			return err
 		}
@@ -255,15 +276,9 @@ func (s *session) finish(ctx context.Context, summary string, res *DrainResult) 
 		if !checked {
 			summary, checked = s.publishableSummary(ctx, summary), true
 		}
-		if summary != "" && oxsession.IsHeld(s.dir) {
-			// Checked here, under live.lock and immediately before the send:
-			// the hold writer takes the same lock for a folder with a live
-			// stream (session.WriteHoldMarkerFor), so a hold placed first is
-			// seen here and one placed later waits for this close. A held
-			// session is never summarized by an automatic path, so nothing is
-			// sent and the stream stays closing for the daemon's stopHeld,
-			// which deletes the live copy.
-			s.log().InfoContext(ctx, "live_session_summary_dropped", "reason", "held", "impact", "close_left_to_held_stop")
+		// again immediately before the send: the drain above can take a while,
+		// and a hold placed during it must still stop the summary
+		if s.heldAtClose(ctx) {
 			return nil
 		}
 		err = s.c.Close(ctx, s.st.ConversationID, sessionstream.CloseRequest{

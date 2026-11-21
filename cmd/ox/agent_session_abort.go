@@ -551,13 +551,18 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// failure that leaves the directory in place killed nothing, so take the
 	// record back; once git rm ran, a later push still carries the kill.
 	if err := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); err != nil {
-		if _, statErr := os.Stat(ledgerSessionDir); statErr == nil {
+		switch _, statErr := os.Stat(ledgerSessionDir); {
+		case statErr == nil:
 			// nothing was killed, so the reopen copy stays: the person can
 			// still resume a session that was not discarded
 			undoAbortRecord()
-		} else {
+		case errors.Is(statErr, fs.ErrNotExist):
 			// git rm ran and only the push failed: the kill stands
 			dropReopenStashOfDiscard(projectRoot, sessionName, abortedSessionID, stashID)
+		default:
+			// cannot tell whether the session is gone: the reopen copy is the
+			// person's only way back to it, so it stays
+			slog.Warn("reopen copy kept after a failed discard", "session", sessionName, "reason", "ledger_dir_unknown", "error", statErr)
 		}
 		return fmt.Errorf("failed to remove finalized session %q from the ledger: %w", sessionName, err)
 	}

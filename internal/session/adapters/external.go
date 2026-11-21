@@ -332,8 +332,14 @@ func (ea *ExternalAdapter) ReadFromOffsetWithContext(ctx context.Context, path s
 			// all or nothing, as one read was: the caller retries from offset
 			return nil, offset, err
 		}
-		if after <= next {
-			break // only an unterminated record is left, or the file changed under the read
+		if after < next {
+			// a cursor that moves back means the file changed under the read
+			// (replaced or rewritten): nothing read can be trusted to line up,
+			// so the whole read fails and the caller retries from offset
+			return nil, offset, fmt.Errorf("%w: page cursor moved back from %d to %d", ErrInvalidResponse, next, after)
+		}
+		if after == next {
+			break // only an unterminated record is left
 		}
 		entries = append(entries, more...)
 		next, pages, total, largest = after, pages+1, total+n, max(largest, n)

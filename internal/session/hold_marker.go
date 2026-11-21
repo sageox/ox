@@ -34,9 +34,8 @@ import (
 //
 // Ordering with a live stream's summary: placing a hold and the automatic
 // summary send are mutually exclusive under the session folder's live.lock.
-// WriteHoldMarkerFor writes the marker holding live.lock whenever the folder
-// has a live stream (stream-state.json), and a close checks IsHeld under the
-// same lock immediately before it sends a summary. So either the hold lands
+// WriteHoldMarkerFor writes the marker holding live.lock, and a close checks
+// IsHeld under the same lock immediately before it sends a summary. So either the hold lands
 // first and the close sees it and sends none, or the send completes first and
 // the hold postdates it. A check made without the lock (the daemon's before it
 // summarizes) only saves work; the locked check is the one that decides. A
@@ -51,11 +50,6 @@ const HeldMarkerFile = ".held"
 // in livesession, so the hold writer takes the very same lock; livesession
 // imports this package, never the reverse.
 const LiveLockFileName = "live.lock"
-
-// liveStateFileName is livesession's stream state. Only a folder holding one
-// has a live stream whose close can send a summary, so only it needs the hold
-// placed under live.lock.
-const liveStateFileName = "stream-state.json"
 
 // holdLockWait bounds a hold's wait for live.lock. It covers the longest a
 // close holds the lock while it can send a summary (livesession.CloseBudget,
@@ -102,8 +96,8 @@ func WriteHoldMarker(dir string, reason HoldReason, source string) error {
 }
 
 // WriteHoldMarkerFor is WriteHoldMarker for the recording sessionID, which the
-// marker records (see HoldInfo.SessionID). For a folder with a live stream it
-// takes live.lock around the write (see HeldMarkerFile for the ordering rule),
+// marker records (see HoldInfo.SessionID). It takes the folder's live.lock
+// around the write (see HeldMarkerFile for the ordering rule),
 // so it must never run while this process holds that lock: flock is per open
 // file, and a second open of it waits out holdLockWait behind its own holder.
 // Such code calls WriteHoldMarkerForLocked.
@@ -111,9 +105,22 @@ func WriteHoldMarkerFor(dir string, reason HoldReason, source, sessionID string)
 	if inSharedSessionsTree(dir) {
 		return fmt.Errorf("hold session %s: %w", dir, ErrHoldInSharedTree)
 	}
-	// already held, or no live stream to race: nothing the lock would order
-	if _, err := os.Lstat(filepath.Join(dir, HeldMarkerFile)); err == nil || !hasLiveStream(dir) {
+	// already held, or not a folder: nothing the lock would order (the
+	// locked variant keeps the hold, or reports why it cannot)
+	if _, err := os.Lstat(filepath.Join(dir, HeldMarkerFile)); err == nil {
 		return WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+	}
+	// Taken whether or not the folder streams yet: checking for stream state
+	// first left a window in which Prepare creates it and a close passes its
+	// IsHeld check before the marker lands. The lock file lives in the shared
+	// lock directory (fileutil.LockPath), never in the session folder, so a
+	// folder that never streams gains nothing, and an uncontended lock costs
+	// no wait.
+	if holdLockAttempt != nil {
+		holdLockAttempt()
 	}
 	ran := false
 	var writeErr error
@@ -157,13 +164,9 @@ func WriteHoldMarkerForLocked(dir string, reason HoldReason, source, sessionID s
 	return nil
 }
 
-// hasLiveStream reports whether dir may hold a live stream. Only a stream
-// state confirmed absent says no: one that cannot be checked takes the lock,
-// which costs a wait at worst.
-func hasLiveStream(dir string) bool {
-	_, err := os.Lstat(filepath.Join(dir, liveStateFileName))
-	return err == nil || (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR))
-}
+// holdLockAttempt, nil in production, runs just before WriteHoldMarkerFor
+// asks for live.lock, so a test can tell the writer reached the lock.
+var holdLockAttempt func()
 
 // liveLockTarget is livesession.LockTarget(dir): live.lock is keyed by the
 // spelling of its path, so it is the folder's resolved path, or Clean when the

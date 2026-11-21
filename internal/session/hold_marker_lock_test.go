@@ -16,6 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// liveStateFileName is livesession's stream state file.
+const liveStateFileName = "stream-state.json"
+
 // liveFolder is a session folder with a live stream state, as livesession
 // leaves one (its content does not matter to the hold writer).
 func liveFolder(t *testing.T) string {
@@ -58,17 +61,34 @@ func shortenHoldLockWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { holdLockWait = prev })
 }
 
-// Failure prevented: a folder that never streamed gained a live.lock it has
-// no use for, and paid the lock's wait for nothing.
-func TestWriteHoldMarker_NonLiveFolderTakesNoLiveLock(t *testing.T) {
+// Failure prevented (ox #2002 review): the writer took live.lock only once
+// stream state existed, so Prepare could create it between that check and the
+// marker write and a close could pass its IsHeld check in the gap. A folder
+// with no stream state yet waits for the lock too, and the lock file lives in
+// the shared lock directory, never in the session folder.
+func TestWriteHoldMarker_TakesTheLiveLockBeforeAnyStreamExists(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteHoldMarkerFor(dir, HoldManualPublishing, "session_stop", "ses_test"))
-	assert.True(t, IsHeld(dir))
+	attempted := make(chan struct{})
+	prev := holdLockAttempt
+	holdLockAttempt = func() { close(attempted) }
+	t.Cleanup(func() { holdLockAttempt = prev })
+	release := holdLiveLock(t, dir)
 
+	done := make(chan error, 1)
+	go func() { done <- WriteHoldMarkerFor(dir, HoldManualPublishing, "session_stop", "ses_test") }()
+	select {
+	case <-attempted:
+	case err := <-done:
+		t.Fatalf("the hold finished without asking for live.lock (err=%v)", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hold never asked for live.lock")
+	}
+	assert.False(t, IsHeld(dir), "the hold landed while live.lock was held")
+	release()
+	require.NoError(t, <-done)
+	assert.True(t, IsHeld(dir))
 	_, err := os.Lstat(filepath.Join(dir, LiveLockFileName))
-	assert.ErrorIs(t, err, os.ErrNotExist, "a non-live folder gained a live.lock")
-	_, err = os.Lstat(fileutil.LockPath(liveLockTarget(dir)))
-	assert.ErrorIs(t, err, os.ErrNotExist, "a non-live folder's live.lock was taken")
+	assert.ErrorIs(t, err, os.ErrNotExist, "the session folder gained a live.lock file")
 }
 
 // Failure prevented: a hold that waited for a close stuck past every budget

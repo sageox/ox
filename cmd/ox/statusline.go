@@ -81,6 +81,10 @@ status-line JSON (session_id, cwd, workspace) on stdin. ox prints one line:
 Each count is the number of distinct discussions, plans, docs, sessions and
 murmurs that shaped this session; "used" is how many of the items the AI
 coworker reported using or cited in a commit. Nothing yet reads "● ox".
+Items the AI coworker reads or reports using are counted whether or not the
+session is being recorded. Uses ox finds by reading the AI coworker's reply
+or a commit message are counted only while it is recording. A new recording
+after an earlier one starts the counts over.
 "● rec" shows while the session is recording and is hidden while it is paused. When the bar is narrow, the
 smallest count is dropped first and "used" last. It reads local files only — never the network or the
 ox daemon — and never prints an error into the bar.

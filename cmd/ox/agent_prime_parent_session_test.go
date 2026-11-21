@@ -88,7 +88,7 @@ func TestChildOfAPausedParentStaysPausedWhenPrimedAgain(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
 	enableRecordingWithoutLedgerClone(t)
 	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
-	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1, session.PauseAnchor{}))
 
 	first := startSessionRecording(projectRoot, "OxChild", "claude-code", inheritedParent{AgentID: "OxParent"}, "", "child-session")
 	require.NotNil(t, first)
@@ -174,7 +174,7 @@ func TestAPauseReachesEveryAgentDownTheLaunchChain(t *testing.T) {
 			projectRoot, repoID := setupTestProject(t)
 			enableRecordingWithoutLedgerClone(t)
 			createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
-			require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+			require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1, session.PauseAnchor{}))
 
 			// the child, launched from the paused parent, runs as this process
 			t.Setenv("SAGEOX_AGENT_ID", "OxParent")
@@ -244,7 +244,7 @@ func TestAPausedParentsPauseHoldsDownTheChainUntilUnpaused(t *testing.T) {
 			projectRoot, repoID := setupTestProject(t)
 			enableRecordingWithoutLedgerClone(t)
 			createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", tc.parentPID)
-			require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+			require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1, session.PauseAnchor{}))
 
 			t.Setenv("SAGEOX_AGENT_ID", "OxParent")
 			t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
@@ -279,7 +279,7 @@ func TestARootsPauseHoldsThroughItsClearHandoff(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
 	enableRecordingWithoutLedgerClone(t)
 	createActiveRecordingWithPID(t, projectRoot, repoID, "OxParent", os.Getppid())
-	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1))
+	require.NoError(t, session.MarkExplicitPause(projectRoot, "OxParent", 1, session.PauseAnchor{}))
 
 	t.Setenv("SAGEOX_AGENT_ID", "OxParent")
 	t.Setenv("OX_PARENT_PID", strconv.Itoa(os.Getpid()))
