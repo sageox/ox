@@ -126,6 +126,9 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	if state.RecordedManualPublishing() {
 		return
 	}
+	// found before the previous stream is retired below: when both recordings
+	// share a folder, retiring removes the files the reopen copies from
+	reopenSrc := liveReopenSource(projectRoot, state)
 	switch prev, err := livesession.ReadState(state.SessionPath); {
 	case errors.Is(err, livesession.ErrNotStreaming):
 	case err != nil:
@@ -138,6 +141,7 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 			return
 		}
 		slog.Info("live_session_previous_stream_retired", "session_id", state.SessionID, "previous_session_id", prev.SessionID)
+		reopenSrc = reopenSourceAfterRetire(projectRoot, state, reopenSrc)
 	}
 	repoID := config.GetRepoID(projectRoot)
 	if repoID == "" || !liveStreamingEnabled(projectRoot) {
@@ -151,11 +155,24 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 	defer cancel()
 	log := slog.With("session_id", state.SessionID)
 	parent, continuedFrom := liveSessionLinks(state)
-	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{
+	params := livesession.OpenParams{
 		SessionID: state.SessionID, SessionName: session.GetSessionName(state.SessionPath),
 		RepoID: repoID, Agent: agent, StartedAt: state.StartedAt,
 		ParentSessionID: parent, ContinuedFromSessionID: continuedFrom,
-	}); err != nil {
+	}
+	if reopenSrc != nil && !reopenSrc.Pending {
+		if _, err := livesession.PrepareReopen(ctx, liveConfig(projectRoot), state.SessionPath, params, reopenSrc); err != nil {
+			// no state was written for this recording, so it simply does not
+			// stream; the stopped conversation is left as it was
+			log.Warn("live_session_prepare_reopen_failed", "conversation_id", reopenSrc.State.ConversationID, "error", err)
+			return
+		}
+		// the copied spool already starts with the session's header
+		log.Info("live_session_prepared_reopen", "conversation_id", reopenSrc.State.ConversationID, "seed_bytes", len(reopenSrc.Spool))
+		liveKickDaemon(state.SessionPath)
+		return
+	}
+	if _, err := livesession.Prepare(ctx, liveConfig(projectRoot), state.SessionPath, params); err != nil {
 		log.Warn("live_session_prepare_failed", "error", err)
 		return
 	}
@@ -163,8 +180,64 @@ func liveSessionBegin(projectRoot string, state *session.RecordingState, header 
 		log.Warn("live_session_header_spool_failed", "error", err)
 		return
 	}
+	if reopenSrc != nil {
+		// a quick resume: the stopped stream's close (its summary) is still in
+		// flight. This recording waits for it as a conversation of its own, and
+		// reopens the stopped one once that close finishes (the daemon's next
+		// open); it never blocks the hook.
+		if _, err := livesession.AwaitReopen(ctx, liveConfig(projectRoot), state.SessionPath, state.SessionID, reopenSrc); err != nil {
+			log.Warn("live_session_reopen_await_failed", "awaited_conversation_id", reopenSrc.State.ConversationID, "fallback", "new_conversation", "error", err)
+		}
+	}
 	log.Info("live_session_prepared")
 	liveKickDaemon(state.SessionPath)
+}
+
+// liveReopenSource is the stopped stream of the recording this one continues
+// (the same native agent session, prompted again after a stop), when it may be
+// reopened; see livesession.FindReopenSource. Nil otherwise, including on any
+// failure: the recording then streams as a conversation of its own.
+func liveReopenSource(projectRoot string, state *session.RecordingState) *livesession.ReopenSource {
+	if state.ContinuedFromSessionID == "" || session.IsHeld(state.SessionPath) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+	defer cancel()
+	src, err := livesession.FindReopenSource(ctx, liveConfig(projectRoot), filepath.Dir(state.SessionPath), state.ContinuedFromSessionID)
+	if err != nil {
+		slog.Warn("live_session_reopen_lookup_failed", "session_id", state.SessionID, "continued_from", state.ContinuedFromSessionID, "error", err)
+		return nil
+	}
+	return src
+}
+
+// reopenSourceAfterRetire follows a reopen source through the retirement of a
+// stream in the recording's own folder. Retiring moves a stream that still owes
+// its person the withheld-secret notice, or one still closing, to a folder of
+// its own, taking the conversation's registry binding with it, so the source
+// captured before the move names a folder the binding has left. The moved
+// stream is found again and used instead, which is also what a wait for a
+// closing stream must name. A stream retiring removed outright leaves the
+// binding where it was, and the source captured earlier still stands.
+func reopenSourceAfterRetire(projectRoot string, state *session.RecordingState, src *livesession.ReopenSource) *livesession.ReopenSource {
+	if src == nil || src.Dir != state.SessionPath {
+		return src
+	}
+	// A ready source is taken wherever it lives: the daemon may finish the
+	// close (and stash it) before the retire takes the lock, and that stash
+	// still names this reused folder. Only a source still closing must have
+	// moved to a sibling folder to be awaited.
+	if fresh := liveReopenSource(projectRoot, state); fresh != nil && (!fresh.Pending || fresh.Dir != state.SessionPath) {
+		return fresh
+	}
+	if src.Pending {
+		// a closing stream always moves out; not found again, there is
+		// nothing this folder (now this recording's own) could wait for
+		slog.Info("live_session_reopen_skipped", "session_id", state.SessionID, "continued_from", state.ContinuedFromSessionID,
+			"reason", "closing_stream_not_found_after_retire")
+		return nil
+	}
+	return src
 }
 
 // liveSessionLinks are the links a recording's stream opens with: the ses_ id
@@ -262,14 +335,20 @@ func liveKickDaemon(sessionDir string) {
 // liveSessionClose runs the stop-time open -> drain -> close within budget. A
 // session that is not streaming is a no-op. If the close cannot finish the
 // stream stays closing (or pending with the close remembered) for the daemon.
-func liveSessionClose(projectRoot, sessionDir, summary string, budget time.Duration) {
+// summary names the conversation it was written for: a close that ends up on
+// another one sends none (livesession.Summary).
+func liveSessionClose(projectRoot, sessionDir, sessionID string, summary livesession.Summary, budget time.Duration) {
 	st, err := livesession.ReadState(sessionDir)
 	if err != nil || (st.Status != livesession.StatusPending && st.Status != livesession.StatusStreaming && st.Status != livesession.StatusClosing) {
 		return
 	}
-	res, err := livesession.Close(context.Background(), liveConfig(projectRoot), sessionDir, summary, budget)
+	res, err := livesession.CloseOf(context.Background(), liveConfig(projectRoot), sessionDir, sessionID, summary, budget)
 	log := slog.With("session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID)
 	switch {
+	case errors.Is(err, livesession.ErrOtherRecording):
+		// a recording that started in the same minute took the folder while the
+		// summary was written: its stream is its own, and gets no summary of ours
+		log.Info("live_session_close_skipped", "reason", "folder_reused", "closing_session_id", sessionID)
 	case err != nil:
 		log.Warn("live_session_close_deferred", "status", string(res.Status), "error", err)
 	case !res.Done:
@@ -506,7 +585,7 @@ type liveFinish struct {
 // stream deleted on SageOx, or one belonging to another recording, is left
 // alone. A delete that could not be recorded is logged; the session is held
 // either way, and abort reports it.
-func liveSessionFinish(projectRoot string, state *session.RecordingState, summary string, budget time.Duration) liveFinish {
+func liveSessionFinish(projectRoot string, state *session.RecordingState, summarize func() string, budget time.Duration) liveFinish {
 	if state == nil || state.SessionPath == "" {
 		return liveFinish{}
 	}
@@ -515,8 +594,23 @@ func liveSessionFinish(projectRoot string, state *session.RecordingState, summar
 		return liveFinish{}
 	}
 	if !liveSessionHeld(projectRoot, state) {
-		liveSessionClose(projectRoot, state.SessionPath, summary, budget)
-		return liveFinish{}
+		st = liveResolveReopen(projectRoot, state, st)
+		// generated only here: a held session publishes nothing, so its
+		// transcript is never handed to a model for a summary nobody may see
+		summary := livesession.Summary{ConversationID: st.ConversationID}
+		if summarize != nil && (st.Status == livesession.StatusPending || st.Status == livesession.StatusStreaming || st.Status == livesession.StatusClosing) {
+			summary.Text = summarize()
+		}
+		// The summary takes up to a minute. A hold placed meanwhile wins: no
+		// summary is sent, and the held path below deletes the live copy.
+		if !liveSessionHeld(projectRoot, state) {
+			liveSessionClose(projectRoot, state.SessionPath, state.SessionID, summary, budget)
+			return liveFinish{}
+		}
+		slog.Info("live_session_summary_dropped", "session_id", state.SessionID, "reason", "held_during_summary")
+		if st, err = livesession.ReadState(state.SessionPath); err != nil {
+			return liveFinish{}
+		}
 	}
 	if st.Status == livesession.StatusDeleted {
 		return liveFinish{} // already let go
@@ -526,6 +620,66 @@ func liveSessionFinish(projectRoot string, state *session.RecordingState, summar
 		return liveFinish{}
 	}
 	return liveFinish{Removed: res.Deleted || res.Queued || res.Refused, Abort: res}
+}
+
+// liveResolveReopen ends, before the stop summarizes, the wait of a stream
+// that may still reopen the conversation it continues (livesession.AwaitReopen):
+// the summary must describe the stream the close will carry, which a reopen
+// restates from the earlier recording's first line. Any failure leaves st as
+// read; the close resolves the wait itself and then sends no summary written
+// for the other conversation.
+func liveResolveReopen(projectRoot string, state *session.RecordingState, st livesession.State) livesession.State {
+	if st.AwaitReopen == nil {
+		return st
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), liveLocalBound)
+	defer cancel()
+	resolved, err := livesession.ResolveReopen(ctx, liveConfig(projectRoot), state.SessionPath, liveLocalBound)
+	if err != nil {
+		slog.Warn("live_session_reopen_resolve_failed", "session_id", state.SessionID, "conversation_id", st.ConversationID, "impact", "resolved_by_the_close", "error", err)
+		return st
+	}
+	return resolved
+}
+
+// liveSessionFinishAtHook ends this recording's live stream when a hook (the
+// SessionEnd or /clear hook) ends the recording. A held session is deleted on
+// the server, as liveSessionFinish does. Any other stream is only asked to
+// close: the daemon finishes it, because the close carries the session summary
+// and a hook has no time for the model that writes it (the agent is exiting).
+// The daemon is kicked at once, so the close follows the end by seconds.
+func liveSessionFinishAtHook(projectRoot string, state *session.RecordingState, budget time.Duration) liveFinish {
+	if state == nil || state.SessionPath == "" {
+		return liveFinish{}
+	}
+	st, err := livesession.ReadState(state.SessionPath)
+	if err != nil || st.SessionID != state.SessionID || st.DeletedOnServer {
+		return liveFinish{}
+	}
+	if liveSessionHeld(projectRoot, state) {
+		return liveSessionFinish(projectRoot, state, nil, budget)
+	}
+	// The close used to run here, and it is what hears that the session was
+	// deleted on SageOx (a caught-up stream makes no other request). Publication
+	// reads that verdict (C3), so an idempotent open of the same layer stands in
+	// for it: a 410 records the delete and holds the session before anything
+	// reaches the daemon's finalize.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	_, err = livesession.Open(ctx, liveConfig(projectRoot), state.SessionPath, livesession.OpenParams{SessionID: state.SessionID})
+	cancel()
+	if err != nil && !errors.Is(err, livesession.ErrAwaitingPrompt) {
+		slog.Debug("live_session_end_probe_failed", "session_id", state.SessionID, "error", err)
+	}
+	if livesession.WasDeletedOnServer(state.SessionPath) {
+		return liveFinish{}
+	}
+	if err := livesession.RequestClose(state.SessionPath); err != nil {
+		slog.Warn("live_session_close_request_failed", "session_id", state.SessionID, "error", err)
+		return liveFinish{}
+	}
+	slog.Info("live_session_close_requested", "session_id", state.SessionID, "conversation_id", st.ConversationID, "status", string(st.Status))
+	liveKickDaemon(state.SessionPath)
+	return liveFinish{}
 }
 
 // heldLiveWarning is the stop message for a held session whose live copy the
@@ -689,4 +843,22 @@ func moveLiveStream(ctx context.Context, cfg livesession.Config, dir string, st 
 		}
 		return nil
 	})
+}
+
+// markManualLiveStop records, before the stop closes the stream, that the
+// person stopped this recording themselves (`/ox-session-stop`). Marked first
+// and unconditionally: a stop that fails half way still must not leave a
+// session that a later prompt resumes.
+func markManualLiveStop(agentID string) {
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SessionPath == "" {
+		return
+	}
+	if err := livesession.MarkManualStop(state.SessionPath); err != nil {
+		slog.Warn("live_session_manual_stop_unrecorded", "session_id", state.SessionID, "error", err)
+	}
 }

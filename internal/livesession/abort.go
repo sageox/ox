@@ -124,6 +124,11 @@ func Abort(ctx context.Context, cfg Config, dir string, budget time.Duration) (A
 			return res, takeBackDeleteRequest(ctx, cfg, dir, ours, err)
 		}
 	}
+	// a discarded session leaves no reopen copy of its transcript behind, even
+	// when its cache folder was pruned long ago
+	if err := removeStash(cfg, st.ConversationID); err != nil {
+		log.WarnContext(ctx, "live_session_reopen_stash_remove_failed", "error", err)
+	}
 	// Local cleanup only, so it gets the rest of the budget and no more. A
 	// drain still holding the lock stops at its next call; the caller removes
 	// the folder anyway.

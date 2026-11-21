@@ -238,7 +238,7 @@ type withheldBatch struct {
 // declaredGapLine is exactly a gap line this package writes into the spool: a
 // reason and at most a byte count, nothing else. Nothing looser may match: a
 // captured line dressed as a gap could otherwise carry content past the scan.
-var declaredGapLine = regexp.MustCompile(`^\{"type":"gap","reason":"(?:secret_withheld|spool_write_failed|torn_tail|oversized_line|invalid_line|spool_full)"(?:,"bytes":[0-9]+)?\}\n$`)
+var declaredGapLine = regexp.MustCompile(`^\{"type":"gap","reason":"(?:secret_withheld|spool_write_failed|torn_tail|oversized_line|invalid_line|spool_full|media_[a-z_]+)"(?:,"bytes":[0-9]+)?(?:,"lost_entries":[0-9]+)?\}\n$`)
 
 // withholdRefused replaces a refused batch with one secret_withheld gap line
 // standing for all of its content (F1). Withholding only the lines refused on

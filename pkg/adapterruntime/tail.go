@@ -63,6 +63,33 @@ func (s TailStats) AllLinesFailedToParse() bool {
 
 // TailJSONLWithStats is TailJSONL plus the read counts.
 func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
+	return tailJSONL(path, offset, parse, nil)
+}
+
+// TailJSONLUntil is TailJSONL that can end a read early, at a record boundary:
+// it stops before the first record whose entries fits rejects and returns that
+// record's offset, so the caller's next read starts with it. fits is asked once
+// about each parsed record that yields entries, in file order. The read's first
+// record is taken even when rejected, and the read ends right after it, so a
+// record no response could hold still moves the cursor instead of wedging it.
+//
+// It exists for an adapter whose entries can be far larger than one record's
+// text suggests (ox-adapter-claude-code carries pasted images and whole tool
+// outputs) and must keep one read-from-offset response under the protocol's
+// output limit. A read that stops early is only correct because its reader
+// (the external adapter) drains pages until the cursor reaches the end: a
+// budgeted read that callers treat as the whole tail loses the rest of it.
+func TailJSONLUntil(path string, offset int64, parse LineParser, fits func([]adapterprotocol.RawEntry) bool) ([]adapterprotocol.RawEntry, int64, error) {
+	if fits == nil {
+		return nil, offset, errors.New("TailJSONLUntil requires a fits check")
+	}
+	entries, newOffset, _, err := tailJSONL(path, offset, parse, fits)
+	return entries, newOffset, err
+}
+
+// tailJSONL is TailJSONLWithStats with an optional fits check; a nil one reads
+// every complete record, which is what TailJSONL promises.
+func tailJSONL(path string, offset int64, parse LineParser, fits func([]adapterprotocol.RawEntry) bool) ([]adapterprotocol.RawEntry, int64, TailStats, error) {
 	var stats TailStats
 	if parse == nil {
 		return nil, offset, stats, errors.New("TailJSONL requires a line parser")
@@ -97,6 +124,7 @@ func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterp
 	var (
 		entries  []adapterprotocol.RawEntry
 		consumed = offset
+		start    = offset
 		reader   = bufio.NewReaderSize(f, 64*1024)
 	)
 
@@ -116,20 +144,32 @@ func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterp
 			continue
 		}
 
-		consumed += int64(n)
-		stats.LinesRead++
-
 		if oversize {
 			// truncating would hand the parser a fragment and call it a
 			// record; skipping keeps the offset moving without inventing data
+			consumed += int64(n)
+			stats.LinesRead++
 			stats.ParseErrors++
 			continue
 		}
-		if parsed, parseErr := parse(trimNewline(line)); parseErr == nil {
-			entries = append(entries, parsed...)
-			stats.EntriesParsed += len(parsed)
-		} else {
+		parsed, parseErr := parse(trimNewline(line))
+		last := false
+		if parseErr == nil && fits != nil && len(parsed) > 0 && !fits(parsed) {
+			if consumed > start {
+				break // the next read starts at this record
+			}
+			last = true // the read's first record: taken alone, so the cursor moves
+		}
+		consumed += int64(n)
+		stats.LinesRead++
+		if parseErr != nil {
 			stats.ParseErrors++
+			continue
+		}
+		entries = append(entries, parsed...)
+		stats.EntriesParsed += len(parsed)
+		if last {
+			break
 		}
 	}
 

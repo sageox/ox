@@ -21,6 +21,8 @@ func MapRoleToEntryType(role string) EntryType {
 		return EntryTypeSystem
 	case "tool":
 		return EntryTypeTool
+	case adapterprotocol.RoleMedia:
+		return EntryTypeMedia
 	default:
 		return EntryTypeSystem
 	}
@@ -40,9 +42,26 @@ func ConvertRawEntries(rawEntries []adapters.RawEntry) []Entry {
 			CallID:     raw.CallID,
 		}
 		entry.Type = MapRoleToEntryType(raw.Role)
+		if raw.Media != nil {
+			applyMedia(&entry, raw.Media)
+		}
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+// applyMedia fills a media entry from its adapter ref. An image the adapter or
+// the staging step refused becomes a gap entry instead, naming why.
+func applyMedia(entry *Entry, m *adapterprotocol.MediaRef) {
+	if m.Skipped != "" {
+		entry.Type = EntryTypeGap
+		entry.Reason = "media_" + m.Skipped
+		entry.LostEntries = 1
+		entry.MIME, entry.Size = m.MIME, m.Size
+		return
+	}
+	pos := m.Position
+	entry.SHA256, entry.MIME, entry.Size, entry.Position = m.SHA256, m.MIME, m.Size, &pos
 }
 
 // ConvertProtocolEntriesToHistory converts adapter protocol RawEntry values into
@@ -62,6 +81,9 @@ func ConvertProtocolEntriesToHistory(entries []adapterprotocol.RawEntry, agentID
 	}
 
 	for i, raw := range entries {
+		if raw.Role == adapterprotocol.RoleMedia {
+			continue // an image has no history text; Seq stays tied to position
+		}
 		ts := time.Time{}
 		if raw.Timestamp != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {

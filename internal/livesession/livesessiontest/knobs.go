@@ -79,6 +79,12 @@ func (s *Server) RefuseNextClose(status int, reason string, action sessionstream
 	s.set(func() { x := refusal(status, reason, action, stored); s.closeRefusal = &x })
 }
 
+// RefuseNextReopen answers the next open that carries reopen with this refusal;
+// an open without reopen is never affected.
+func (s *Server) RefuseNextReopen(status int, reason string, action sessionstream.Action) {
+	s.set(func() { x := refusal(status, reason, action, nil); s.reopenRefusal = &x })
+}
+
 // LoseStoredBytes erases every stored object of cnv and rewinds its layers to
 // empty, as a storage restore from before the session would: the server now
 // stands behind every ack it gave. Later appends and closes answer what api-go

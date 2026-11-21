@@ -169,6 +169,11 @@ type OpenSessionRequest struct {
 	// recording ended), optional, kept on the same terms. Readers show the two
 	// as one session.
 	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
+	// Reopen asks for a new layer on this conversation after its owner stopped
+	// it (the newest layer was closed by its client). The server grants it only
+	// to the owner, on a conversation that is not deleted; without it an open
+	// of a closed conversation is refused as before.
+	Reopen bool `json:"reopen,omitempty"`
 }
 
 // SessionStatus is a streamed session's lifecycle as readers see it.
