@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/livesession"
 	"github.com/sageox/ox/internal/sessionstream"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -73,7 +75,11 @@ func TestTeammateCommentGoesToTheRecipientOnceAndIsAckedAtTheSeq(t *testing.T) {
 	e.drainOnce()
 
 	for _, agent := range []string{"agent-a", "agent-b"} {
-		if got, _ := store.GetWhispers(agent, whisperstore.AttentionAll, nil); len(got) != 0 {
+		got, err := store.GetWhispers(agent, whisperstore.AttentionAll, nil)
+		if err != nil {
+			t.Fatalf("broadcast reader for %s failed: %v", agent, err)
+		}
+		if len(got) != 0 {
 			t.Fatalf("broadcast reader for %s returned %v", agent, got)
 		}
 	}
@@ -205,11 +211,14 @@ func TestTeammateCommentStaysPendingWhenItsAckCannotBeWritten(t *testing.T) {
 	}
 }
 
-// Failure prevented: this session acking (and showing) a note sent to another
-// conversation, such as an earlier recording by the same agent.
-func TestTeammateCommentOfAnotherConversationIsDroppedNeverAcked(t *testing.T) {
+// Failures prevented: this session acking (and showing) a note sent to another
+// conversation of the same agent; and a hook for conversation A, delayed before
+// its take, deleting a note just received for the agent's conversation B, so
+// B's next hook had nothing to show. The note stays, for B alone.
+func TestTeammateCommentOfAnotherConversationIsLeftForIt(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
-	addPending(t, store, "tcm_old", "agent-a", map[string]string{"session_dir": e.dir, "conversation_id": "cnv_other"})
+	other := "cnv_" + uuid.Must(uuid.NewV7()).String()
+	addPending(t, store, "tcm_b", "agent-a", map[string]string{"session_dir": e.dir, "conversation_id": other})
 	got, err := box.take(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: e.conv(), DeliveredAtSeq: 3})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("take = %v, %v", got, err)
@@ -218,8 +227,12 @@ func TestTeammateCommentOfAnotherConversationIsDroppedNeverAcked(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.rdir(), "teammate-comment-acks")); err == nil {
 		t.Fatal("this session logged an ack for another conversation's note")
 	}
-	if ids := stillPending(t, store, "agent-a"); len(ids) != 0 {
-		t.Fatalf("pending = %v; the foreign note must be dropped", ids)
+	if ids := stillPending(t, store, "agent-a"); len(ids) != 1 || ids[0] != "tcm_b" {
+		t.Fatalf("pending = %v; the other conversation's note must stay for it", ids)
+	}
+	got, err = box.take(t.Context(), TeammateCommentsTakePayload{AgentID: "agent-a", ConversationID: other, DeliveredAtSeq: 4})
+	if err != nil || len(got) != 1 || got[0].ID != "tcm_b" {
+		t.Fatalf("conversation B's own take = %v, %v; want its note", got, err)
 	}
 }
 
@@ -403,6 +416,7 @@ func TestTeammateCommentLeaseWithoutConfirmLosesNothing(t *testing.T) {
 }
 
 // Failure prevented: two hooks racing (parallel tool calls) each showing a note.
+// Sequential: a live lease holds the note back from a later take.
 func TestTeammateCommentTwoHooksRacingShowANoteOnce(t *testing.T) {
 	e, box, _ := newCommentEnv(t, "agent-a")
 	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
@@ -411,6 +425,41 @@ func TestTeammateCommentTwoHooksRacingShowANoteOnce(t *testing.T) {
 	b, _ := box.lease(t.Context(), e.payload(5))
 	if len(a.Entries) != 1 || len(b.Entries) != 0 {
 		t.Fatalf("hook A got %d notes, hook B got %d; the note must go to one", len(a.Entries), len(b.Entries))
+	}
+}
+
+// Overlapping: both takes are inside lease at once, held at the point where
+// each waits for the inbox lock, then released together. Exactly one gets the
+// note; without the lock both would peek it before either leased it.
+func TestTeammateCommentOverlappingTakesShowANoteOnce(t *testing.T) {
+	e, box, _ := newCommentEnv(t, "agent-a")
+	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
+	e.drainOnce()
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	release := make(chan struct{})
+	box.beforeTake = func() {
+		arrived.Done()
+		<-release
+	}
+	results := make(chan TeammateCommentsTakeResponse, 2)
+	for range 2 {
+		go func() {
+			r, err := box.lease(t.Context(), e.payload(5))
+			if err != nil {
+				t.Errorf("lease: %v", err)
+			}
+			results <- r
+		}()
+	}
+	arrived.Wait() // both takes are past their checks and about to lock
+	close(release)
+	got := 0
+	for range 2 {
+		got += len((<-results).Entries)
+	}
+	if got != 1 {
+		t.Fatalf("overlapping takes returned the note %d times, want exactly once", got)
 	}
 }
 
@@ -609,7 +658,7 @@ func TestTeammateCommentsOffDropsNotesUnshownAndUnacked(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
 	e.srv.QueueTeammateComment(srvComment("tcm_1", "x"))
 	e.drainOnce() // received while on
-	box.enabled = func() bool { return false }
+	box.enabled = func(string) bool { return false }
 	e.spool(lineN(3))
 	e.clock = e.clock.Add(time.Minute)
 	e.drainOnce() // the server still lists it
@@ -659,18 +708,27 @@ func TestTickFlushesClosedSessionsLastAndBounded(t *testing.T) {
 	closed := addClosedSessionDirs(t, e, 6)
 	e.spool(lineN(1) + lineN(2)) // the active session has bytes to send
 	var calls []string
+	// the active session's drain hands its listed notes over as it finishes:
+	// that is the signal it ran
+	drained := make(chan struct{})
+	var drainedOnce sync.Once
+	e.live.onTeammateComments = func(context.Context, string, livesession.State, []sessionstream.TeammateComment) {
+		drainedOnce.Do(func() { close(drained) })
+	}
 	e.live.flushAcks = func(ctx context.Context, _ livesession.Config, dir string, _ time.Duration, _ time.Time) (bool, error) {
 		if len(calls) == 0 {
 			// the active session's drain must be able to finish while the first
-			// flush is still "on the network": only possible if it was scheduled first
-			deadline := time.After(20 * time.Second)
-			for e.stored() == "" {
-				select {
-				case <-deadline:
-					t.Error("the active session's drain never ran: the flush blocked it")
-					return true, nil
-				case <-time.After(5 * time.Millisecond):
-				}
+			// flush is still "on the network": only possible if it was scheduled
+			// first. ctx is the tick's flush budget, so a blocked drain fails
+			// the test at that deadline instead of hanging it.
+			select {
+			case <-drained:
+			case <-ctx.Done():
+				t.Error("the active session's drain never ran: the flush blocked it")
+				return true, nil
+			}
+			if e.stored() == "" {
+				t.Error("the drain finished without storing the active session's bytes")
 			}
 		}
 		calls = append(calls, dir)

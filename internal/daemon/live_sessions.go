@@ -68,10 +68,11 @@ type LiveSessions struct {
 	endpoint string
 	// config builds the livesession config for an endpoint; tests point it at a fake server.
 	config func(endpoint string) livesession.Config
-	// acceptsNotes is this repo's session.teammate_notes switch, carried by
-	// every open this daemon sends; nil means notes are accepted. Set by the
-	// daemon, which also hands it to the teammate-note inbox.
-	acceptsNotes func() bool
+	// acceptsNotes is session.teammate_notes for the checkout that recorded
+	// the session in dir, carried by every open sent for it: worktrees of one
+	// repo share this daemon and may set it differently. nil means notes are
+	// accepted. Set by the daemon, which hands the same switch to the inbox.
+	acceptsNotes func(dir string) bool
 	now          func() time.Time
 	// refreshRules fetches the current secret rules and persists them for every
 	// publishing process; tests replace it.
@@ -136,10 +137,7 @@ func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSes
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
 	}
-	// reads l.acceptsNotes per call: the daemon sets it after construction
-	l.config = func(ep string) livesession.Config {
-		return livesession.Config{Endpoint: ep, Logger: logger, AcceptsNotes: l.acceptsNotes}
-	}
+	l.config = func(ep string) livesession.Config { return livesession.Config{Endpoint: ep, Logger: logger} }
 	l.summarize = func(ctx context.Context, dir string, st livesession.State) string {
 		return livesummary.ForStream(ctx, logger, dir, st)
 	}
@@ -554,9 +552,20 @@ func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.
 		"deleted", res.Deleted, "queued", res.Queued, "refused", res.Refused, "reason", res.Reason)
 }
 
+// configFor is the config for work on the session in dir: every open it sends
+// (the first, a replacement layer) carries that session's own notes switch,
+// read per open so `ox config set` needs no daemon restart.
+func (l *LiveSessions) configFor(dir string) livesession.Config {
+	cfg := l.config(l.endpoint)
+	if accepts := l.acceptsNotes; accepts != nil {
+		cfg.AcceptsNotes = func() bool { return accepts(dir) }
+	}
+	return cfg
+}
+
 // attempt runs one open-and-drain, or a close once stop asked for one.
 func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
-	cfg := l.config(l.endpoint)
+	cfg := l.configFor(dir)
 	if st.Status == livesession.StatusClosing || st.CloseRequested {
 		// the summary runs the person's own model CLI over the spool, and this
 		// state may be a Ledger forgery that Close would refuse only after it:

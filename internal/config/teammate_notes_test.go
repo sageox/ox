@@ -57,6 +57,46 @@ func TestTeammateNotesEnabledOffAtAnyLayerWins(t *testing.T) {
 	}
 }
 
+// An opt-out must survive a config file that stops parsing: reading the broken
+// layer as "unset" would turn a person's or a repo's "off" into the default on.
+func TestTeammateNotesUnreadableLayerCountsAsOff(t *testing.T) {
+	tests := []struct {
+		name       string
+		userBody   string
+		brokenRepo bool
+		source     TeammateNotesSource
+	}{
+		{name: "malformed user config", userBody: "session_teammate_notes: [off\n", source: TeammateNotesSourceUser},
+		{name: "malformed repo yaml over a json off", userBody: "session_teammate_notes: \"on\"\n", brokenRepo: true, source: TeammateNotesSourceRepo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			userCfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(userCfgPath, []byte(tt.userBody), 0o600))
+			t.Setenv("OX_USER_CONFIG", userCfgPath)
+			t.Setenv(EnvTeammateNotes, "")
+			root := CreateInitializedProjectWithConfig(t, &ProjectConfig{SessionTeammateNotes: TeammateNotesOff})
+			if tt.brokenRepo {
+				require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.yaml"), []byte("session_teammate_notes: [\n"), 0o600))
+			}
+
+			got := ResolveTeammateNotes(root)
+			assert.Equal(t, TeammateNotesOff, got.Mode)
+			assert.Equal(t, tt.source, got.Source)
+			assert.Error(t, got.Err, "the unreadable layer is reported, not hidden")
+			assert.False(t, TeammateNotesEnabled(root))
+		})
+	}
+}
+
+// Absent files are not errors: a machine with no config at all keeps the default.
+func TestTeammateNotesAbsentConfigIsTheDefaultOn(t *testing.T) {
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv(EnvTeammateNotes, "")
+	got := ResolveTeammateNotes(t.TempDir())
+	assert.Equal(t, ResolvedTeammateNotes{Mode: TeammateNotesOn, Source: TeammateNotesSourceDefault}, got)
+}
+
 // A repo's opt-out stays in that repo: another checkout on the same machine
 // still receives notes.
 func TestTeammateNotesRepoOffIsScopedToThatRepo(t *testing.T) {

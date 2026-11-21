@@ -339,6 +339,17 @@ func (r *WhisperRegistry) PeekTeammateComments(agentID string, limit int) ([]whi
 	return r.ledgerStore.PeekTeammateComments(agentID, limit)
 }
 
+// PeekTeammateCommentsForConversation returns up to limit of agentID's
+// pending notes sent to conversationID, without removing them.
+func (r *WhisperRegistry) PeekTeammateCommentsForConversation(agentID, conversationID string, limit int) ([]whisperstore.WhisperEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ledgerStore == nil {
+		return nil, nil
+	}
+	return r.ledgerStore.PeekTeammateCommentsForConversation(agentID, conversationID, limit)
+}
+
 // PeekShownTeammateComments returns the shown notes whose receipt is owed.
 func (r *WhisperRegistry) PeekShownTeammateComments(agentID string, limit int) ([]whisperstore.WhisperEntry, error) {
 	r.mu.RLock()

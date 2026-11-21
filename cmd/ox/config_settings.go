@@ -1461,6 +1461,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 		if !config.IsValidTeammateNotes(value) {
 			return fmt.Errorf("session.teammate_notes must be one of: on, off")
 		}
+		if err := refuseTeammateNotesShadowedByYAML(projectRoot, value); err != nil {
+			return err
+		}
 		cfg.SessionTeammateNotes = value
 
 	case "recording_reminder":
@@ -1543,6 +1546,22 @@ func setRepoConfig(key, value, projectRoot string) error {
 	}
 
 	return config.SaveProjectConfig(projectRoot, cfg)
+}
+
+// refuseTeammateNotesShadowedByYAML fails a repo-level change ("" = unset) that
+// .sageox/config.yaml would override: the YAML value wins on load, and
+// reporting success while notes stay as they were is worse for a consent
+// switch than an error naming the file to edit. A YAML value equal to the one
+// requested is no conflict.
+func refuseTeammateNotesShadowedByYAML(projectRoot, value string) error {
+	yamlValue, set, err := config.RepoYAMLTeammateNotes(projectRoot)
+	if err != nil {
+		return err
+	}
+	if !set || (value != "" && config.NormalizeTeammateNotes(yamlValue) == config.NormalizeTeammateNotes(value)) {
+		return nil
+	}
+	return fmt.Errorf("session.teammate_notes is set to %q in .sageox/config.yaml, which overrides config.json: change it there", yamlValue)
 }
 
 func setTeamConfig(key, value, projectRoot string) error {
@@ -1806,6 +1825,9 @@ func unsetRepoConfig(key, projectRoot string) error {
 		cfg.MurmurReceive = ""
 
 	case "session.teammate_notes":
+		if err := refuseTeammateNotesShadowedByYAML(projectRoot, ""); err != nil {
+			return err
+		}
 		cfg.SessionTeammateNotes = ""
 
 	case "recording_reminder":

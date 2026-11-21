@@ -1,8 +1,14 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Teammate notes: someone watching a live session on SageOx (a teammate, or the
@@ -32,6 +38,10 @@ const (
 type ResolvedTeammateNotes struct {
 	Mode   string
 	Source TeammateNotesSource
+	// Err is why the deciding layer could not be read. That layer counts as
+	// off: an opt-out in a file that stopped parsing must not become the
+	// default on.
+	Err error
 }
 
 // ValidTeammateNotesModes lists the modes `ox config set session.teammate_notes` accepts.
@@ -68,22 +78,29 @@ func ResolveTeammateNotes(projectRoot string) ResolvedTeammateNotes {
 	type layer struct {
 		mode   string
 		source TeammateNotesSource
+		err    error
 	}
 	var set []layer // in display order: env, user, repo
 	if v := os.Getenv(EnvTeammateNotes); v != "" {
-		set = append(set, layer{NormalizeTeammateNotes(v), TeammateNotesSourceEnv})
+		set = append(set, layer{mode: NormalizeTeammateNotes(v), source: TeammateNotesSourceEnv})
 	}
-	if cfg, err := LoadUserConfig(); err == nil && cfg != nil && cfg.SessionTeammateNotes != "" {
-		set = append(set, layer{NormalizeTeammateNotes(cfg.SessionTeammateNotes), TeammateNotesSourceUser})
+	// a layer that cannot be read counts as off (fail closed): it may hold the
+	// opt-out. Absent files are not errors, so they still mean the default.
+	if cfg, err := LoadUserConfig(); err != nil {
+		set = append(set, layer{mode: TeammateNotesOff, source: TeammateNotesSourceUser, err: fmt.Errorf("read user config: %w", err)})
+	} else if cfg != nil && cfg.SessionTeammateNotes != "" {
+		set = append(set, layer{mode: NormalizeTeammateNotes(cfg.SessionTeammateNotes), source: TeammateNotesSourceUser})
 	}
 	if projectRoot != "" {
-		if cfg, err := LoadProjectConfig(projectRoot); err == nil && cfg != nil && cfg.SessionTeammateNotes != "" {
-			set = append(set, layer{NormalizeTeammateNotes(cfg.SessionTeammateNotes), TeammateNotesSourceRepo})
+		if cfg, err := LoadProjectConfig(projectRoot); err != nil {
+			set = append(set, layer{mode: TeammateNotesOff, source: TeammateNotesSourceRepo, err: fmt.Errorf("read repo config: %w", err)})
+		} else if cfg != nil && cfg.SessionTeammateNotes != "" {
+			set = append(set, layer{mode: NormalizeTeammateNotes(cfg.SessionTeammateNotes), source: TeammateNotesSourceRepo})
 		}
 	}
 	for _, l := range set {
 		if l.mode == TeammateNotesOff {
-			return ResolvedTeammateNotes{Mode: TeammateNotesOff, Source: l.source}
+			return ResolvedTeammateNotes{Mode: TeammateNotesOff, Source: l.source, Err: l.err}
 		}
 	}
 	if len(set) > 0 {
@@ -95,4 +112,27 @@ func ResolveTeammateNotes(projectRoot string) ResolvedTeammateNotes {
 // TeammateNotesEnabled reports whether notes reach agents in projectRoot.
 func TeammateNotesEnabled(projectRoot string) bool {
 	return ResolveTeammateNotes(projectRoot).Mode == TeammateNotesOn
+}
+
+// RepoYAMLTeammateNotes reports the session_teammate_notes value that
+// .sageox/config.yaml carries, if any. LoadProjectConfig lets that file
+// override config.json, the only file `ox config set --repo` writes, so a
+// change written to config.json alone cannot alter a value set there.
+func RepoYAMLTeammateNotes(projectRoot string) (value string, set bool, err error) {
+	data, err := os.ReadFile(filepath.Join(projectRoot, sageoxDir, projectConfigYAMLFilename))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read repo yaml config: %w", err)
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return "", false, fmt.Errorf("parse repo yaml config: %w", err)
+	}
+	v, ok := raw["session_teammate_notes"]
+	if !ok {
+		return "", false, nil
+	}
+	return fmt.Sprint(v), true, nil
 }

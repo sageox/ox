@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,9 +20,9 @@ import (
 
 const (
 	// teammateAcksFileName logs deliveries of teammate comments to the agent,
-	// one JSON line {"id","delivered_at_seq"} each. Append-only: the hook's
-	// daemon writes it without live.lock (a drain may hold the lock for a long
-	// time), and a drain only reads it.
+	// one JSON line {"id","delivered_at_seq"} each. Its one writer, the hook's
+	// daemon, appends and compacts it without live.lock (a drain may hold the
+	// lock for a long time), and a drain only reads it.
 	teammateAcksFileName = "teammate-comment-acks"
 	// teammateAcksSentFileName lists, one id per line, the acks a 2xx answer
 	// (or a permanent refusal) settled, so each is sent once.
@@ -36,8 +37,9 @@ const (
 	// restart; only a 2xx or a permanent refusal clears an id.
 	teammateResendsFileName = "teammate-comment-resends"
 	// maxAckLogBytes and maxAckLogLines bound how much of a receipt log is
-	// parsed. The session cache is inside a pulled Ledger, so a log can come from
-	// someone else: past the bound the log is refused, never partly trusted.
+	// parsed: past either, the log is refused, never partly trusted. The logs
+	// live in the machine-local ReceiptsDir, so this is a defensive parse limit;
+	// compactAckLog keeps a healthy ack log far below it.
 	maxAckLogBytes = 256 << 10
 	maxAckLogLines = 2000
 )
@@ -114,9 +116,10 @@ func ReceiptsDir(cfg Config, conversationID string) (string, error) {
 func (s *session) receipts() (string, error) { return ReceiptsDir(s.cfg, s.st.ConversationID) }
 
 // RecordTeammateCommentAck appends one delivery to the conversation's ack log
-// in dir (a ReceiptsDir). It is one O_APPEND write of a short line, so
-// concurrent writers never interleave, and it takes no lock for the same reason
-// recordLost does not.
+// in dir (a ReceiptsDir), compacting the log first once it is large. It takes no
+// lock for the same reason recordLost does not. It must stay the log's only
+// writer (the daemon's note inbox, under its mutex): a compaction elsewhere
+// would race this append and could drop a receipt.
 func RecordTeammateCommentAck(dir, commentID string, deliveredAtSeq int64) error {
 	if commentID == "" || deliveredAtSeq < 1 {
 		return fmt.Errorf("record teammate comment ack: need an id and a seq of at least 1")
@@ -128,6 +131,13 @@ func RecordTeammateCommentAck(dir, commentID string, deliveredAtSeq int64) error
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("record teammate comment ack: %w", err)
 	}
+	if err := compactAckLog(dir); err != nil {
+		// the append below is what makes the receipt durable, so it still
+		// happens: failing the receipt would leave the note shown with no ack
+		// owed. A log that keeps failing to compact is refused by the drain at
+		// its bound, which logs live_teammate_acks_unreadable.
+		slog.Warn("live_teammate_ack_log_compact_failed", "conversation_id", filepath.Base(dir), "error", err)
+	}
 	f, err := os.OpenFile(filepath.Join(dir, teammateAcksFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("record teammate comment ack: %w", err)
@@ -137,6 +147,109 @@ func RecordTeammateCommentAck(dir, commentID string, deliveredAtSeq int64) error
 		return fmt.Errorf("record teammate comment ack: %w", err)
 	}
 	return nil
+}
+
+// compactAckLog, once the ack log reaches half of either read bound, drops the
+// receipts that are settled and not waiting for a resend, keeping the first
+// record of every other id verbatim and in order; then it drops settled ids
+// that no longer match a receipt. Dropping a settled receipt is safe: the
+// server records an ack once (the first wins, so a resend is harmless), stops
+// listing a note once its ack lands, and the daemon's stored-once mark blocks
+// a second display if a stale list repeats it. What stays is small: the server
+// lists at most MaxTeammateCommentsPerAppend waiting notes per class and a
+// note shown but not acked keeps its slot, so the owed set cannot grow while
+// acks fail.
+func compactAckLog(dir string) error {
+	path := filepath.Join(dir, teammateAcksFileName)
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lines, err := readBoundedLines(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() < maxAckLogBytes/2 && len(lines) < maxAckLogLines/2 {
+		return nil
+	}
+	settled, err := readSettled(dir)
+	if err != nil {
+		return err
+	}
+	resend, _, err := readResends(dir)
+	if err != nil {
+		return err
+	}
+	// the same filter readAckLog applies, so no reader sees a different log
+	seen := make(map[string]bool, len(lines))
+	keptIDs := make(map[string]bool)
+	var kept []string
+	for _, l := range lines {
+		var a ackLogLine
+		if json.Unmarshal([]byte(l), &a) != nil || a.ID == "" || a.DeliveredAtSeq < 1 || seen[a.ID] {
+			continue
+		}
+		seen[a.ID] = true
+		if _, owed := resend[a.ID]; settled[a.ID] && !owed {
+			continue
+		}
+		kept = append(kept, l)
+		keptIDs[a.ID] = true
+	}
+	if len(kept) == len(lines) {
+		return nil // everything left is still owed
+	}
+	// ack log first: a crash before the settled rewrite only leaves settled ids
+	// that match nothing
+	if err := replaceLines(path, kept); err != nil {
+		return err
+	}
+	settledPath := filepath.Join(dir, teammateAcksSentFileName)
+	// read again, so a drain's settle since the first read is kept; one that
+	// lands during the rewrite itself is lost, which only resends that ack once
+	ids, err := readBoundedLines(settledPath)
+	if err != nil {
+		return err
+	}
+	var keptSettled []string
+	for _, id := range ids {
+		if keptIDs[id] {
+			keptSettled = append(keptSettled, id)
+		}
+	}
+	if len(keptSettled) == len(ids) {
+		return nil
+	}
+	return replaceLines(settledPath, keptSettled)
+}
+
+// replaceLines swaps path for a file of lines through a uniquely named temp
+// file in the same folder and a rename, so a reader sees the old file or the
+// new one, never a truncated one. os.CreateTemp creates it 0o600.
+func replaceLines(path string, lines []string) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	body := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		body += "\n"
+	}
+	_, werr := f.WriteString(body)
+	// synced before the rename: a crash must not leave an empty log where the
+	// unsettled receipts were
+	if err := errors.Join(werr, f.Sync(), f.Close()); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // obligation is one ack still owed and when it began to be owed.

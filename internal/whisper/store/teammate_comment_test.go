@@ -1,6 +1,8 @@
 package store
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -255,4 +257,52 @@ func TestTeammateCommentStorageFailuresAreReturnedNotSwallowed(t *testing.T) {
 			t.Fatal("malformed metadata json returned no error")
 		}
 	})
+}
+
+// Failure prevented: two takes racing for one agent both returning a note,
+// because each peeked it before either deleted it. Each note goes to exactly
+// one caller, and every note to someone.
+func TestTeammateCommentConcurrentTakesReturnEachNoteOnce(t *testing.T) {
+	s := mustOpen(t)
+	const rounds, notes = 20, 5
+	for round := range rounds {
+		now := time.Now()
+		for i := range notes {
+			if err := s.Add(teammateEntry(fmt.Sprintf("r%d-n%d", round, i), "agent-a", now.Add(time.Duration(i)*time.Millisecond))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		start := make(chan struct{})
+		results := make(chan []WhisperEntry, 2)
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				got, err := s.TakeTeammateComments("agent-a", notes)
+				if err != nil {
+					t.Errorf("take: %v", err)
+				}
+				results <- got
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		seen := map[string]int{}
+		for got := range results {
+			for _, e := range got {
+				seen[e.ID]++
+			}
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Fatalf("round %d: note %s returned %d times", round, id, n)
+			}
+		}
+		if len(seen) != notes {
+			t.Fatalf("round %d: %d of %d notes taken", round, len(seen), notes)
+		}
+	}
 }

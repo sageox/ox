@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,6 +138,48 @@ func TestConfigReportsWhichLayerTurnedTeammateNotesOff(t *testing.T) {
 			assert.Equal(t, tt.value, cv.Value)
 			assert.Equal(t, tt.source, cv.Source)
 			assert.Equal(t, config.TeammateNotesEnabled(h.root), cv.Value == "on", "display and runtime must agree")
+		})
+	}
+}
+
+// A repo whose .sageox/config.yaml sets the switch reads it over config.json,
+// so `ox config set/unset --repo` writing only config.json would report success
+// while the YAML value stayed in force. It must refuse instead.
+func TestRepoTeammateNotesChangeRefusedWhenYAMLOverridesIt(t *testing.T) {
+	t.Setenv(config.EnvTeammateNotes, "")
+	tests := []struct {
+		name, yaml, set string // set "" means unset
+		wantErr         bool
+		wantOn          bool
+	}{
+		{name: "set off under yaml on", yaml: "on", set: "off", wantErr: true, wantOn: true},
+		{name: "set on under yaml off", yaml: "off", set: "on", wantErr: true, wantOn: false},
+		{name: "unset under yaml off", yaml: "off", wantErr: true, wantOn: false},
+		{name: "set the value yaml already holds", yaml: "off", set: "off", wantOn: false},
+		{name: "no yaml key: json only", set: "off", wantOn: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTeammateHook(t, true)
+			body := "# repo settings\n"
+			if tt.yaml != "" {
+				body += "session_teammate_notes: \"" + tt.yaml + "\"\n"
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(h.root, ".sageox", "config.yaml"), []byte(body), 0o600))
+
+			var err error
+			if tt.set == "" {
+				err = UnsetConfigValue("session.teammate_notes", ConfigLevelRepo, h.root)
+			} else {
+				err = SetConfigValue("session.teammate_notes", tt.set, ConfigLevelRepo, h.root)
+			}
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), ".sageox/config.yaml")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantOn, config.TeammateNotesEnabled(h.root), "the command's outcome must match what takes effect")
 		})
 	}
 }
