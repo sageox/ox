@@ -221,12 +221,16 @@ func writeCheckout(t *testing.T, repoID, notes string) string {
 func writeRecording(t *testing.T, workspace string) string {
 	t.Helper()
 	dir := t.TempDir()
-	marker := `{"agent_id":"agent-a","session_path":"` + dir + `"`
+	// marshaled, so a Windows path's backslashes stay valid JSON
+	fields := map[string]string{"agent_id": "agent-a", "session_path": dir}
 	if workspace != "" {
-		marker += `,"workspace_path":"` + workspace + `"`
+		fields["workspace_path"] = workspace
 	}
-	marker += `}`
-	if err := os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(marker), 0o600); err != nil {
+	marker, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".recording.json"), marker, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return dir
