@@ -271,6 +271,11 @@ func GuidanceCacheDir() string {
 	return filepath.Join(CacheDir(), "guidance")
 }
 
+// TelemetryCacheDir returns the private directory for per-project telemetry queues.
+func TelemetryCacheDir() string {
+	return filepath.Join(CacheDir(), "telemetry")
+}
+
 // SessionCacheDir returns the directory for session cache.
 // If repoID is empty, returns the base sessions directory.
 // Otherwise returns the repo-specific session directory.

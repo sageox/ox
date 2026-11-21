@@ -47,6 +47,7 @@ func TestWithHTTPClient(t *testing.T) {
 }
 
 func TestWithProjectRoot(t *testing.T) {
+	setupTestQueueCache(t)
 	tmpDir := t.TempDir()
 
 	sageoxDir := filepath.Join(tmpDir, ".sageox")
@@ -111,6 +112,7 @@ func TestTrack_PreservesExistingContextFields(t *testing.T) {
 }
 
 func TestTrack_WithFileQueue(t *testing.T) {
+	setupTestQueueCache(t)
 	tmpDir := t.TempDir()
 
 	sageoxDir := filepath.Join(tmpDir, ".sageox")
@@ -261,17 +263,16 @@ func TestIsSageoxInstalled(t *testing.T) {
 }
 
 func TestFileQueue_AppendOverflowTruncates(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	setupTestProject(t, tmpDir)
 	q := NewFileQueue(tmpDir)
 
 	qPath := q.Path()
 	dir := filepath.Dir(qPath)
-	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.MkdirAll(dir, 0700))
 
 	bigData := strings.Repeat(`{"type":"test","success":true}`+"\n", 50000)
-	require.NoError(t, os.WriteFile(qPath, []byte(bigData), 0644))
+	require.NoError(t, os.WriteFile(qPath, []byte(bigData), 0600))
 
 	info, err := os.Stat(qPath)
 	require.NoError(t, err)
@@ -286,13 +287,12 @@ func TestFileQueue_AppendOverflowTruncates(t *testing.T) {
 }
 
 func TestFileQueue_ReadAll_SkipsMalformed(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	setupTestProject(t, tmpDir)
 	q := NewFileQueue(tmpDir)
 
 	qPath := q.Path()
-	require.NoError(t, os.MkdirAll(filepath.Dir(qPath), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(qPath), 0700))
 
 	content := `{"type":"valid1","success":true}
 not valid json at all
@@ -300,7 +300,7 @@ not valid json at all
 {malformed
 {"type":"valid3","success":true}
 `
-	require.NoError(t, os.WriteFile(qPath, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(qPath, []byte(content), 0600))
 
 	events, err := q.ReadAll()
 	require.NoError(t, err)
@@ -311,7 +311,6 @@ not valid json at all
 }
 
 func TestFileQueue_ShouldFlush_RecentEvents(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	setupTestProject(t, tmpDir)
 	q := NewFileQueue(tmpDir)
