@@ -12,6 +12,34 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 )
 
+// draftTimestampLen is len("2006-01-02T15-04"), the timestamp prefix that
+// GenerateSessionName writes ahead of the username slug.
+const draftTimestampLen = len("2006-01-02T15-04")
+
+// draftOwnedByLocalUser requires the stable user ID recorded when the draft
+// was published. Username is a display name and the session-name slug is not
+// globally unique, so neither proves ownership. AgentID must also match the
+// generated name shape. Unknown owners and legacy metadata without UserID or
+// AgentID fail closed.
+func draftOwnedByUserID(sessionName string, meta *lfs.SessionMeta, ownerID string) bool {
+	if ownerID == "" || meta == nil || meta.UserID == "" || meta.UserID != ownerID || meta.AgentID == "" {
+		return false
+	}
+	agentID := sanitizeFilename(meta.AgentID)
+	if agentID == "" || len(sessionName) <= draftTimestampLen+1 || sessionName[draftTimestampLen] != '-' {
+		return false
+	}
+	if _, err := time.Parse("2006-01-02T15-04", sessionName[:draftTimestampLen]); err != nil {
+		return false
+	}
+	remaining := sessionName[draftTimestampLen+1:]
+	suffix := "-" + agentID
+	if !strings.HasSuffix(remaining, suffix) || len(remaining) <= len(suffix) {
+		return false
+	}
+	return true
+}
+
 // OrphanedDraftAge is how long a committed draft placeholder must go without a
 // refresh before it is considered abandoned and eligible for git-removal from
 // the ledger.
@@ -50,6 +78,21 @@ func ValidateDraftSessionName(sessionName string) error {
 	return nil
 }
 
+// validDraftSessionEntries filters the untrusted ledger directory entries
+// before any metadata is read. Keeping this gate separate makes it testable on
+// platforms (such as Windows) that cannot create filenames containing Git
+// wildcards like '*'.
+func validDraftSessionEntries(entries []os.DirEntry) []os.DirEntry {
+	valid := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || ValidateDraftSessionName(entry.Name()) != nil {
+			continue
+		}
+		valid = append(valid, entry)
+	}
+	return valid
+}
+
 // FindOrphanedDrafts returns the names of ledger draft placeholders that have no
 // live or recoverable recording behind them, oldest first. cacheDirs are the
 // local cache session directories to consult for an in-flight recording.
@@ -64,7 +107,7 @@ func ValidateDraftSessionName(sessionName string) error {
 //
 // This is the single source of truth for "orphaned draft"; both `ox doctor` and
 // the daemon's periodic retraction call it.
-func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error) {
+func FindOrphanedDrafts(ledgerPath string, cacheDirs []string, localUserID string) ([]string, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -80,14 +123,8 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 	}
 	var found []candidate
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
+	for _, entry := range validDraftSessionEntries(entries) {
 		name := entry.Name()
-		if err := ValidateDraftSessionName(name); err != nil {
-			continue
-		}
 		meta, metaErr := lfs.ReadSessionMeta(filepath.Join(sessionsDir, name))
 		// Fail safe: an unreadable meta.json is not a draft we are willing to
 		// delete. Some other check owns diagnosing it.
@@ -98,6 +135,13 @@ func FindOrphanedDrafts(ledgerPath string, cacheDirs []string) ([]string, error)
 		// deleting a placeholder for a session that might be live is worse than
 		// leaving a stale page.
 		if meta.UpdatedAt == nil || time.Since(*meta.UpdatedAt) < OrphanedDraftAge {
+			continue
+		}
+		// Owner-only reaping: only the owning user's machine can see that
+		// owner's cache, so only it can evaluate condition 3. meta.UserID records
+		// the stable account/coworker ID used when recording began.
+		// meta.Username is a privacy-safe display name and is not an ownership key.
+		if !draftOwnedByUserID(name, meta, localUserID) {
 			continue
 		}
 		if DraftHasLocalSessionData(cacheDirs, name) {
