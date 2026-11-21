@@ -483,6 +483,25 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "session.teammate_notes",
+		Label:       "Teammate notes",
+		Category:    "Sessions",
+		Description: "Let a teammate watching your live session send your AI coworker a note.",
+		LongDescription: `Controls whether notes from a teammate watching your live session reach
+your AI coworker at its next step.
+
+  on  - Deliver notes the session owner enabled on SageOx (default). Each note
+        is labeled as coming from a teammate, not from you.
+  off - Drop every note on this machine, unshown and unacknowledged.
+
+The session owner's switch on SageOx is the first layer of consent; this is
+the second, on your machine. The environment variable OX_TEAMMATE_NOTES=off
+overrides this setting.`,
+		ValidValues: config.ValidTeammateNotesModes,
+		Default:     config.TeammateNotesOn,
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "recording_reminder",
 		Label:       "Recording reminders",
 		Description: "Periodically remind AI coworkers that the session is being recorded.",
@@ -961,6 +980,17 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = config.NormalizeSessionDraft(userCfg.SessionDraft)
 		}
 
+	case "session.teammate_notes":
+		// OX_TEAMMATE_NOTES beats the stored setting at runtime
+		// (config.TeammateNotesEnabled): display must agree, or 'ox config get'
+		// shows "on" while notes are being dropped.
+		if envMode := os.Getenv(config.EnvTeammateNotes); envMode != "" {
+			cv.EnvVal = config.NormalizeTeammateNotes(envMode)
+		}
+		if userCfg != nil && userCfg.SessionTeammateNotes != "" {
+			cv.UserVal = config.NormalizeTeammateNotes(userCfg.SessionTeammateNotes)
+		}
+
 	case "attribution.commit":
 		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsCommitSet() {
 			if v := userCfg.Attribution.GetCommit(); v == "" {
@@ -1069,8 +1099,8 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	}
 
 	// determine effective value and source (Env > User > Repo > Team > Default).
-	// EnvVal is only ever populated for session_publishing/session_recording
-	// (see their cases above) — every other setting falls through untouched.
+	// EnvVal is only ever populated for session_publishing, session_recording
+	// and session.teammate_notes (see their cases above) — every other setting falls through untouched.
 	if cv.EnvVal != "" {
 		cv.Value = cv.EnvVal
 		cv.Source = ConfigLevelEnv
@@ -1295,6 +1325,10 @@ func setUserConfig(key, value string) error {
 			return fmt.Errorf("session.draft must be one of: on, off")
 		}
 		cfg.SessionDraft = value
+
+	case "session.teammate_notes":
+		// value was already checked against the setting's ValidValues above
+		cfg.SessionTeammateNotes = value
 
 	case "attribution.commit":
 		if cfg.Attribution == nil {
@@ -1623,6 +1657,9 @@ func unsetUserConfig(key string) error {
 
 	case "session.draft":
 		cfg.SessionDraft = ""
+
+	case "session.teammate_notes":
+		cfg.SessionTeammateNotes = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {
