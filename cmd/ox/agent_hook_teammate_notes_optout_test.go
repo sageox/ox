@@ -148,22 +148,26 @@ func TestConfigReportsWhichLayerTurnedTeammateNotesOff(t *testing.T) {
 func TestRepoTeammateNotesChangeRefusedWhenYAMLOverridesIt(t *testing.T) {
 	t.Setenv(config.EnvTeammateNotes, "")
 	tests := []struct {
-		name, yaml, set string // set "" means unset
+		name, yaml, set string // yaml is the line written; set "" means unset
 		wantErr         bool
 		wantOn          bool
 	}{
-		{name: "set off under yaml on", yaml: "on", set: "off", wantErr: true, wantOn: true},
-		{name: "set on under yaml off", yaml: "off", set: "on", wantErr: true, wantOn: false},
-		{name: "unset under yaml off", yaml: "off", wantErr: true, wantOn: false},
-		{name: "set the value yaml already holds", yaml: "off", set: "off", wantOn: false},
+		{name: "set off under yaml on", yaml: `session_teammate_notes: "on"`, set: "off", wantErr: true, wantOn: true},
+		{name: "set on under yaml off", yaml: `session_teammate_notes: "off"`, set: "on", wantErr: true, wantOn: false},
+		{name: "unset under yaml off", yaml: `session_teammate_notes: "off"`, wantErr: true, wantOn: false},
+		{name: "set the value yaml already holds", yaml: `session_teammate_notes: "off"`, set: "off", wantOn: false},
 		{name: "no yaml key: json only", set: "off", wantOn: false},
+		// the loader matches keys as encoding/json does, ignoring case
+		{name: "capitalized key still overrides", yaml: `Session_Teammate_Notes: "on"`, set: "off", wantErr: true, wantOn: true},
+		// and a null leaves config.json's value in force
+		{name: "null is no override", yaml: `session_teammate_notes: null`, set: "off", wantOn: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newTeammateHook(t, true)
 			body := "# repo settings\n"
 			if tt.yaml != "" {
-				body += "session_teammate_notes: \"" + tt.yaml + "\"\n"
+				body += tt.yaml + "\n"
 			}
 			require.NoError(t, os.WriteFile(filepath.Join(h.root, ".sageox", "config.yaml"), []byte(body), 0o600))
 

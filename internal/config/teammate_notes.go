@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Teammate notes: someone watching a live session on SageOx (a teammate, or the
@@ -126,13 +124,17 @@ func RepoYAMLTeammateNotes(projectRoot string) (value string, set bool, err erro
 	if err != nil {
 		return "", false, fmt.Errorf("read repo yaml config: %w", err)
 	}
-	var raw map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	// decided by the loader's own merge, so the key matching (encoding/json
+	// ignores case) and null handling (a null changes nothing) cannot drift
+	// from what LoadProjectConfig does. The sentinel tells an explicit ""
+	// (which does override) from no value at all.
+	const unset = "\x00unset"
+	cfg := ProjectConfig{SessionTeammateNotes: unset}
+	if err := mergeProjectConfigYAML(data, &cfg); err != nil {
 		return "", false, fmt.Errorf("parse repo yaml config: %w", err)
 	}
-	v, ok := raw["session_teammate_notes"]
-	if !ok {
+	if cfg.SessionTeammateNotes == unset {
 		return "", false, nil
 	}
-	return fmt.Sprint(v), true, nil
+	return cfg.SessionTeammateNotes, true, nil
 }
