@@ -36,7 +36,7 @@ func TestLiveFeatureOffAtOpenIsNeverRetriedNorResummarized(t *testing.T) {
 				return "a summary"
 			}
 			cnv := e.state().ConversationID
-			e.srv.RefuseNextOpen(http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
+			e.srv.RefuseNextOpens(1, http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
 
 			for range 3 {
 				e.live.Tick(t.Context())

@@ -1,9 +1,11 @@
 package livesession
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,7 +25,9 @@ const (
 	// closeRequestFileName marks that stop asked for the close. It is a file of
 	// its own, written without live.lock, because a drain may hold the lock for
 	// longer than stop can wait, and a drain persisting stream-state.json would
-	// overwrite a request written into it.
+	// overwrite a request written into it. Empty, it asks for whatever stream
+	// the folder holds; holding a ses_ id (RequestCloseOfEnded), only for that
+	// recording's (closeRequestedFor).
 	closeRequestFileName = "close-requested"
 	// deleteRequestFileName marks that abort let the session go. While it
 	// exists the session reads as deleted, so nothing spools, drains, opens or
@@ -300,14 +304,43 @@ func readState(dir string) (State, error) {
 		return State{}, fmt.Errorf("parse stream state: %w", err)
 	}
 	if !st.CloseRequested {
-		_, err := os.Stat(filepath.Join(dir, closeRequestFileName))
-		st.CloseRequested = err == nil
+		st.CloseRequested = closeRequestedFor(dir, st.SessionID)
 	}
 	if !st.ManualStop {
 		_, err := os.Stat(filepath.Join(dir, manualStopFileName))
 		st.ManualStop = err == nil
 	}
 	return st, nil
+}
+
+// closeRequestMaxBytes bounds the marker read: a ses_ id is 40 bytes, and the
+// folder sits in a checkout a Ledger contributor can write to, so a planted
+// marker must not be read whole.
+const closeRequestMaxBytes = 128
+
+// closeRequestedFor reports whether dir's close-requested marker asks for the
+// close of the recording sessionID's stream. An empty marker (RequestClose)
+// asks for whatever stream the folder holds. One naming a recording
+// (RequestCloseOfEnded) asks only for that one's: it is written without
+// live.lock, so the folder may already hold a recording restarted in the
+// same minute, and that stream must not be closed in its place. A marker that
+// exists but cannot be read counts as a request, as its mere presence did
+// before markers named anyone.
+func closeRequestedFor(dir, sessionID string) bool {
+	f, err := os.Open(filepath.Join(dir, closeRequestFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	b, err := io.ReadAll(io.LimitReader(f, closeRequestMaxBytes))
+	if err != nil {
+		return true
+	}
+	named := string(bytes.TrimSpace(b))
+	return named == "" || named == sessionID
 }
 
 // MarkManualStop records, with no network call and no lock, that the person

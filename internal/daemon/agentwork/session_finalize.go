@@ -773,7 +773,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
-					return h.clearStaleRecording(sessionDir, recPath, manual)
+					return h.clearStaleRecording(sessionDir, recPath, ledgerPath, manual)
 				})
 				if recoverErr != nil {
 					h.logStaleRecoveryDeferred(name, recoverErr)
@@ -1234,7 +1234,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err := holdIfRecordedManual(sessionDir); err != nil {
 						return err
 					}
-					return h.clearStaleRecording(sessionDir, recPath, manual)
+					return h.clearStaleRecording(sessionDir, recPath, ledgerPath, manual)
 				})
 				if recoverErr != nil {
 					h.warnOnce("orphan-recovery-deferred", name,
@@ -4334,19 +4334,22 @@ func holdIfRecordedManual(sessionDir string) error {
 // clearStaleRecording removes the .recording.json of a recording whose process
 // is gone, then requests the close of the live stream it leaves open: no stop
 // will close it, and an open stream reads as live on SageOx until the server's
-// 72 h auto-finish. The live sweep finishes the close on its next tick. None is
-// requested while the project publishes manually (manual): this pass may still
-// hold the session, and a held stream is deleted by the sweep's stopHeld, never
-// closed with a summary. The caller holds the raw.jsonl lock; the request takes
-// none (livesession.RequestCloseOfEnded). A failed request is logged, never a
+// 72 h auto-finish. The live sweep finishes the close on its next tick.
+//
+// None is requested for a session the v1 finalize would keep local: held in
+// any of the Ledger's cache locations (as the finalize decides it, by name), or
+// while the project publishes manually (manual), since this pass may still hold
+// it. A held stream is deleted by the sweep's stopHeld, never closed with a
+// summary. The caller holds the raw.jsonl lock; the request takes none
+// (livesession.RequestCloseOfEnded). A failed request is logged, never a
 // failed recovery: the v1 finalize must not wait on the live stream.
-func (h *SessionFinalizeHandler) clearStaleRecording(sessionDir, recPath string, manual bool) error {
+func (h *SessionFinalizeHandler) clearStaleRecording(sessionDir, recPath, ledgerPath string, manual bool) error {
 	// read before the remove: the marker names the recording the stream must belong to
 	rec, _ := session.ReadRecordingStateFile(sessionDir)
 	if err := os.Remove(recPath); err != nil {
 		return err
 	}
-	if rec == nil || manual {
+	if rec == nil || manual || session.IsHeldInLedger(ledgerPath, filepath.Base(sessionDir)) {
 		return nil
 	}
 	requested, err := livesession.RequestCloseOfEnded(sessionDir, rec.SessionID)

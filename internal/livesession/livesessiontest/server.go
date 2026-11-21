@@ -91,6 +91,7 @@ type Server struct {
 	appendRefusal    *reply
 	closeRefusal     *reply
 	openRefusal      *reply
+	openRefusals     int
 	reopenRefusal    *reply
 	deferRecovery    bool
 	rateLimit        int
@@ -307,10 +308,9 @@ func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
 		strings.TrimPrefix(req.SessionID, "ses_") != strings.TrimPrefix(cnv, "cnv_") {
 		return refusal(http.StatusBadRequest, sessionstream.ReasonInvalidRequest, sessionstream.ActionFix, nil)
 	}
-	if s.openRefusal != nil {
-		x := *s.openRefusal
-		s.openRefusal = nil
-		return x
+	if s.openRefusals > 0 {
+		s.openRefusals--
+		return *s.openRefusal
 	}
 	if req.Reopen && s.reopenRefusal != nil {
 		x := *s.reopenRefusal

@@ -184,8 +184,10 @@ func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Durati
 // It requests nothing for a held session (the sweep deletes its live copy with
 // stopHeld and never closes it with a summary), for another recording's
 // stream (the folder was reused), or for a stream already closing or ended.
-// Like RequestClose it takes no lock, so a drain in flight cannot lose it. It
-// reports whether a close was recorded.
+// Like RequestClose it takes no lock, so a drain in flight cannot lose it; the
+// marker names sessionID instead, so a recording restarted in the same minute
+// that takes the folder between the read below and the write is never closed
+// by it (closeRequestedFor). It reports whether a close was recorded.
 func RequestCloseOfEnded(dir, sessionID string) (bool, error) {
 	if sessionID == "" || oxsession.IsHeld(dir) {
 		return false, nil
@@ -200,8 +202,8 @@ func RequestCloseOfEnded(dir, sessionID string) (bool, error) {
 	if st.SessionID != sessionID || st.CloseRequested || (st.Status != StatusPending && st.Status != StatusStreaming) {
 		return false, nil
 	}
-	if err := RequestClose(dir); err != nil {
-		return false, err
+	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, closeRequestFileName), []byte(sessionID), 0o600); err != nil {
+		return false, fmt.Errorf("record close request: %w", err)
 	}
 	return true, nil
 }

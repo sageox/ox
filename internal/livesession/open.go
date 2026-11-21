@@ -61,8 +61,9 @@ func newState(cfg Config, cnv string, status Status, p OpenParams) State {
 // open session re-registers and re-opens on the same layer (both idempotent),
 // keeping the acknowledged offset. A key conflict writes status disabled and returns
 // ErrKeyConflict; an open answered "deleted" or "closed" records that final
-// status, and one refused as session_name_taken or feature_off records
-// disabled; any other failure leaves the state as it was (a fresh session then
+// status, and one refused as session_name_taken (or feature_off, unless an
+// earlier open was admitted) records disabled; any other failure leaves the
+// state as it was (a fresh session then
 // has none and simply does not stream).
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
 	cfg, err := cfg.withDefaults()
@@ -208,7 +209,8 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
 			return State{}, eerr
 		}
-		return openRefused(ctx, cfg, dir, st, err)
+		// on disk and past pending: an earlier open of this layer was admitted
+		return openRefused(ctx, cfg, dir, st, onDisk && !pending, err)
 	}
 	if pending {
 		st.Status = StatusStreaming
@@ -316,9 +318,10 @@ func openAnswered(ctx context.Context, cfg Config, dir string, st State, onDisk 
 // openRefused records an open answered "deleted" or "closed" exactly as the
 // same answer to an append is recorded, so a session someone deleted while its
 // open reply was lost is held, not published. An open refused as
-// session_name_taken or feature_off disables the stream. Any other failure
-// leaves the state as it was for a later attempt.
-func openRefused(ctx context.Context, cfg Config, dir string, st State, err error) (State, error) {
+// session_name_taken, or as feature_off for a stream the server never
+// admitted, disables the stream. Any other failure leaves the state as it was
+// for a later attempt. admitted: an earlier open of this layer succeeded.
+func openRefused(ctx context.Context, cfg Config, dir string, st State, admitted bool, err error) (State, error) {
 	var api *sessionstream.APIError
 	if errors.As(err, &api) {
 		s := &session{cfg: cfg, dir: dir, st: st}
@@ -329,16 +332,22 @@ func openRefused(ctx context.Context, cfg Config, dir string, st State, err erro
 		if done {
 			return s.st, nil
 		}
-		switch api.Body.Reason {
-		case sessionstream.ReasonSessionNameTaken, sessionstream.ReasonFeatureOff:
-			// Neither is worth a retry every tick, so the stream ends here.
-			// name_taken: another person owns this session name in this repo.
-			// feature_off: the rollout flag is off for this person though the
-			// client's settings cache (up to 2 h old) said on; api-go checks it
-			// on every open, and the next session asks again. A stopped stream
-			// would otherwise rerun the summary model before each retry.
-			// raw.jsonl and the v1 upload are untouched. Matched on the
-			// reason, not on action stop: other stop refusals keep the retry.
+		// Neither is worth a retry every tick, so the stream ends here.
+		// name_taken: another person owns this session name in this repo.
+		// feature_off: the rollout flag is off for this person though the
+		// client's settings cache (up to 2 h old) said on; api-go checks it on
+		// every open, and the next session asks again. A stopped stream would
+		// otherwise rerun the summary model before each retry. raw.jsonl and
+		// the v1 upload are untouched. Matched on the reason, not on action
+		// stop: other stop refusals keep the retry.
+		//
+		// Not feature_off for an admitted stream: api-go never re-checks the
+		// flag on its appends or close, and the SessionEnd hook's probe open
+		// is refused only for being an open. Disabled, the stream would never
+		// be closed and would read as live on SageOx until the auto-finish;
+		// left as it is, the hook requests the close and the daemon sends it.
+		if api.Body.Reason == sessionstream.ReasonSessionNameTaken ||
+			(api.Body.Reason == sessionstream.ReasonFeatureOff && !admitted) {
 			s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
 			return s.st, nil
 		}

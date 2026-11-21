@@ -66,3 +66,36 @@ func TestRequestCloseOfEndedRequestsOnlyThisRecordingsUnheldStream(t *testing.T)
 		})
 	}
 }
+
+// Failure prevented (review): the close request is written without live.lock,
+// so a recording restarted in the same minute could take the folder between
+// the ownership check and the write, and the daemon then closed that new,
+// still-active stream. The request names its recording and binds no other.
+func TestCloseRequestOfAnEndedRecordingNeverClosesTheNextOne(t *testing.T) {
+	e := newEnv(t)
+	e.spool(withPrompt(lines(0, 2)))
+	e.mustDrain()
+	if requested, err := livesession.RequestCloseOfEnded(e.dir, e.st.SessionID); err != nil || !requested {
+		t.Fatalf("requested = %v, %v; want the ended recording's close requested", requested, err)
+	}
+
+	// the same-minute restart: the ended stream's state goes, the next recording's arrives
+	if err := os.Remove(filepath.Join(e.dir, "stream-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	next := livesession.OpenParams{SessionID: sessionid.GenerateSessionID(), SessionName: "2026-03-04T13-41-person-a-Oxabc1", RepoID: "repo_test", Agent: "claude-code"}
+	if _, err := livesession.Prepare(t.Context(), e.cfg, e.dir, next); err != nil {
+		t.Fatal(err)
+	}
+
+	if st := e.state(); st.SessionID != next.SessionID || st.CloseRequested {
+		t.Fatalf("state = %+v; the next recording's stream must not read as closing", st)
+	}
+	// its own stop still asks for its close in the usual way
+	if err := livesession.RequestClose(e.dir); err != nil {
+		t.Fatal(err)
+	}
+	if !e.state().CloseRequested {
+		t.Fatal("the next recording's own close request was not recorded")
+	}
+}

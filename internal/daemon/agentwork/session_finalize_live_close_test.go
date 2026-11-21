@@ -9,14 +9,16 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // Failure prevented: an AI coworker died mid-recording, and the daemon's stale
 // or agent-exit finalize published the recording to the Ledger but never
-// closed its live stream, so SageOx showed the session live for 72 h. A held
-// session's stream is left to the live sweep's stopHeld, which deletes it.
+// closed its live stream, so SageOx showed the session live for 72 h. A
+// session the finalize keeps local (held in any cache location, or manual
+// publishing) gets no close: the live sweep's stopHeld deletes a held stream.
 func TestDetect_EndedRecordingRequestsItsLiveClose(t *testing.T) {
 	stale := time.Now().Add(-25 * time.Hour)
 	otherRecording := "ses_01934f3e-6b2a-7c3d-8e4f-5a6b7c8d9e99"
@@ -36,12 +38,14 @@ func TestDetect_EndedRecordingRequestsItsLiveClose(t *testing.T) {
 		recordedMode  string
 		projectMode   string
 		recordingID   string
+		heldElsewhere bool // a hold for the same session name in another cache location
 		wantRequested bool
 	}{
-		{"auto", "auto", "auto", liveTestSessionID, true},
-		{"recorded manual is held", "manual", "auto", liveTestSessionID, false},
-		{"project now manual", "auto", "manual", liveTestSessionID, false},
-		{"another recording's stream", "auto", "auto", otherRecording, false},
+		{"auto", "auto", "auto", liveTestSessionID, false, true},
+		{"recorded manual is held", "manual", "auto", liveTestSessionID, false, false},
+		{"project now manual", "auto", "manual", liveTestSessionID, false, false},
+		{"held in another cache location", "auto", "auto", liveTestSessionID, true, false},
+		{"another recording's stream", "auto", "auto", otherRecording, false, false},
 	}
 	for _, ep := range entryPoints {
 		for _, tc := range cases {
@@ -55,6 +59,11 @@ func TestDetect_EndedRecordingRequestsItsLiveClose(t *testing.T) {
 				require.NoError(t, err)
 				recPath := filepath.Join(f.cacheDir, recordingMarker)
 				require.NoError(t, os.WriteFile(recPath, rec, 0o644))
+				if tc.heldElsewhere {
+					dirs := session.HeldSessionDirs(f.ledgerPath)
+					require.Greater(t, len(dirs), 1, "an XDG cache location is scanned too")
+					hold(t, filepath.Join(dirs[1], f.name))
+				}
 				h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 				h.SetProjectRoot(projectWithPublishing(t, tc.projectMode))
 
