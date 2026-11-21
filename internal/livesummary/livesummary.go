@@ -152,7 +152,9 @@ const (
 )
 
 // promptSummary is the summary of a session no model summary covers: lead,
-// then the person's first prompts, in order. Nil when there is no prompt.
+// then the person's first prompts, in order. With no prompt to quote (none
+// typed, or every one withheld as a secret) it is the lead and a fixed line,
+// never nil: every close carries a summary.
 // The entries are what the stream carried (see the callers), so a prompt the
 // stream withheld as a secret is never copied here.
 func promptSummary(entries []sessionsummary.Entry, title, lead string) *sessionsummary.SummarizeResponse {
@@ -172,7 +174,7 @@ func promptSummary(entries []sessionsummary.Entry, title, lead string) *sessions
 		}
 	}
 	if len(prompts) == 0 {
-		return nil
+		return &sessionsummary.SummarizeResponse{Title: title, Summary: lead + " No prompt is available to quote."}
 	}
 	var b strings.Builder
 	b.WriteString(lead + " Asked:")

@@ -34,6 +34,12 @@ func liveConversationEntries(dir string, raw []map[string]any) []map[string]any 
 		return raw
 	}
 	stored, err := session.ReadSessionFromPath(filepath.Join(dir, "spool.jsonl"))
+	// Neither read takes a lock, and withhold saves the flag before it
+	// rewrites the spool: a state read after the spool read sees the flag
+	// whenever the spool already shows the rewrite.
+	if after, aerr := livesession.ReadState(dir); aerr == nil {
+		st = after
+	}
 	switch {
 	case st.SecretWithheld && err != nil:
 		return nil

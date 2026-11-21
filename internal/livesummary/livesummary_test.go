@@ -252,3 +252,17 @@ func TestABriefSessionsSummaryStaysUnderTheWireLimit(t *testing.T) {
 		t.Fatalf("summary is %d bytes, want far below the %d-byte wire limit", len(got), sessionstream.MaxSummaryBytes)
 	}
 }
+
+// Failure prevented (ox #2009 review): a close with no prompt to quote (an
+// assistant-only transcript, or every prompt withheld as a secret) carried no
+// summary at all. It carries the fixed brief line, quoting nothing.
+func TestAPromptlessCloseStillCarriesASummary(t *testing.T) {
+	entries := []sessionsummary.Entry{{Type: sessionsummary.EntryTypeAssistant, Content: "Hello."}}
+	got, err := Summarize(t.Context(), &fakeSummaryRunner{available: true}, "claude-code", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# Brief session") || !strings.Contains(got, "No prompt is available to quote.") {
+		t.Fatalf("summary = %q, want the fixed brief summary", got)
+	}
+}
