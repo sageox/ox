@@ -77,6 +77,16 @@ func TestSummarizeBounded(t *testing.T) {
 			want: "# Quick question", wantCalls: 1,
 		},
 		{
+			// a title alone would show no summary card: the body is what the
+			// person asked, under the model's title
+			name:    "a session the model skips with only a title keeps the title over its prompts",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: `{"title":"Upload retry question","quality_category":"skip"}`}, nil
+			}},
+			want: "# Upload retry question\n\nA routine session. Asked:\n- Please add a retry", wantCalls: 1,
+		},
+		{
 			// the model may leave a skip with no title or summary; the close
 			// still carries what the person asked
 			name:    "a session the model skips without text is summarized by its prompts",

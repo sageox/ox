@@ -110,11 +110,17 @@ func Summarize(ctx context.Context, runner agentwork.Runner, agent string, entri
 	if sessionsummary.IsSkipCategory(resp) {
 		// The model judged it not worth sharing, and may then leave out its
 		// title and summary. A live close still carries one: the model's own
-		// text when it wrote any, else what the person asked.
-		if md := Markdown(resp); md != "" {
-			return md, nil
+		// when it wrote a summary, else what the person asked under the
+		// model's title. A title alone is no summary: the viewer's card shows
+		// the body under the title, so it would show nothing.
+		if strings.TrimSpace(resp.Summary) != "" {
+			return Markdown(resp), nil
 		}
-		return markdownOrSkipped(promptSummary(entries, "Routine session", "A routine session."))
+		title := strings.TrimSpace(resp.Title)
+		if title == "" {
+			title = "Routine session"
+		}
+		return markdownOrSkipped(promptSummary(entries, title, "A routine session."))
 	}
 	md := Markdown(resp)
 	if md == "" {
