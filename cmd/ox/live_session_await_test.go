@@ -172,3 +172,37 @@ func TestLiveQuickResumeInTheSameFolderWaitsForTheMovedStream(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(seed)+resumedPrompt, string(f.srv.Stored(t, first.ConversationID, st.LayerID)))
 }
+
+// Failure prevented (ox #2002 review): a same-minute resume looked the
+// previous stream up while its close was in flight (Pending), the daemon then
+// finished the close and stashed it before the retire took the lock, and the
+// retire removed the closed stream's files. The second lookup found that ready
+// stash, but it names this same reused folder, so it was refused and the
+// resume opened a new conversation instead of the stashed one.
+func TestLiveSameFolderResumeTakesAStreamThatClosedBeforeTheRetire(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a hook-recorded session against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	first, _ := f.endedWhileSummarizing()
+	pending := &livesession.ReopenSource{Dir: f.dir(), State: first, Pending: true}
+
+	// the daemon's close lands first, then the retire finds it closed
+	res, err := livesession.Close(context.Background(), liveConfig(f.projectRoot), f.dir(), "# First", 5*time.Second)
+	require.NoError(t, err)
+	require.True(t, res.Done)
+	require.NoError(t, retirePreviousLiveStream(f.projectRoot, f.dir(), f.state.SessionID))
+
+	// named as the stash names it (resolved), as a hook in a real checkout does
+	resolved, err := filepath.EvalSymlinks(f.dir())
+	require.NoError(t, err)
+	next := *f.state
+	next.SessionID = sessionid.GenerateSessionID()
+	next.ContinuedFromSessionID = f.state.SessionID
+	next.SessionPath = resolved
+	pending.Dir = resolved
+	src := reopenSourceAfterRetire(f.projectRoot, &next, pending)
+	require.NotNil(t, src, "the stashed conversation was refused for naming the reused folder")
+	assert.False(t, src.Pending)
+	assert.Equal(t, first.ConversationID, src.State.ConversationID)
+}

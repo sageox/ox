@@ -223,8 +223,12 @@ func reopenSourceAfterRetire(projectRoot string, state *session.RecordingState, 
 	if src == nil || src.Dir != state.SessionPath {
 		return src
 	}
-	if moved := liveReopenSource(projectRoot, state); moved != nil && moved.Dir != state.SessionPath {
-		return moved
+	// A ready source is taken wherever it lives: the daemon may finish the
+	// close (and stash it) before the retire takes the lock, and that stash
+	// still names this reused folder. Only a source still closing must have
+	// moved to a sibling folder to be awaited.
+	if fresh := liveReopenSource(projectRoot, state); fresh != nil && (!fresh.Pending || fresh.Dir != state.SessionPath) {
+		return fresh
 	}
 	if src.Pending {
 		// a closing stream always moves out; not found again, there is
