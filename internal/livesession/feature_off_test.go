@@ -1,6 +1,7 @@
 package livesession_test
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/livesession/livesessiontest"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/sessionstream"
 )
@@ -114,6 +116,55 @@ func TestFeatureOffOnAnAdmittedStreamStillLetsItClose(t *testing.T) {
 	}
 	if _, ok := e.srv.ClosedWith(e.st.ConversationID); !ok {
 		t.Fatal("the server never saw the close")
+	}
+}
+
+// Failure prevented (review): an open was sent but never answered 200 here (its
+// reply was lost), so the layer may exist; the next open was refused
+// feature_off and the stream was disabled, leaving an admitted layer live on
+// SageOx until the auto-finish. The stream now asks its layer: an append lands
+// and the stream closes, or it is refused for good and the stream is disabled.
+func TestFeatureOffAfterAnUnansweredOpenLetsTheLayerSettleIt(t *testing.T) {
+	cases := []struct {
+		name       string
+		firstOpen  func(srv *livesessiontest.Server)
+		wantClosed bool
+	}{
+		{"the lost open was admitted", func(srv *livesessiontest.Server) { srv.DropOpenReply(1) }, true},
+		{"the earlier open created nothing", func(srv *livesessiontest.Server) { srv.RefuseOpen(1) }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cfg, dir, p := prepared(t)
+			batch := withPrompt(lines(0, 2))
+			if _, err := livesession.Spool(t.Context(), dir, batch, livesession.SpoolOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			tc.firstOpen(srv)
+			if _, err := livesession.Open(t.Context(), cfg, dir, p); err == nil {
+				t.Fatal("precondition: the first open must not be answered 200")
+			}
+			srv.RefuseNextOpens(1, http.StatusForbidden, sessionstream.ReasonFeatureOff, sessionstream.ActionStop)
+
+			st, err := livesession.Open(t.Context(), cfg, dir, p)
+			if err != nil || st.Status != livesession.StatusStreaming {
+				t.Fatalf("open = %+v, %v; want the stream to try its layer", st, err)
+			}
+			res, err := livesession.Close(t.Context(), cfg, dir, "", testBudget)
+			if err != nil || !res.Done {
+				t.Fatalf("close = %+v, %v; want it settled in one try", res, err)
+			}
+			_, closed := srv.ClosedWith(st.ConversationID)
+			if tc.wantClosed {
+				if res.Status != livesession.StatusClosed || !closed || !bytes.Equal(srv.Stored(t, st.ConversationID, st.LayerID), batch) {
+					t.Fatalf("close status %s, server closed=%v; want the admitted layer filled and closed", res.Status, closed)
+				}
+				return
+			}
+			if res.Status != livesession.StatusDisabled || closed || len(srv.Layers(st.ConversationID)) != 0 {
+				t.Fatalf("close status %s, server closed=%v; want disabled with nothing on the server", res.Status, closed)
+			}
+		})
 	}
 }
 
