@@ -1538,13 +1538,18 @@ func (d *Daemon) initComponents() time.Duration {
 	// starts before its Ledger clone and must still stream.
 	if cacheBase := paths.LedgerSessionCacheBase(config.GetRepoID(d.config.ProjectRoot), projectEndpoint); cacheBase != "" {
 		d.liveSessions = NewLiveSessions(d.logger, filepath.Join(cacheBase, "sessions"), endpoint.NormalizeEndpoint(projectEndpoint))
+		// one switch for both halves: what each open tells the server, and
+		// whether a note that still arrives is stored. Resolved per call and
+		// per session's checkout (see teammateNotesSwitch).
+		notesOn := teammateNotesSwitch(d.config.ProjectRoot)
+		d.liveSessions.acceptsNotes = notesOn
 		d.teammateComments = &teammateCommentInbox{
 			logger:       d.logger,
 			registry:     func() *WhisperRegistry { return d.whisperRegistry },
 			live:         func() *LiveSessions { return d.liveSessions },
 			recipientFor: agentRecordingDir(d.config.ProjectRoot, d.activeAgentIDs),
 			now:          time.Now,
-			enabled:      config.TeammateNotesEnabled,
+			enabled:      notesOn,
 		}
 		d.liveSessions.onTeammateComments = d.teammateComments.receive
 		d.liveSessions.drainShown = d.teammateComments.drainAllShown

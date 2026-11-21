@@ -117,6 +117,9 @@ type Server struct {
 	listFails                   bool
 	nameTaken                   bool
 	ackBodies                   []sessionstream.AckTeammateCommentsRequest
+	// openBodies is every open (PUT) body received, raw, so a test can tell
+	// an omitted field from a zero one.
+	openBodies [][]byte
 
 	inflight, maxInflight int
 
@@ -293,6 +296,7 @@ func (s *Server) registerKey(r *http.Request, body []byte, _ *Call) reply {
 }
 
 func (s *Server) open(r *http.Request, body []byte, _ *Call) reply {
+	s.openBodies = append(s.openBodies, append([]byte(nil), body...))
 	if s.refuseOpen > 0 {
 		s.refuseOpen--
 		return refusal(http.StatusServiceUnavailable, sessionstream.ReasonUnavailable, sessionstream.ActionRetry, nil)

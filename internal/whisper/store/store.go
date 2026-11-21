@@ -677,6 +677,16 @@ func (s *Store) PeekTeammateComments(agentID string, limit int) ([]WhisperEntry,
 	return s.peekTeammateComments(agentID, limit, false)
 }
 
+// PeekTeammateCommentsForConversation is PeekTeammateComments narrowed to the
+// notes sent to one conversation.
+func (s *Store) PeekTeammateCommentsForConversation(agentID, conversationID string, limit int) ([]WhisperEntry, error) {
+	if agentID == "" || conversationID == "" || limit <= 0 {
+		return nil, nil
+	}
+	return s.queryTeammateComments(`source = ? AND agent_id = ? AND json_extract(metadata, '$.conversation_id') = ? AND COALESCE(json_extract(metadata, '$.state'), '') != 'shown'`,
+		[]any{SourceTeammateComment, agentID, conversationID}, limit)
+}
+
 // PeekShownTeammateComments returns the notes already shown whose receipt is
 // still owed (see MarkTeammateCommentsShown), oldest first.
 func (s *Store) PeekShownTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
@@ -788,22 +798,41 @@ func (s *Store) DeleteTeammateComments(ids ...string) error {
 	return tx.Commit()
 }
 
-// TakeTeammateComments is Peek then Delete: a note is shown at most once.
-// Callers that must not consume a note before it can be acked use Peek and
-// Delete themselves.
+// TakeTeammateComments consumes up to limit of agentID's notes, oldest first:
+// each is returned at most once, however many callers race. Callers that must
+// not consume a note before it can be acked use Peek and Delete themselves.
 func (s *Store) TakeTeammateComments(agentID string, limit int) ([]WhisperEntry, error) {
 	entries, err := s.PeekTeammateComments(agentID, limit)
 	if err != nil || len(entries) == 0 {
 		return nil, err
 	}
-	ids := make([]string, len(entries))
-	for i, e := range entries {
-		ids[i] = e.ID
+	// a note is this caller's only if this caller's delete removed it: two
+	// callers can peek the same rows. One transaction, so a failure consumes
+	// nothing; it reads nothing before its first delete, so a racing caller
+	// waits for the write lock and then finds the rows gone.
+	tx, err := s.db.Load().Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	if err := s.DeleteTeammateComments(ids...); err != nil {
-		return nil, err
+	defer tx.Rollback()
+	taken := make([]WhisperEntry, 0, len(entries))
+	for _, e := range entries {
+		res, err := tx.Exec(`DELETE FROM whispers WHERE id = ? AND source = ?`, e.ID, SourceTeammateComment)
+		if err != nil {
+			return nil, fmt.Errorf("take teammate comment %s: %w", e.ID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("take teammate comment %s: %w", e.ID, err)
+		}
+		if n == 1 {
+			taken = append(taken, e)
+		}
 	}
-	return entries, nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("take teammate comments: %w", err)
+	}
+	return taken, nil
 }
 
 // RetainTeammateComments makes keep the whole pending set for one conversation:

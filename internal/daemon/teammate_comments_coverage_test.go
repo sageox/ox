@@ -144,7 +144,7 @@ func TestInboxLogsAndSkipsWhenTheStoreFails(t *testing.T) {
 	}
 	box.purgeSession(t.Context(), filepath.Base(e.dir))
 	box.drainAllShown(t.Context())
-	box.enabled = func() bool { return false }
+	box.enabled = func(string) bool { return false }
 	box.receive(t.Context(), e.dir, livesession.State{ConversationID: e.conv()}, nil) // off: drop, with a failing store
 }
 
@@ -223,7 +223,8 @@ func TestLeaseHandsOutAtMostFiveNotes(t *testing.T) {
 	}
 }
 
-// Foreign notes are dropped when the delete itself fails: the lease still works.
+// A lease never deletes another conversation's note, so even a store that
+// refuses every delete neither blocks the lease nor loses that note.
 func TestForeignNoteDropFailureDoesNotBlockTheLease(t *testing.T) {
 	e, box, store := newCommentEnv(t, "agent-a")
 	t.Cleanup(e.live.Wait)
@@ -232,6 +233,9 @@ func TestForeignNoteDropFailureDoesNotBlockTheLease(t *testing.T) {
 	defer unblock()
 	if got, err := box.lease(t.Context(), e.payload(5)); err != nil || len(got.Entries) != 0 {
 		t.Fatalf("lease = %+v, %v", got, err)
+	}
+	if ids := stillPending(t, store, "agent-a"); len(ids) != 1 {
+		t.Fatalf("pending = %v; the other conversation's note must stay", ids)
 	}
 }
 

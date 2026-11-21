@@ -47,8 +47,14 @@ const (
 	liveEndCloseBudget = 1500 * time.Millisecond
 )
 
+// liveConfig carries this repo's teammate-notes switch, the same one the daemon
+// and the hook read, so a stream the CLI opens (stop, abort, move) refuses
+// notes exactly when one the daemon opens would.
 func liveConfig(projectRoot string) livesession.Config {
-	return livesession.Config{Endpoint: endpoint.GetForProject(projectRoot)}
+	return livesession.Config{
+		Endpoint:     endpoint.GetForProject(projectRoot),
+		AcceptsNotes: func() bool { return config.TeammateNotesEnabled(projectRoot) },
+	}
 }
 
 // liveStreamingEnabled is C1: the server rollout flag is on and the project is
