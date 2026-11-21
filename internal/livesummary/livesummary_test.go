@@ -38,6 +38,8 @@ func summaryEntries() []sessionsummary.Entry {
 
 const liveSummaryJSON = `{"title":"Retry for the upload client","summary":"Added exponential backoff with jitter to the upload client so transient failures no longer fail a session upload, and kept the existing overall timeout as the outer bound.","key_actions":["Added backoff with jitter","Kept the overall timeout","Covered the retry path with tests"],"outcome":"success"}`
 
+const skipWithTextJSON = `{"title":"Quick question","summary":"Asked how the upload retry backs off; no code changed.","quality_category":"skip"}`
+
 func TestSummarizeBounded(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -58,10 +60,30 @@ func TestSummarizeBounded(t *testing.T) {
 			want: "# Retry for the upload client", wantCalls: 1,
 		},
 		{
-			name:    "trivial session is skipped before any model call",
+			// every close carries a summary: too thin for a model call, it
+			// gets the deterministic one the Ledger writes
+			name:    "trivial session gets the deterministic summary without a model call",
 			entries: summaryEntries()[:1],
 			runner:  &fakeSummaryRunner{available: true, run: nil},
-			want:    "", wantCalls: 0,
+			want:    "# Brief session", wantCalls: 0,
+		},
+		{
+			name:    "a session the model skips keeps the text the model wrote",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: skipWithTextJSON}, nil
+			}},
+			want: "# Quick question", wantCalls: 1,
+		},
+		{
+			// the model may leave a skip with no title or summary; the close
+			// still carries what the person asked
+			name:    "a session the model skips without text is summarized by its prompts",
+			entries: summaryEntries(),
+			runner: &fakeSummaryRunner{available: true, run: func(context.Context, agentwork.RunRequest) (*agentwork.RunResult, error) {
+				return &agentwork.RunResult{Output: `{"quality_category":"skip","score_reason":"a single routine question"}`}, nil
+			}},
+			want: "- Please add a retry to the upload client", wantCalls: 1,
 		},
 		{
 			name:    "runner error gives an empty summary",
