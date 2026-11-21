@@ -397,7 +397,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	// stream now, before the v1 upload below may prune this cache dir. Bounded by
 	// livesession.CloseBudget; a held (manual) session is deleted from the server
 	// instead, since nothing about it may leave the machine (C1).
-	liveFin := liveSessionFinish(projectRoot, state, result.Summary, livesession.CloseBudget)
+	liveFin := liveSessionFinish(projectRoot, state, func() string {
+		return liveCloseSummary(state, storedSession.Entries)
+	}, livesession.CloseBudget)
 
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {

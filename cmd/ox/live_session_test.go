@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/sessionstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,6 +171,16 @@ func (f *liveFixture) openAndDrain() livesession.State {
 	_, err = livesession.Drain(context.Background(), cfg, f.dir(), 5*time.Second)
 	require.NoError(f.t, err)
 	return f.liveState()
+}
+
+// daemonClose is what the daemon's tick does once a hook has requested the
+// close: finish it, with a summary.
+func (f *liveFixture) daemonClose(summary string) {
+	f.t.Helper()
+	require.True(f.t, f.liveState().CloseRequested, "precondition: the hook requested the close")
+	res, err := livesession.Close(context.Background(), liveConfig(f.projectRoot), f.dir(), summary, 5*time.Second)
+	require.NoError(f.t, err)
+	require.True(f.t, res.Done)
 }
 
 func (f *liveFixture) abort() {
@@ -594,7 +605,8 @@ func TestLiveRetiringAnEndedStreamKeepsItsOwedNotice(t *testing.T) {
 	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
 	t.Cleanup(func() { sendHookFinalizeIPC = orig })
 	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "clear"))
-	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the hook's close ended the stream")
+	f.daemonClose("")
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the daemon finished the close the hook requested")
 
 	require.NoError(t, retirePreviousLiveStream(f.projectRoot, f.dir(), f.state.SessionID))
 
@@ -619,4 +631,50 @@ func TestLiveSecretWithheldNoticeOnlyForAStreamThatWithheld(t *testing.T) {
 			assert.Equal(t, sessionStopGuidance, output.Guidance)
 		})
 	}
+}
+
+func TestLiveCloseKeepsTheStreamResumableAcrossCachePruning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("first task")
+	f.stop()
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the stop closed the stream")
+	sessions := filepath.Dir(f.dir())
+	// what PruneSessionCache does to a closed stream once push-summary publishes
+	require.NoError(t, os.RemoveAll(f.dir()))
+
+	src, err := livesession.FindReopenSource(t.Context(), liveConfig(f.projectRoot), sessions, f.state.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, src, "the next prompt must still resume the stopped conversation")
+	assert.Contains(t, string(src.Spool), "first task")
+}
+
+func TestLiveSameFolderResumeFollowsAMovedStream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: a full hook-recorded stop against the fake server")
+	}
+	f := newLiveFixture(t, liveOpts{streaming: true})
+	f.turn("before the secret")
+	f.openAndDrain()
+	markStreamWithheld(t, f.dir())
+	orig := sendHookFinalizeIPC
+	sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { return nil }
+	t.Cleanup(func() { sendHookFinalizeIPC = orig })
+	require.NoError(t, finalizeOrHoldOnHookStop(&HookContext{ProjectRoot: f.projectRoot}, f.state, "clear"))
+	f.daemonClose("")
+	require.Equal(t, livesession.StatusClosed, f.liveState().Status, "precondition: the daemon finished the close the hook requested")
+
+	// a restart within the minute: same folder, new recording id
+	next := &session.RecordingState{SessionID: sessionid.GenerateSessionID(), SessionPath: f.dir(), ContinuedFromSessionID: f.state.SessionID}
+	src := liveReopenSource(f.projectRoot, next)
+	require.NotNil(t, src)
+	require.Equal(t, f.dir(), src.Dir)
+	require.NoError(t, retirePreviousLiveStream(f.projectRoot, f.dir(), f.state.SessionID))
+	require.Len(t, f.owedLater(), 1, "precondition: retiring moved the stream to keep its owed notice")
+
+	src = reopenSourceAfterRetire(f.projectRoot, next, src)
+	_, err := livesession.PrepareReopen(t.Context(), liveConfig(f.projectRoot), f.dir(), livesession.OpenParams{SessionID: next.SessionID}, src)
+	require.NoError(t, err, "the moved stream's conversation must rebind to the new recording")
 }

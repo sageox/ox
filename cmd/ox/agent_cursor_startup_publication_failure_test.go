@@ -38,7 +38,7 @@ func TestCursorStartupPublishedErrorDoesNotReplayCompletedTurns(t *testing.T) {
 			original, err := os.ReadFile(path)
 			require.NoError(t, err)
 			var published *session.RecordingState
-			status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+			status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID,
 				func(root string, state *session.RecordingState) error {
 					if err := writeRawHeader(root, state); err != nil {
 						return err
@@ -100,7 +100,7 @@ func TestCursorStartupPublishedErrorDoesNotReplayCompletedTurns(t *testing.T) {
 			marker := prepareCursorStartupPrompt(t, f, "g2")
 			assert.Equal(t, int64(len(old+first)), marker.CursorSourceBoundary.Offset, "next prompt must select a fresh boundary")
 			assert.Equal(t, []string{"g2"}, marker.CursorSourceBoundary.PromptGenerations)
-			status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, marker.CursorSourceBoundary)
+			status = startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, marker.CursorSourceBoundary)
 			next, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
 			require.NoError(t, err)
 			if tc.failAssociation || tc.completed {
@@ -131,7 +131,7 @@ func TestCursorStartupUnpublishedErrorPreservesPendingBoundary(t *testing.T) {
 	old := cursorReviewTurn("OLD")
 	f.write(t, old)
 	initial := prepareCursorStartupPrompt(t, f, "g1")
-	status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+	status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID,
 		func(string, *session.RecordingState) error {
 			return errors.New("header write failed before publication")
 		}, initial.CursorSourceBoundary)
@@ -144,7 +144,7 @@ func TestCursorStartupUnpublishedErrorPreservesPendingBoundary(t *testing.T) {
 	assert.Empty(t, marker.CursorSourceBoundary.RecordingSessionID)
 	assert.Equal(t, initial.CursorSourceBoundary.Offset, marker.CursorSourceBoundary.Offset)
 	assert.False(t, session.HasExplicitStop(f.root, "Oxqueued"))
-	status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, marker.CursorSourceBoundary)
+	status = startSessionRecording(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, marker.CursorSourceBoundary)
 	require.NotNil(t, status)
 	require.True(t, status.Recording)
 	state, err = session.LoadRecordingStateForAgent(f.root, "Oxqueued")
@@ -169,7 +169,7 @@ func TestCursorStartupCompletedPublicationKeepsKnownIdentity(t *testing.T) {
 	}
 	// Split the production transaction at the association handoff to run the
 	// daemon's independent lifecycle deterministically between its two writes.
-	status := startSessionRecordingUnlocked(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, startup, initial.CursorSourceBoundary)
+	status := startSessionRecordingUnlocked(f.root, "Oxqueued", "cursor", inheritedParent{}, "", cursorConversationID, startup, initial.CursorSourceBoundary)
 	require.NotNil(t, status)
 	require.True(t, status.Recording)
 	require.NotNil(t, startup.startedState)

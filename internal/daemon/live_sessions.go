@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/livesummary"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionstream"
 )
 
 // Real-time session streaming, daemon side (ADR-247, shadow phase). Hooks only
@@ -42,7 +44,9 @@ const (
 	// liveStepStuckAfter: the longest a step can legitimately run is an open
 	// plus a drain, each bounded by liveDrainBudget (a close is shorter). An
 	// attempt older than that plus a tick is wedged where no budget reaches.
-	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval
+	// A close adds the bounded summary wait (livesession.SummaryBudget) before
+	// its own budget, so it counts too.
+	liveStepStuckAfter = 2*liveDrainBudget + liveTickInterval + livesession.SummaryBudget
 	// liveRulesRefreshInterval paces the background fetch of the current
 	// gitleaks catalog the live publication scan adds to the bundled one
 	// (livesession.RefreshSecretRules). Drains never wait on it. Fifteen minutes
@@ -68,6 +72,22 @@ type LiveSessions struct {
 	// refreshRules fetches the current secret rules and persists them for every
 	// publishing process; tests replace it.
 	refreshRules func(context.Context) error
+	// summarize writes the summary a close carries (see livesummary); tests
+	// replace it. It is bounded by livesession.SummaryBudget and returns ""
+	// when there is none.
+	summarize func(ctx context.Context, dir string, st livesession.State) string
+	// onTeammateComments receives the notes a drain returned; nil drops them
+	// (the server re-sends every undelivered one on the next append).
+	onTeammateComments func(ctx context.Context, dir string, st livesession.State, comments []sessionstream.TeammateComment)
+	// flushAcks, ackFlushBudget and ackFlushStart drive the closed sessions'
+	// receipt retries (flushOwedAcks); tests replace the first two.
+	flushAcks      func(ctx context.Context, cfg livesession.Config, dir string, budget time.Duration, now time.Time) (bool, error)
+	ackFlushBudget time.Duration
+	ackFlushStart  int
+	// drainShown logs the receipts of notes already shown (local work, no
+	// network) so the flush below can send them; set by the daemon.
+	drainShown       func(ctx context.Context)
+	ackFlushFailures sync.Map
 	// rulesFailing: the last rules refresh failed. Owned by the refresh loop.
 	rulesFailing bool
 
@@ -112,6 +132,9 @@ func NewLiveSessions(logger *slog.Logger, sessionsDir, endpoint string) *LiveSes
 		now:     time.Now,
 		running: map[string]*liveAttempt{}, rerun: map[string]bool{}, backoff: map[string]liveBackoff{},
 		known: map[string]liveKnown{},
+	}
+	l.summarize = func(ctx context.Context, dir string, st livesession.State) string {
+		return livesummary.ForStream(ctx, logger, dir, st)
 	}
 	// persisted in the data dir the drains read, so the CLI's stop-time close
 	// scans with the same rules as this daemon
@@ -183,6 +206,7 @@ func (l *LiveSessions) refreshRulesOnce(ctx context.Context) {
 // abort deletes.
 func (l *LiveSessions) Tick(ctx context.Context) {
 	seen := map[string]livesession.State{}
+	var closed []string
 	entries, err := os.ReadDir(l.sessionsDir)
 	if err == nil {
 		for _, e := range entries {
@@ -190,9 +214,14 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 				continue
 			}
 			dir := canonicalDir(filepath.Join(l.sessionsDir, e.Name()))
-			if st, err := livesession.ReadState(dir); err == nil && liveActive(st) {
+			st, err := livesession.ReadState(dir)
+			switch {
+			case err != nil:
+			case liveActive(st):
 				seen[dir] = st
 				l.request(ctx, dir)
+			case st.Status == livesession.StatusClosed:
+				closed = append(closed, dir)
 			}
 		}
 	}
@@ -205,6 +234,68 @@ func (l *LiveSessions) Tick(ctx context.Context) {
 	} else if n > 0 {
 		l.logger.InfoContext(ctx, "live_pending_deletes_confirmed", "confirmed", n)
 	}
+	// last, and bounded: a receipt for a finished session never delays live work
+	l.flushOwedAcks(ctx, closed)
+}
+
+const (
+	// liveAckFlushBudget is the whole tick's allowance for closed sessions'
+	// receipt retries, however many sessions owe one.
+	liveAckFlushBudget = 20 * time.Second
+	// liveAckFlushMax is how many sessions with receipts owed one tick works.
+	liveAckFlushMax = 4
+)
+
+// flushOwedAcks retries the delivery receipts closed streams still owe (the
+// sweep skips closed streams, so without this a receipt that failed around the
+// close would never reach the server). It runs after everything live in the
+// tick, under one budget, for at most liveAckFlushMax sessions per tick; the
+// starting point rotates, so a dead server cannot pin the same sessions first.
+// Each receipt is retried for a day (livesession).
+func (l *LiveSessions) flushOwedAcks(ctx context.Context, dirs []string) {
+	if l.drainShown != nil {
+		l.drainShown(ctx)
+	}
+	if len(dirs) == 0 {
+		return
+	}
+	budget := l.ackFlushBudget
+	if budget <= 0 {
+		budget = liveAckFlushBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	flush := l.flushAcks
+	if flush == nil {
+		flush = livesession.FlushTeammateAcks
+	}
+	start := l.ackFlushStart % len(dirs)
+	l.ackFlushStart++
+	attempts := 0
+	for i := range dirs {
+		if attempts >= liveAckFlushMax || ctx.Err() != nil {
+			return
+		}
+		dir := dirs[(start+i)%len(dirs)]
+		attempted, err := flush(ctx, l.config(l.endpoint), dir, liveDrainBudget, l.now())
+		if attempted {
+			attempts++
+		}
+		if err != nil {
+			l.reportAckFlushFailure(ctx, dir, err)
+		}
+	}
+}
+
+// reportAckFlushFailure logs a flush failure once per session and error: a
+// folder whose receipt log is oversized or unreadable fails the same way every
+// tick, and one line is the signal.
+func (l *LiveSessions) reportAckFlushFailure(ctx context.Context, dir string, err error) {
+	key := dir + "\x00" + err.Error()
+	if _, logged := l.ackFlushFailures.LoadOrStore(key, true); logged {
+		return
+	}
+	l.logger.WarnContext(ctx, "live_teammate_acks_flush_failed", "session", filepath.Base(dir), "error", err)
 }
 
 // trackSessionDirs reports, once, a streaming session whose folder vanished,
@@ -288,6 +379,11 @@ func (l *LiveSessions) Spooled(ctx context.Context, sessionDir string) {
 
 // Wait blocks until in-flight drains finish (shutdown and tests).
 func (l *LiveSessions) Wait() { l.wg.Wait() }
+
+// receiptsDir is the machine-local folder of one conversation's receipt logs.
+func (l *LiveSessions) receiptsDir(conversationID string) (string, error) {
+	return livesession.ReceiptsDir(l.config(l.endpoint), conversationID)
+}
 
 func (l *LiveSessions) trusted(path string) (string, bool) {
 	dir := canonicalDir(path)
@@ -391,6 +487,9 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		return
 	}
 	res, err := l.attempt(ctx, dir, st)
+	if res.TeammateCommentsListed && l.onTeammateComments != nil {
+		l.onTeammateComments(ctx, dir, st, res.TeammateComments)
+	}
 	switch {
 	case errors.Is(err, livesession.ErrKeyConflict):
 		log.WarnContext(ctx, "live_session_disabled", "reason", "key_conflict", "action", "run ox login to enroll a new signing key")
@@ -401,10 +500,12 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 		l.clearBackoff(dir)
 		log.DebugContext(ctx, "live_session_step_skipped", "reason", "awaiting_first_prompt")
 	case errors.Is(err, livesession.ErrUntrustedState):
-		// livesession logged it once at Error; nothing was sent, and a retry
-		// cannot change the answer, so no backoff and no line per tick
-		l.clearBackoff(dir)
-		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "error", err)
+		// livesession logged it once at Error; nothing was sent or summarized.
+		// Backed off, never cleared: a forged state is refused again at most
+		// once per backoff cap rather than every sweep, and a real stream
+		// caught mid-rebind still recovers on the next attempt.
+		delay := l.fail(dir, 0, started)
+		log.DebugContext(ctx, "live_session_step_skipped", "reason", "untrusted_state", "retry_in_ms", delay.Milliseconds(), "error", err)
 	case errors.Is(err, livesession.ErrEdgeBlocked):
 		// same backoff as any retryable failure; livesession logged the streak
 		// once at Error and logs when it clears, so a line per retry is noise
@@ -413,6 +514,11 @@ func (l *LiveSessions) step(ctx context.Context, dir string, started time.Time) 
 	case err != nil:
 		delay := l.fail(dir, res.RetryAfter, started)
 		log.WarnContext(ctx, "live_session_step_failed", "status", string(st.Status), "retry_in_ms", delay.Milliseconds(), "error", err)
+	case res.Done && st.AwaitReopen != nil:
+		// a continuation waiting on its predecessor's close: every tick until it
+		// resolves (up to the await deadline) would otherwise log at Info
+		l.clearBackoff(dir)
+		log.DebugContext(ctx, "live_session_step_done", "status_before", string(st.Status), "awaiting_reopen", true)
 	case res.Done:
 		l.clearBackoff(dir)
 		log.InfoContext(ctx, "live_session_step_done", "status_before", string(st.Status))
@@ -445,7 +551,30 @@ func (l *LiveSessions) stopHeld(ctx context.Context, dir string, st livesession.
 func (l *LiveSessions) attempt(ctx context.Context, dir string, st livesession.State) (livesession.DrainResult, error) {
 	cfg := l.config(l.endpoint)
 	if st.Status == livesession.StatusClosing || st.CloseRequested {
-		return livesession.Close(ctx, cfg, dir, "", livesession.CloseBudget)
+		// the summary runs the person's own model CLI over the spool, and this
+		// state may be a Ledger forgery that Close would refuse only after it:
+		// check provenance first, so a refused state never reaches the model
+		if err := livesession.VerifyProvenance(ctx, cfg, dir, st); err != nil {
+			return livesession.DrainResult{}, err
+		}
+		// every close carries a summary: a SessionEnd hook only requests the
+		// close (it has no time for the model), so this is where it is written
+		summary := ""
+		if l.summarize != nil {
+			summary = l.summarize(ctx, dir, st)
+		}
+		// the summary takes up to a minute: a hold placed meanwhile wins, so
+		// nothing is sent and the next step deletes the live copy (stopHeld)
+		if session.IsHeld(dir) {
+			l.logger.InfoContext(ctx, "live_session_summary_dropped", "session", filepath.Base(dir), "reason", "held_during_summary")
+			return livesession.DrainResult{}, nil
+		}
+		// tagged with the recording and conversation it was written for: a
+		// same-minute restart can retire this recording and prepare another in
+		// the folder while the model runs, and a close that finds another
+		// recording, or the stream on another conversation (a reopen resolved
+		// or fell back meanwhile), sends nothing of this one
+		return livesession.CloseOf(ctx, cfg, dir, st.SessionID, livesession.Summary{Text: summary, ConversationID: st.ConversationID}, livesession.CloseBudget)
 	}
 	if st.Status == livesession.StatusPending {
 		// bounded like a drain: a token refresh inside open is otherwise held only

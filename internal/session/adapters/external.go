@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/internal/envutil"
+	"github.com/sageox/ox/internal/mediapool"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 	"github.com/sageox/ox/pkg/ndjson"
@@ -296,22 +298,94 @@ func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry
 }
 
 // ReadFromOffsetWithContext is ReadFromOffset within the caller's lifetime and
-// a caller-chosen deadline, as ReadWithContext is for Read.
+// a caller-chosen deadline, as ReadWithContext is for Read. The deadline bounds
+// each adapter subprocess; ctx bounds the whole read.
+//
+// Why it reads in pages: every caller treats one ReadFromOffset as everything
+// up to the end of the transcript (a stop, a recovery and a finalize each make
+// one read and finalize from it), but one subprocess response cannot pass
+// oneShotOutputLimit. An adapter whose entries can outgrow that (pasted images,
+// whole tool outputs) ends its read early at a record boundary, and this loop
+// reads on from its cursor. Delete either half and a large catch-up either
+// fails on every retry with the cursor stuck, or a stop leaves the rest of the
+// session unread. The adapter half (adapterruntime.TailJSONLUntil) was removed
+// once already for looking redundant: the page tests here and the claude
+// adapter's TestCatchUpBacklogPagesUnderTheOutputLimit guard both halves.
 func (ea *ExternalAdapter) ReadFromOffsetWithContext(ctx context.Context, path string, offset int64, timeout time.Duration) ([]RawEntry, int64, error) {
+	entries, next, n, err := ea.readFromOffsetPage(ctx, path, offset, timeout)
+	if err != nil {
+		return nil, offset, err
+	}
+	if !pagedReadAdapters[CanonicalAdapterName(ea.Name())] {
+		return entries, next, nil
+	}
+	// the end of the read is the file as it stood when the read began: records
+	// appended after that are the next read's, as they were for a single read
+	end := int64(-1)
+	if info, statErr := os.Stat(path); statErr == nil {
+		end = info.Size()
+	}
+	pages, total, largest := 1, n, n
+	for next < end && pages < maxReadPages {
+		more, after, n, err := ea.readFromOffsetPage(ctx, path, next, timeout)
+		if err != nil {
+			// all or nothing, as one read was: the caller retries from offset
+			return nil, offset, err
+		}
+		if after < next {
+			// a cursor that moves back means the file changed under the read
+			// (replaced or rewritten): nothing read can be trusted to line up,
+			// so the whole read fails and the caller retries from offset
+			return nil, offset, fmt.Errorf("%w: page cursor moved back from %d to %d", ErrInvalidResponse, next, after)
+		}
+		if after == next {
+			break // only an unterminated record is left
+		}
+		entries = append(entries, more...)
+		next, pages, total, largest = after, pages+1, total+n, max(largest, n)
+	}
+	args := []any{"adapter", ea.Name(), "pages", pages, "entries", len(entries), "response_bytes", total, "largest_page_bytes", largest, "from_offset", offset, "to_offset", next, "file_size", end}
+	switch {
+	case pages >= maxReadPages && next < end:
+		// the cursor is exact, so nothing is skipped: the next read resumes here
+		slog.WarnContext(ctx, "adapter_read_paged", append(args, "outcome", "page_limit", "bytes_left", end-next)...)
+	case pages > 1:
+		slog.InfoContext(ctx, "adapter_read_paged", append(args, "outcome", "drained")...)
+	default:
+		slog.DebugContext(ctx, "adapter_read_paged", append(args, "outcome", "drained")...)
+	}
+	return entries, next, nil
+}
+
+// pagedReadAdapters are the adapters that end a read early to keep their
+// response under the output limit. Only their cursors are byte offsets into
+// the transcript the size check above can compare; another adapter's cursor
+// may count rows or messages (opencode, gemini), and it always reads to the end.
+var pagedReadAdapters = map[string]bool{"claude-code": true}
+
+// maxReadPages bounds one paged read. A page ends early only when the next
+// record would push the response past the adapter's budget (48 MiB for
+// claude-code), so even a backlog of a few GiB drains in far fewer pages; the
+// bound exists for an adapter whose cursor creeps forward a few bytes a page.
+const maxReadPages = 64
+
+// readFromOffsetPage is one read-from-offset subprocess call, returning the
+// response size for the read's summary log.
+func (ea *ExternalAdapter) readFromOffsetPage(ctx context.Context, path string, offset int64, timeout time.Duration) ([]RawEntry, int64, int, error) {
 	out, err := ea.execOneShotContext(ctx, timeout, "read-from-offset",
 		"--session-file", path,
 		"--offset", fmt.Sprintf("%d", offset),
 	)
 	if err != nil {
-		return nil, offset, err
+		return nil, offset, 0, err
 	}
 
 	var result adapterprotocol.ReadFromOffsetResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, offset, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+		return nil, offset, 0, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
-	return protocolToInternal(result.Entries), result.NewOffset, nil
+	return protocolToInternal(result.Entries), result.NewOffset, len(out), nil
 }
 
 // ImportSession reads an entire session by its native session ID.
@@ -802,9 +876,34 @@ func protocolToInternal(entries []adapterprotocol.RawEntry) []RawEntry {
 			ToolOutput: e.ToolOutput,
 			IsError:    e.IsError,
 			CallID:     e.CallID,
+			Media:      stageMedia(e.Media),
 		}
 	}
 	return result
+}
+
+// stageMedia moves a pasted image's bytes out of the entry and onto disk, where
+// the live session drain finds them by digest. The returned ref carries no
+// bytes, so they flow no further than here. An image that cannot be staged
+// becomes a skipped one, so the stream declares a gap instead of citing bytes
+// that never reach the server.
+func stageMedia(m *adapterprotocol.MediaRef) *adapterprotocol.MediaRef {
+	if m == nil {
+		return nil
+	}
+	ref := *m
+	ref.Data = nil
+	if m.Skipped != "" || len(m.Data) == 0 {
+		if ref.Skipped == "" {
+			ref.Skipped = adapterprotocol.MediaSkippedMalformed
+		}
+		return &ref
+	}
+	if err := mediapool.Put("", m.SHA256, m.Data); err != nil {
+		slog.Warn("media_stage_failed", "sha256", m.SHA256, "size", m.Size, "error", err)
+		ref.Skipped = adapterprotocol.MediaSkippedMalformed
+	}
+	return &ref
 }
 
 // Close shuts down any serve-mode process.

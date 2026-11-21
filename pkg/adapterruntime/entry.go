@@ -84,3 +84,13 @@ func ToolResultWithID(ts time.Time, toolOutput string, isError bool, callID stri
 		CallID:     callID,
 	}
 }
+
+// MediaEntry creates an entry for an image pasted into a user turn. It has no
+// Content: the bytes (or the reason they were skipped) ride in ref.
+func MediaEntry(ts time.Time, ref adapterprotocol.MediaRef) adapterprotocol.RawEntry {
+	return adapterprotocol.RawEntry{
+		Timestamp: fmtTimestamp(ts),
+		Role:      adapterprotocol.RoleMedia,
+		Media:     &ref,
+	}
+}

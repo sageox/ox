@@ -741,6 +741,7 @@ func handleAfterTool(ctx *HookContext) error {
 	// is discarded anyway, and handlePrompt remains its primary delivery.
 	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
 		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
+	deferredWhispers := false
 	switch {
 	case ctx.AgentType == "codex":
 		// Whispers must ride in Codex's PostToolUse JSON envelope. handleStop
@@ -756,22 +757,47 @@ func handleAfterTool(ctx *HookContext) error {
 		// text ahead of it would make the host drop both. Claude Code's
 		// model never reads Stop stdout anyway, so whispers stay pending
 		// for the next prompt.
+	case !pageNudged && teammateNotesApply(ctx):
+		// Claude Code's PostToolUse may carry teammate notes as its one JSON
+		// document, and that decision needs the post-capture entry count, so
+		// the plain-text fallback waits until the capture below has run.
+		deferredWhispers = true
 	case !pageNudged:
 		// emit pending whispers (fallback — primary delivery is handlePrompt)
 		emitWhispers(os.Stdout, agentID)
+	}
+	flushDeferredWhispers := func(notesDelivered bool) {
+		// stdout must be ONE document when notes were delivered: plain text
+		// beside the envelope makes the host drop both
+		if deferredWhispers && !notesDelivered {
+			emitWhispers(os.Stdout, agentID)
+		}
 	}
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: afterTool no recording state", "agentID", agentID, "err", err)
+		flushDeferredWhispers(false)
 		return nil // not recording for this agent, silent noop
 	}
 
 	// Serialize the read cursor and append transaction with the watcher and
 	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
-	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+	captureErr := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
 		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
 	})
+	// A teammate note is acked with the entry count the capture just reached,
+	// so it is taken only after a capture that succeeded.
+	notes := deferredWhispers && captureErr == nil && emitTeammateNotes(os.Stdout, ctx.ProjectRoot, agentID)
+	flushDeferredWhispers(notes)
+	return captureErr
+}
+
+// teammateNotesApply reports whether this hook call may deliver teammate notes:
+// Claude Code's PostToolUse only. Stop's stdout cannot carry the envelope, and
+// Codex's notes stay pending (see emitCodexAfterTool).
+func teammateNotesApply(ctx *HookContext) bool {
+	return ctx.AgentType == "claude-code" && ctx.Phase != phaseStop && ctx.Input != nil && config.TeammateNotesEnabled()
 }
 
 // captureHookEntries drains new entries under the raw.jsonl lock acquired by
@@ -1000,7 +1026,13 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 	if ctx.Marker != nil {
 		boundary = ctx.Marker.CursorSourceBoundary
 	}
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
+	// the same parent prime records, so a recording this safety net starts
+	// still knows which session's shell launched this agent
+	var parent inheritedParent
+	if agentID != "" {
+		parent = inheritedParentOf(ctx.ProjectRoot, agentID)
+	}
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, parent, recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
 
 	// Preserve native-session provenance for every observed startup.
 	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)

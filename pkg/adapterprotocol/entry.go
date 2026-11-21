@@ -15,6 +15,7 @@ var validRoles = map[string]bool{
 	RoleAssistant: true,
 	RoleSystem:    true,
 	RoleTool:      true,
+	RoleMedia:     true,
 }
 
 // EntryIssue describes a problem found during entry validation.
@@ -56,7 +57,7 @@ func (e *RawEntry) Check(index int) []EntryIssue {
 	if !validRoles[e.Role] {
 		issues = append(issues, EntryIssue{
 			Index: index, Field: "role", IsError: true,
-			Message: fmt.Sprintf("invalid role %q (expected user, assistant, system, or tool)", e.Role),
+			Message: fmt.Sprintf("invalid role %q (expected user, assistant, system, tool, or media)", e.Role),
 		})
 	}
 
@@ -77,6 +78,13 @@ func (e *RawEntry) Check(index int) []EntryIssue {
 			issues = append(issues, EntryIssue{
 				Index: index, Field: "content", IsError: false,
 				Message: fmt.Sprintf("%s entry has empty content", e.Role),
+			})
+		}
+	case RoleMedia:
+		if e.Media == nil {
+			issues = append(issues, EntryIssue{
+				Index: index, Field: "media", IsError: true,
+				Message: "media entry has no media",
 			})
 		}
 	case RoleTool:

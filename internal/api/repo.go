@@ -43,8 +43,8 @@ const (
 	sessionAbortedPath  = "/api/v1/sessions/%s/aborted"     // %s = session_id
 
 	// planActivityPath is the client half of the caller-driven plan_id -> plan
-	// index (bead sageox-gqgkg): the server endpoint currently accepts and
-	// drops the body (a stub) until a future change actually indexes it.
+	// index (bead sageox-gqgkg): the body names where the plan lives so a
+	// just-saved plan's link can resolve right away.
 	// %s, %s = team_id, plan_id.
 	planActivityPath = "/api/v1/teams/%s/plans/%s/activity"
 )
@@ -699,16 +699,23 @@ func (c *RepoClient) NotifySessionAborted(n SessionAbortedNotification) error {
 // PlanActivityNotification is the POST
 // /api/v1/teams/{team_id}/plans/{plan_id}/activity request body — the
 // client half of the caller-driven plan_id -> plan index (bead sageox-gqgkg).
-// Deliberately minimal (a stub): the server currently accepts and drops it
-// until a future change actually builds the index from it.
+// RepoID and Dir tell SageOx where in the Ledger the plan lives, so its link
+// can resolve as soon as the save is pushed.
+//
+// Only add fields the endpoint already accepts: a request with an unknown
+// field is answered 400, which drops the whole notification.
 type PlanActivityNotification struct {
-	Event  string `json:"event"`            // plan.EventKind value (approved/worked/realized/abandoned/superseded)
+	Event  string `json:"event"`            // plan.EventKind value (created/revised/approved/worked/realized/abandoned/superseded)
 	Status string `json:"status,omitempty"` // plan.PlanStatus, when the event carries one
 	// RepoID is the project's repo_ id, so the server's plan.created and
 	// plan.revised events say which repo the plan belongs to (repos per person
 	// and per team count from it). Sent alone it is a label; the server indexes
 	// a plan only when repo_id and dir both arrive.
 	RepoID string `json:"repo_id,omitempty"`
+	// Dir is the plan folder's base name under the Ledger's plans dir
+	// (YYYY-MM-DD-slug). With RepoID it names where the plan lives, so the
+	// server can index a just-saved plan without searching for it.
+	Dir string `json:"dir,omitempty"`
 }
 
 // NotifyPlanActivity best-effort-reports one appended plan lifecycle event to
@@ -743,7 +750,7 @@ func (c *RepoClient) NotifyPlanActivity(teamID, planID string, n PlanActivityNot
 		return fmt.Errorf("plan activity notification: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) // drain for connection reuse; the stub response body carries nothing useful
+	io.Copy(io.Discard, resp.Body) // drain for connection reuse; the 202 body carries nothing useful
 
 	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
 

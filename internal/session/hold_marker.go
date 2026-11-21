@@ -1,10 +1,12 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -29,7 +31,32 @@ import (
 // The marker lives only in a session's cache folder, never in the Ledger's
 // git-tracked sessions/ tree: the daemon commits whole session folders, so a
 // marker there would hold the session on every teammate's machine.
+//
+// Ordering with a live stream's summary: placing a hold and the automatic
+// summary send are mutually exclusive under the session folder's live.lock.
+// WriteHoldMarkerFor writes the marker holding live.lock, and a close checks
+// IsHeld under the same lock immediately before it sends a summary. So either the hold lands
+// first and the close sees it and sends none, or the send completes first and
+// the hold postdates it. A check made without the lock (the daemon's before it
+// summarizes) only saves work; the locked check is the one that decides. A
+// writer that cannot get the lock within holdLockWait writes the marker anyway
+// and logs: a hold is never lost, and only a close stuck past every budget can
+// still send. Code that already holds live.lock uses WriteHoldMarkerForLocked.
 const HeldMarkerFile = ".held"
+
+// LiveLockFileName is the name of a session folder's live.lock: the
+// per-folder lock every open, drain and close of its live stream holds, keyed
+// by <resolved folder>/live.lock (livesession.LockTarget). It lives here, not
+// in livesession, so the hold writer takes the very same lock; livesession
+// imports this package, never the reverse.
+const LiveLockFileName = "live.lock"
+
+// holdLockWait bounds a hold's wait for live.lock. It covers the longest a
+// close holds the lock while it can send a summary (livesession.CloseBudget,
+// 15 s): a hold that arrives mid-close waits the close out rather than timing
+// out into the very race the lock closes. Shorter only saves time on a close
+// that is already past every budget. A var so tests can shorten it.
+var holdLockWait = 15 * time.Second
 
 // ErrHoldInSharedTree is returned when a hold would be written into the
 // Ledger's git-tracked sessions/ tree.
@@ -69,8 +96,52 @@ func WriteHoldMarker(dir string, reason HoldReason, source string) error {
 }
 
 // WriteHoldMarkerFor is WriteHoldMarker for the recording sessionID, which the
-// marker records (see HoldInfo.SessionID).
+// marker records (see HoldInfo.SessionID). It takes the folder's live.lock
+// around the write (see HeldMarkerFile for the ordering rule),
+// so it must never run while this process holds that lock: flock is per open
+// file, and a second open of it waits out holdLockWait behind its own holder.
+// Such code calls WriteHoldMarkerForLocked.
 func WriteHoldMarkerFor(dir string, reason HoldReason, source, sessionID string) error {
+	if inSharedSessionsTree(dir) {
+		return fmt.Errorf("hold session %s: %w", dir, ErrHoldInSharedTree)
+	}
+	// already held, or not a folder: nothing the lock would order (the
+	// locked variant keeps the hold, or reports why it cannot)
+	if _, err := os.Lstat(filepath.Join(dir, HeldMarkerFile)); err == nil {
+		return WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+	}
+	// Taken whether or not the folder streams yet: checking for stream state
+	// first left a window in which Prepare creates it and a close passes its
+	// IsHeld check before the marker lands. The lock file lives in the shared
+	// lock directory (fileutil.LockPath), never in the session folder, so a
+	// folder that never streams gains nothing, and an uncontended lock costs
+	// no wait.
+	if holdLockAttempt != nil {
+		holdLockAttempt()
+	}
+	ran := false
+	var writeErr error
+	lockErr := fileutil.WithFileLockTimeout(context.Background(), liveLockTarget(dir), holdLockWait, func() error {
+		ran = true
+		writeErr = WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+		return nil
+	})
+	if ran {
+		return writeErr
+	}
+	slog.Warn("session_hold_without_live_lock", "session", filepath.Base(dir), "session_id", sessionID,
+		"reason", string(reason), "source", source, "wait_ms", holdLockWait.Milliseconds(),
+		"impact", "a close already holding the lock may still send its summary", "error", lockErr)
+	return WriteHoldMarkerForLocked(dir, reason, source, sessionID)
+}
+
+// WriteHoldMarkerForLocked is WriteHoldMarkerFor for a caller that already
+// holds dir's live.lock (a drain that hears the session was deleted on
+// SageOx). It never takes the lock itself.
+func WriteHoldMarkerForLocked(dir string, reason HoldReason, source, sessionID string) error {
 	if inSharedSessionsTree(dir) {
 		return fmt.Errorf("hold session %s: %w", dir, ErrHoldInSharedTree)
 	}
@@ -91,6 +162,21 @@ func WriteHoldMarkerFor(dir string, reason HoldReason, source, sessionID string)
 		return fmt.Errorf("write hold marker: %w", err)
 	}
 	return nil
+}
+
+// holdLockAttempt, nil in production, runs just before WriteHoldMarkerFor
+// asks for live.lock, so a test can tell the writer reached the lock.
+var holdLockAttempt func()
+
+// liveLockTarget is livesession.LockTarget(dir): live.lock is keyed by the
+// spelling of its path, so it is the folder's resolved path, or Clean when the
+// folder cannot be resolved, exactly as livesession resolves it. A hook naming
+// the folder through a symlink must contend with the daemon naming it directly.
+func liveLockTarget(dir string) string {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Join(r, LiveLockFileName)
+	}
+	return filepath.Join(filepath.Clean(dir), LiveLockFileName)
 }
 
 // IsHeld reports whether the session in dir is held. It fails closed: a marker

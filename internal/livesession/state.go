@@ -10,13 +10,16 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	oxsession "github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
 )
 
 const (
 	stateFileName = "stream-state.json"
 	spoolFileName = "spool.jsonl"
-	lockFileName  = "live.lock"
+	// the hold writer takes this same lock (session.WriteHoldMarkerFor), so
+	// the name lives in the session package
+	lockFileName = oxsession.LiveLockFileName
 	// closeRequestFileName marks that stop asked for the close. It is a file of
 	// its own, written without live.lock, because a drain may hold the lock for
 	// longer than stop can wait, and a drain persisting stream-state.json would
@@ -27,6 +30,12 @@ const (
 	// closes it. Like close-requested it is written without live.lock, because a
 	// drain or open may hold the lock far longer than abort can wait.
 	deleteRequestFileName = "delete-requested"
+	// manualStopFileName marks that the person ended this session with `ox
+	// session stop`. A manual stop is final: the session is never reopened,
+	// whatever prompts next in the same agent conversation. Like close-requested
+	// it is written without live.lock, before the stop's close, because a drain
+	// may hold the lock longer than stop can wait.
+	manualStopFileName = "manual-stop"
 	// spoolLostFileName logs committed bytes Spool could not write (EACCES,
 	// ENOSPC, a read-only volume, a lock or state failure), one line per loss.
 	// It is append-only and never removed: recording a loss takes no lock and
@@ -46,11 +55,15 @@ const (
 // IsLocalFile reports whether name is one of the live-stream files this package
 // keeps in a session folder. They are machine-local state (the spool duplicates
 // raw.jsonl; the rest are ids, offsets and markers), so anything that copies a
-// session folder into the Ledger must skip them.
+// session folder into the Ledger must skip them. The three teammate receipt logs
+// are listed although nothing writes them here any more (they live under the
+// data dir, see ReceiptsDir): one found in a folder is stale or planted, is
+// ignored by every reader, and must still never be copied into the Ledger.
 func IsLocalFile(name string) bool {
 	switch name {
-	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, deleteRequestFileName,
-		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName:
+	case spoolFileName, stateFileName, lockFileName, closeRequestFileName, manualStopFileName, deleteRequestFileName,
+		spoolLostFileName, spoolLostDeclaredFileName, noticeOwedFileName, mediaAttemptsFile,
+		teammateAcksFileName, teammateAcksSentFileName, teammateResendsFileName:
 		return true
 	}
 	return false
@@ -98,6 +111,40 @@ type State struct {
 	RepoID      string    `json:"repo_id,omitempty"`
 	Agent       string    `json:"agent,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitzero"`
+	// ParentSessionID and ContinuedFromSessionID are the session links every
+	// open sends (sessionstream.OpenSessionRequest). Kept here because the
+	// open usually runs later, in the daemon, when the parent's recording may
+	// already have ended.
+	ParentSessionID        string `json:"parent_session_id,omitempty"`
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
+
+	// Reopen marks a stream that resumes a conversation its person stopped:
+	// the first open is sent with reopen set, so the server adds a layer to
+	// the stopped conversation instead of minting one. Cleared once the
+	// server has taken the open.
+	Reopen bool `json:"reopen,omitempty"`
+	// SeedBytes is the length of the spool prefix copied from the stopped
+	// stream (Reopen only). It is the part of the stream already published
+	// once; a prompt in it does not count as one typed since the resume.
+	SeedBytes int64 `json:"seed_bytes,omitempty"`
+	// OwnSessionName and OwnStartedAt are this recording's own identity, kept
+	// while SessionName and StartedAt name the reopened conversation, so a
+	// refused reopen can stream the recording as a conversation of its own.
+	OwnSessionName string `json:"own_session_name,omitempty"`
+	// OwnHeader is this recording's raw.jsonl header line, kept so a refused
+	// reopen can finish its fallback after cache pruning removed raw.jsonl.
+	OwnHeader    string    `json:"own_header,omitempty"`
+	OwnStartedAt time.Time `json:"own_started_at,omitzero"`
+
+	// AwaitReopen is set on a pending stream that may yet reopen the
+	// conversation of the recording it continues, whose close had not
+	// finished when this one began (see ReopenAwait). Nothing opens the
+	// stream while it is set.
+	AwaitReopen *ReopenAwait `json:"await_reopen,omitempty"`
+
+	// ManualStop is set (from the manual-stop file) when the person stopped the
+	// session with `ox session stop`. Sticky: once persisted it stays.
+	ManualStop bool `json:"manual_stop,omitempty"`
 
 	// OpenSent is recorded before a pending session's first open request
 	// leaves this machine. The server may then hold the conversation even
@@ -256,7 +303,27 @@ func readState(dir string) (State, error) {
 		_, err := os.Stat(filepath.Join(dir, closeRequestFileName))
 		st.CloseRequested = err == nil
 	}
+	if !st.ManualStop {
+		_, err := os.Stat(filepath.Join(dir, manualStopFileName))
+		st.ManualStop = err == nil
+	}
 	return st, nil
+}
+
+// MarkManualStop records, with no network call and no lock, that the person
+// stopped the session in dir themselves, so it is never reopened (see
+// manualStopFileName). It is a no-op for a folder with no live stream.
+func MarkManualStop(dir string) error {
+	if _, err := readState(dir); err != nil {
+		if errors.Is(err, ErrNotStreaming) {
+			return nil
+		}
+		return err
+	}
+	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, manualStopFileName), nil, 0o600); err != nil {
+		return fmt.Errorf("record manual stop: %w", err)
+	}
+	return nil
 }
 
 func deleteRequested(dir string) bool {
