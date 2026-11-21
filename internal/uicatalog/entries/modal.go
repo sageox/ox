@@ -33,7 +33,7 @@ func init() {
 
 			items := []string{
 				hi("▸ ") + "Sync ledger             " + dim("ox sync"),
-				"  Sync without pushing    " + dim("ox sync --read-only"),
+				"  Sync all team contexts  " + dim("ox sync --all-teams"),
 				"  Open daemon logs        " + dim("ox daemon logs"),
 				"  Show sync status        " + dim("ox status"),
 			}

@@ -375,7 +375,7 @@ func TestDoctorFix_FirstRunTeamContextAlreadyBeingClonedIsCloning(t *testing.T) 
 	setupAuthRenderEnv(t, srv.URL, validTeamToken)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: repoID})
-	hostedTestGit(t, root, "init")
+	hermeticGit(t, root, "init")
 	t.Chdir(root)
 	holdPreCloneLock(t, paths.TeamContextDir(teamID, endpoint.GetForProject(root)))
 

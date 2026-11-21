@@ -49,21 +49,21 @@ func servePacedGitRepo(t *testing.T, blobBytes, bytesPerSec, stallAfter int) str
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
 	require.NoError(t, os.Mkdir(source, 0o700))
-	hostedTestGit(t, source, "init", "-b", "main")
-	hostedTestGit(t, source, "config", "user.name", "Test")
-	hostedTestGit(t, source, "config", "user.email", "test@example.invalid")
+	hermeticGit(t, source, "init", "-b", "main")
+	hermeticGit(t, source, "config", "user.name", "Test")
+	hermeticGit(t, source, "config", "user.email", "test@example.invalid")
 	// incompressible, so the pack is as large as the blob; seeded, so every
 	// run moves the same bytes
 	blob := make([]byte, blobBytes)
 	_, _ = rand.NewChaCha8([32]byte{'o', 'x'}).Read(blob)
 	require.NoError(t, os.Mkdir(filepath.Join(source, "sessions"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(source, "sessions", "history.bin"), blob, 0o600))
-	hostedTestGit(t, source, "add", "--all")
-	hostedTestGit(t, source, "commit", "-m", "seed Ledger history")
+	hermeticGit(t, source, "add", "--all")
+	hermeticGit(t, source, "commit", "-m", "seed Ledger history")
 	cloneBareRemote(t, source, filepath.Join(root, "ledger.git"))
 
 	backend := &cgi.Handler{
-		Path: filepath.Join(hostedTestGit(t, root, "--exec-path"), "git-http-backend"),
+		Path: filepath.Join(hermeticGit(t, root, "--exec-path"), "git-http-backend"),
 		Env:  []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"},
 	}
 	release := make(chan struct{})
@@ -480,4 +480,16 @@ func TestDirectLedgerCloneError_SaysWhatEndedTheClone(t *testing.T) {
 			assert.Equal(t, tt.want, err.Error())
 		})
 	}
+}
+
+// hermeticGit runs git in dir with no user or system git config, and returns
+// its trimmed output.
+func hermeticGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%v: %s", args, out)
+	return strings.TrimSpace(string(out))
 }

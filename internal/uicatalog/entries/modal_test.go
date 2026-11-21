@@ -21,12 +21,12 @@ func TestModalReferenceListsRealCommands(t *testing.T) {
 	text := ansi.Strip(entry.Render())
 	for _, command := range []string{
 		"ox sync",
-		"ox sync --read-only",
+		"ox sync --all-teams",
 		"ox daemon logs",
 		"ox status",
 	} {
 		// the command must end its row, so "ox synch" cannot pass for "ox sync"
-		// and the "ox sync --read-only" row cannot stand in for "ox sync"
+		// and the "ox sync --all-teams" row cannot stand in for "ox sync"
 		row := regexp.MustCompile(`\s` + regexp.QuoteMeta(command) + `\s*│`)
 		require.Regexp(t, row, text, "palette must list %q", command)
 	}

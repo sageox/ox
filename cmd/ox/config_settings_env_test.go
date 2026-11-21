@@ -16,47 +16,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Reject invalid selection before a handler runs, preserving each hosted-read
-// protocol and never opening a caller's local config on those isolated paths.
+// Reject an invalid --config selection before a handler runs.
 func TestConfigFileStartupRefusal(t *testing.T) {
 	noInputCLIEnv(t)
 	t.Setenv("DO_NOT_TRACK", "1")
-	for _, command := range []string{"config", "glance", "list", "git-credential-helper"} {
-		t.Run(command, func(t *testing.T) {
-			cmd := &cobra.Command{
-				Use:               command,
-				PersistentPreRunE: rootCmd.PersistentPreRunE,
-				SilenceErrors:     true,
-				SilenceUsage:      true,
-				Run: func(_ *cobra.Command, _ []string) {
-					t.Fatal("invalid configuration reached the command handler")
-				},
-			}
-			path := filepath.Join(t.TempDir(), "missing.yaml")
-			cmd.Flags().String("config", "", "")
-			cmd.Flags().String("repo", "", "")
-			cmd.Flags().String("read-repo", "", "")
-			args := []string{"--config", path, "--repo", readSyncTestRepoID, "--read-repo", readSyncTestRepoID}
-			cmd.SetArgs(args)
-			var stdout, stderr bytes.Buffer
-			cmd.SetOut(&stdout)
-			cmd.SetErr(&stderr)
-			err := cmd.Execute()
-			if command == "config" {
-				require.ErrorContains(t, err, "--config")
-				require.ErrorIs(t, err, os.ErrNotExist)
-			} else {
-				require.Equal(t, 2, exitCodeOf(t, err))
-				assert.NotContains(t, stderr.String(), path, "hosted reads must not inspect or report local config paths")
-			}
-			assert.Empty(t, stdout.String())
-			if command == "config" || command == "git-credential-helper" {
-				assert.Empty(t, stderr.String())
-			} else {
-				assert.Equal(t, "Ledger read failed: invalid_arguments\n", stderr.String())
-			}
-		})
+	cmd := &cobra.Command{
+		Use:               "config",
+		PersistentPreRunE: rootCmd.PersistentPreRunE,
+		SilenceErrors:     true,
+		SilenceUsage:      true,
+		Run: func(_ *cobra.Command, _ []string) {
+			t.Fatal("invalid configuration reached the command handler")
+		},
 	}
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	cmd.Flags().String("config", "", "")
+	cmd.SetArgs([]string{"--config", path})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "--config")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.Empty(t, stdout.String())
+	assert.Empty(t, stderr.String())
 }
 
 // Invalid selections must preserve the environment override; valid relative
@@ -147,8 +130,6 @@ func TestConfigFileCLI(t *testing.T) {
 		{name: "empty flag", selection: "empty", command: []string{"config", "set", "session_recording", "auto"}, wantError: "--config requires a file path"},
 		{name: "trace reads selected file", selection: "flag", command: []string{"session", "trace", "status", "--json"}},
 		{name: "trace rejects missing file", selection: "missing", command: []string{"session", "trace", "status", "--json"}, wantError: "--config"},
-		{name: "hosted glance refuses local config", selection: "flag", command: []string{"glance", "--repo", readSyncTestRepoID}, wantError: "Ledger read failed: invalid_arguments"},
-		{name: "hosted session list refuses local config", selection: "missing", command: []string{"session", "list", "--repo", readSyncTestRepoID}, wantError: "Ledger read failed: invalid_arguments"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			env := append(noInputCLIEnv(t), "FEATURE_TRACE=1")

@@ -378,7 +378,6 @@ func TestSyncHelp_NamesTheAddonCatalogBoundary(t *testing.T) {
 	require.Contains(t, long, "You should RARELY need this command")
 	require.Contains(t, long, "The background daemon automatically")
 	require.Contains(t, long, "The daemon syncs automatically on:")
-	require.Contains(t, long, "ledger-read-sync.md")
 
 	require.Contains(t, long, "Add-on-managed and hand-authored")
 	require.Contains(t, long, "does not check the Add-on Catalog")

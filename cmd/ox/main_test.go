@@ -162,7 +162,7 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 	}{
 		{"flush full output", []string{"release-notes", "--raw"}, "writable", 0},
 		{"unblock failed writer", []string{"release-notes", "--raw"}, "unwritable", 1},
-		{"preserve exit code", []string{"sync", "--read-only", "--json", "unexpected"}, "unwritable", 2},
+		{"preserve exit code", []string{"conversation", "list", "--since", "yesterday", "--json"}, "unwritable", 2},
 		{"quiet broken pipe", []string{"release-notes", "--raw"}, "closed_pipe", -1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

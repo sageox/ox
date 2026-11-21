@@ -63,8 +63,6 @@ files before running the command. User-level reads and writes use that file;
 `config set/unset --repo` and `--team` still target the current project's repo and
 team files. Setting-specific environment overrides such as `OX_SESSION_RECORDING`
 keep their existing priority over stored preferences.
-Hosted Ledger reads reject `--config`; they use the explicit endpoint and token
-contract described in [Ledger read sync](../specs/ledger-read-sync.md).
 
 The config file uses the same YAML format as `~/.config/sageox/config.yaml`:
 
