@@ -1,7 +1,7 @@
 package viz
 
 // VisualContract turns a catalog suggestion into construction-ready art
-// direction. The AI coworker supplies truthful engineering evidence; ox owns
+// direction. The AI teammate supplies truthful engineering evidence; ox owns
 // the canvas, hierarchy, geometry, and perceptual constraints. This is
 // intentionally more structured than Guidance: prose hints are easy to skim or
 // reinterpret, while these fields can be validated, rendered, and evaluated.

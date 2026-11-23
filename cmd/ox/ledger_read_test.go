@@ -277,7 +277,7 @@ func TestHostedReadersServeTheMaterializedLedger(t *testing.T) {
 	require.True(t, checked.Ready, "%+v", checked)
 }
 
-// Failure prevented: a hosted AI coworker that indexes code before its first
+// Failure prevented: a hosted AI teammate that indexes code before its first
 // ledger read leaves the code index at the checkout path, and from then on
 // every `ox sync --read-only` fails in about a second as "interrupted" — the
 // class a consumer retries — so the whole fleet retries forever and never
@@ -578,7 +578,7 @@ func TestHostedSessionListRendersATable(t *testing.T) {
 
 // Failure prevented: an auto-corrected hosted read ignores the --json choice
 // that was typed — a person gets the table after asking for JSON, an AI
-// coworker gets JSON after asking for the table. Planning the correction merges
+// teammate gets JSON after asking for the table. Planning the correction merges
 // root's --json into `session list`; the retry gives root a new --json, and
 // Cobra keeps parsing into the merged copy. The direct `session list` never
 // retries, so it never showed this.
@@ -590,7 +590,7 @@ func TestHostedSessionListKeepsTheJSONChoiceThroughAutoCorrection(t *testing.T) 
 		wantJSON bool
 	}{
 		{name: "a person asks for JSON", jsonFlag: "--json", wantJSON: true},
-		{name: "an AI coworker asks for the table", agent: true, jsonFlag: "--json=false"},
+		{name: "an AI teammate asks for the table", agent: true, jsonFlag: "--json=false"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -126,11 +126,11 @@ them.`,
 	{
 		Key:         "murmur_send",
 		Label:       "Send murmurs",
-		Description: "Whether AI coworkers are nudged to share work-in-progress signals with teammates.",
+		Description: "Whether AI teammates are nudged to share work-in-progress signals with teammates.",
 		LongDescription: `Controls work-in-progress signals to teammates.
 
 Murmurs are short coordination signals that let teammates know what
-AI coworkers are working on before PRs or commits appear. Signals
+AI teammates are working on before PRs or commits appear. Signals
 propagate via the ledger and are delivered as whispers to active
 coworkers.
 
@@ -144,7 +144,7 @@ coworkers.
 	{
 		Key:         "murmur_receive",
 		Label:       "Receive murmurs",
-		Description: "Whether teammates' work-in-progress signals reach your AI coworker.",
+		Description: "Whether teammates' work-in-progress signals reach your AI teammate.",
 		LongDescription: `Controls whether work-in-progress signals from other coworkers
 appear in your whisper stream.
 
@@ -170,7 +170,7 @@ When on, ox sends:
     as auth or network and which failure it was, named by ox's own
     wording or the error's type with no values filled in; how long
     it took; the ox version, OS, and CPU architecture; whether a
-    person, an AI coworker (and which one), or CI ran it; why ox
+    person, an AI teammate (and which one), or CI ran it; why ox
     runs in ephemeral mode, if it does; and, inside a repository set
     up for SageOx, the repository's and team's SageOx IDs. Events
     carry a random install ID from the client_id file in ox's config
@@ -178,7 +178,7 @@ When on, ox sends:
     production, they also carry your SageOx user ID. No names,
     emails or tokens are sent. Deleting client_id gives a new
     install ID, but does not change your person ID.
-  - To SageOx: command, session, and AI coworker events tagged with
+  - To SageOx: command, session, and AI teammate events tagged with
     the repository's SageOx ID; timing traces while you are logged
     in; and what was typed when ox cannot parse a command.
 
@@ -186,7 +186,7 @@ PostHog also receives context.used after a context-use trace is written:
 the reference only when it is a SageOx conversation, recording or plan
 ID, its fixed type, reported/none evidence, the recording session (only
 while one is recording and session_publishing is not manual; nothing is
-sent while a recording is paused) and AI coworker type, and
+sent while a recording is paused) and AI teammate type, and
 repository/team IDs when present. It receives murmur.published after a
 murmur is handed to the daemon or queued: its ID, importance, scope and
 team ID. Topic is general, wip, lint, architecture, conflict, or other;
@@ -220,7 +220,7 @@ When on:
   - The daemon runs no periodic auto-fix and no clone garbage collection.
   - The daemon restarts once the Ledger's first clone lands, so the work
     that needs a Ledger starts.
-  - A recording stores when its AI coworker's process started, so a
+  - A recording stores when its AI teammate's process started, so a
     process on a later machine that reuses the same PID is not taken
     for it.
   - Git commands that ox runs in its own clones (the Ledger, team
@@ -257,7 +257,7 @@ Turning tips off also silences the rare one-line ask to star ox on GitHub.`,
 		LongDescription: `Controls ox's row in Claude Code's status line.
 
 When enabled, the row counts the team context that influenced this AI
-coworker session — "● ox  3 discussions · 1 plan · 1 murmur" — with a red
+teammate session — "● ox  3 discussions · 1 plan · 1 murmur" — with a red
 "● rec" while the session records. Turn it off to remove the row.`,
 		Category:    "Display",
 		ValidValues: []string{"on", "off"},
@@ -321,9 +321,9 @@ Use instead:
 	{
 		Key:         "recap.trace_consultations",
 		Label:       "Trace consultations",
-		Description: "Record what your AI coworker read and which ox calls it made.",
+		Description: "Record what your AI teammate read and which ox calls it made.",
 		LongDescription: `Controls whether ox records, in your own session trace, which team
-knowledge your AI coworker consulted and which ox commands it ran (with the
+knowledge your AI teammate consulted and which ox commands it ran (with the
 size of what each returned). The trace syncs to your team's Ledger with the
 session, so this is the switch for whether your reads reach the team.
 
@@ -425,7 +425,7 @@ the ledger.`,
 	{
 		Key:         "agent.summarizer",
 		Label:       "Session summarizer",
-		Description: "Who writes the session summary at stop: your AI coworker, the background daemon, or nobody.",
+		Description: "Who writes the session summary at stop: your AI teammate, the background daemon, or nobody.",
 		LongDescription: `Selects who runs the LLM call that summarizes a session at stop.
 
   inline    — The calling agent (Claude Code, Cursor, etc.) runs the LLM
@@ -463,8 +463,8 @@ See ADR-016 for full rationale.`,
 	},
 	{
 		Key:         "agent_worker",
-		Label:       "Background AI coworker",
-		Description: "Which AI coworker CLI the daemon uses for background tasks, such as filling in missing summaries.",
+		Label:       "Background AI teammate",
+		Description: "Which AI teammate CLI the daemon uses for background tasks, such as filling in missing summaries.",
 		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
 session anti-entropy (generating missing summaries for orphaned sessions).
 
@@ -486,8 +486,8 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Key:         "session.teammate_notes",
 		Label:       "Live session notes",
 		Category:    "Sessions",
-		Description: "Let notes sent from the SageOx web app reach your AI coworker during a live session.",
-		LongDescription: `Controls whether notes sent from the SageOx web app reach your AI coworker
+		Description: "Let notes sent from the SageOx web app reach your AI teammate during a live session.",
+		LongDescription: `Controls whether notes sent from the SageOx web app reach your AI teammate
 at its next step while you stream a session live: your own notes, and a
 teammate's when you let teammates send them.
 
@@ -508,8 +508,8 @@ the next session starts streaming; notes already sent are dropped at once.`,
 	{
 		Key:         "recording_reminder",
 		Label:       "Recording reminders",
-		Description: "Periodically remind AI coworkers that the session is being recorded.",
-		LongDescription: `Controls whether AI coworkers receive periodic reminders
+		Description: "Periodically remind AI teammates that the session is being recorded.",
+		LongDescription: `Controls whether AI teammates receive periodic reminders
 that their session is being recorded.
 
   on  - Whisper recording status (turn count, duration) periodically (default)
@@ -606,7 +606,7 @@ from Claude Code's files, such as an API key, Bedrock or Vertex set only in
 your shell. Those sessions never load organization plugins, so without
 ox's copy they would have no team skills at all.
 
-Other AI coworkers (Codex, Cursor, ...) always get ox's copies.`,
+Other AI teammates (Codex, Cursor, ...) always get ox's copies.`,
 		Category:    "Skills",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",
@@ -615,8 +615,8 @@ Other AI coworkers (Codex, Cursor, ...) always get ox's copies.`,
 	{
 		Key:         "pr_visuals.rich",
 		Label:       "Rich PR visuals",
-		Description: "Guide AI coworkers to make rich images for pull requests.",
-		LongDescription: `Controls whether AI coworkers are guided to generate rich, review-only
+		Description: "Guide AI teammates to make rich images for pull requests.",
+		LongDescription: `Controls whether AI teammates are guided to generate rich, review-only
 PNG/SVG visuals for GitHub pull requests.
 
   on  - Offer and generate rich HTML/SVG-derived visuals for comparisons,
@@ -646,7 +646,7 @@ repository choice; repository choices override a team default.`,
   dark  - Dark canvas with SageOx accents. Use when the visual is intentionally
           presented as a distinct artifact.
 
-This affects the design brief given to AI coworkers; it does not change
+This affects the design brief given to AI teammates; it does not change
 GitHub's own color scheme. Set it at team, repository, or personal scope.`,
 		Category:    "Pull requests",
 		ValidValues: []string{config.PRVisualsThemeLight, config.PRVisualsThemeDark},
@@ -662,7 +662,7 @@ line — the human-facing counterpart to the SageOx-Session: trailer. It links t
 session(s) and plan(s) that produced the change, names the team, and whispers a
 subtle enrichment stat.
 
-  on  - Emit the credit line for AI coworker PRs. (default)
+  on  - Emit the credit line for AI teammate PRs. (default)
   off - Do not emit it; ox pr header no-ops with a hint.
 
 Set at team, repository, or personal scope. Personal choices override a
@@ -677,8 +677,8 @@ repository choice; repository choices override a team default.`,
 	{
 		Key:         "attribution.commit",
 		Label:       "Commit attribution",
-		Description: "Git trailer added to commits made with an AI coworker. Empty turns it off.",
-		LongDescription: `Controls the git trailer added to commits made with AI coworker assistance.
+		Description: "Git trailer added to commits made with an AI teammate. Empty turns it off.",
+		LongDescription: `Controls the git trailer added to commits made with AI teammate assistance.
 
 Any coding agent that touches your code and is deeply involved in the plan
 for execution is as much responsible for the resulting code as the human is.
@@ -747,7 +747,7 @@ redaction is non-negotiable, not a separate toggle.`,
 		Description: "Minimum SageOx contribution score (0.0 to 1.0) before a commit is attributed.",
 		LongDescription: `Controls the threshold at which SageOx earns commit attribution.
 
-AI coworkers self-report how much SageOx team context influenced their work
+AI teammates self-report how much SageOx team context influenced their work
 on a 0.0-1.0 scale. When the score meets or exceeds this threshold, the
 commit hook adds the Co-Authored-By trailer.
 

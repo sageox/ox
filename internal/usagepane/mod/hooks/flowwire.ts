@@ -80,7 +80,7 @@ export function isMcpName(tool: unknown): tool is string {
 }
 
 /**
- * withSent: an `out` start carrying the size of what the AI coworker sent:
+ * withSent: an `out` start carrying the size of what the AI teammate sent:
  * an MCP call's arguments as JSON, or a murmur post's command line when its
  * body is literally in it. Any other Bash `out` call sends what it names but
  * does not hold (a `--file`, the recorded session, a `$MESSAGE`, a backtick

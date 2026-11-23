@@ -172,7 +172,7 @@ func TestMCPHeadersRejectedArgumentsStayLocal(t *testing.T) {
 	}
 }
 
-// Failure prevented: an AI coworker looking for an MCP server under `ox mcp`
+// Failure prevented: an AI teammate looking for an MCP server under `ox mcp`
 // leaves no friction event, because the hidden group swallowed the signal.
 func TestMCPNonHelperInvocationsRecordFriction(t *testing.T) {
 	if runtime.GOOS == "windows" {

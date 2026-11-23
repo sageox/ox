@@ -9,7 +9,7 @@ import (
 
 // TestBuildExportOutput_CarriesPhilosophyAndGuidance verifies the JSON payload
 // always carries the ownership philosophy and agent guidance, and preserves the
-// ledger/team data it is handed. This is the contract an AI coworker consumes.
+// ledger/team data it is handed. This is the contract an AI teammate consumes.
 func TestBuildExportOutput_CarriesPhilosophyAndGuidance(t *testing.T) {
 	ledgers := []exportLedger{
 		{RepoID: "repo_abc", Path: "/data/sageox/example/ledgers/repo_abc", Symlink: ".sageox/ledger", Primary: true},
@@ -34,7 +34,7 @@ func TestBuildExportOutput_CarriesPhilosophyAndGuidance(t *testing.T) {
 		t.Errorf("philosophy missing walled-garden framing: %q", decoded.Philosophy)
 	}
 	if decoded.Guidance == "" {
-		t.Error("guidance must be non-empty so AI coworkers know how to reach the data")
+		t.Error("guidance must be non-empty so AI teammates know how to reach the data")
 	}
 	if !decoded.Synced {
 		t.Error("synced flag not preserved")

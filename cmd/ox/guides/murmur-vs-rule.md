@@ -6,7 +6,7 @@ audience: both
 
 # Murmur vs. Team Rule
 
-Both murmurs and team rules let you communicate with teammates' AI coworkers, but they sit at very different time horizons. Picking the wrong one is a common mistake.
+Both murmurs and team rules let you communicate with teammates' AI teammates, but they sit at very different time horizons. Picking the wrong one is a common mistake.
 
 ## Quick decision
 
@@ -20,7 +20,7 @@ Both murmurs and team rules let you communicate with teammates' AI coworkers, bu
 
 ## Murmurs
 
-`ox murmur` publishes a short coordination signal that other AI coworkers see for the next 24 hours, then automatically expires. Think of it as a "WIP whisper" to the team.
+`ox murmur` publishes a short coordination signal that other AI teammates see for the next 24 hours, then automatically expires. Think of it as a "WIP whisper" to the team.
 
 ```bash
 ox murmur --topic=wip "Rebuilding test fixtures in internal/testdb — APIs may flicker for ~30 min"
@@ -37,7 +37,7 @@ Murmurs are great for "don't pick up this code right now" or "I'm changing a con
 
 ## Team rules
 
-A team rule is a markdown file in `<team-context>/agents/rules/<topic>.md` that loads (or is cataloged) into every teammate's AI coworker session via `ox agent prime`. It persists indefinitely and applies to every supported AI coworker (Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc.) that any teammate uses.
+A team rule is a markdown file in `<team-context>/agents/rules/<topic>.md` that loads (or is cataloged) into every coworker's AI teammate session via `ox agent prime`. It persists indefinitely and applies to every supported AI teammate (Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc.) that any teammate uses.
 
 ```bash
 # clone or update your team-context repo
@@ -57,7 +57,7 @@ See `ox guide team-rules` for the file format.
 
 ## Common mistake: durable signal as a murmur
 
-If you find yourself murmuring the same thing every week ("reminder: integration tests must hit a real DB"), that's a rule, not a murmur. Promote it. The point of a rule is your AI coworker remembers it on your behalf.
+If you find yourself murmuring the same thing every week ("reminder: integration tests must hit a real DB"), that's a rule, not a murmur. Promote it. The point of a rule is your AI teammate remembers it on your behalf.
 
 ## Common mistake: transient state as a rule
 

@@ -31,7 +31,7 @@ func TestRunInit_StoppingEarlyFailsAndSaysWhy(t *testing.T) {
 		says     []string // what the person reads
 	}{
 		{
-			// No one there to choose, as for an AI coworker or a script: the
+			// No one there to choose, as for an AI teammate or a script: the
 			// endpoint picker takes its only offer, which has no login.
 			name:   "never logged in, endpoint picked for them",
 			repo:   createTestGitRepo,

@@ -44,7 +44,7 @@ func writeLedgerUsageSession(t *testing.T, ledgerPath, name string, mutate func(
 	return dir
 }
 
-// runOxUsage runs the real `ox session report` with args as the calling AI coworker.
+// runOxUsage runs the real `ox session report` with args as the calling AI teammate.
 func runOxUsage(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	resetUsageFlags(t)
@@ -175,7 +175,7 @@ func TestUsage_OutsideProjectFails(t *testing.T) {
 
 // TestUsage_HumanAndAgentOutput drives every view in both output modes.
 // Failure prevented: a coworker at a terminal gets JSON (or nothing), or an AI
-// coworker that omits --json gets text it cannot parse.
+// teammate that omits --json gets text it cannot parse.
 func TestUsage_HumanAndAgentOutput(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -212,7 +212,7 @@ func TestUsage_HumanAndAgentOutput(t *testing.T) {
 	}
 }
 
-// TestUsage_AgentContextDefaultsToJSON: an AI coworker that runs plain
+// TestUsage_AgentContextDefaultsToJSON: an AI teammate that runs plain
 // `ox session report` gets the JSON report without asking for it.
 func TestUsage_AgentContextDefaultsToJSON(t *testing.T) {
 	usageTraceEnv(t, nil)
@@ -229,14 +229,14 @@ func TestUsage_AgentContextDefaultsToJSON(t *testing.T) {
 
 // TestUsage_CurrentSessionScoreAndIdentity covers the current-session inputs
 // that do not come from the trace. Failure prevented: the SageOx score an AI
-// coworker recorded is dropped from its report, or a coworker with no
+// teammate recorded is dropped from its report, or a coworker with no
 // identity gets an empty report with no reason.
 func TestUsage_CurrentSessionScoreAndIdentity(t *testing.T) {
 	root := usageTraceEnv(t, nil)
 
 	in := usageInputForCurrentSession(root, "")
 	assert.Equal(t, usage.TraceSourceNone, in.TraceSource)
-	assert.Contains(t, in.TraceReason, "no AI coworker identity")
+	assert.Contains(t, in.TraceReason, "no AI teammate identity")
 
 	require.NoError(t, session.WriteSageoxScoreCategory(usageAgentID, session.ScoreSignificant, "used the plan"))
 	r := runOxUsageJSON(t)
@@ -301,7 +301,7 @@ func TestInvokedRefType(t *testing.T) {
 
 // TestUsageTraceWriter_Unwritable: when the trace destination cannot be
 // resolved or created, the writer is nil and nothing panics — the hook must
-// never fail an AI coworker's tool call over the usage trace.
+// never fail an AI teammate's tool call over the usage trace.
 func TestUsageTraceWriter_Unwritable(t *testing.T) {
 	t.Run("no agent id", func(t *testing.T) {
 		root := usageTraceEnv(t, nil)

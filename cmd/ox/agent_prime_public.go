@@ -19,7 +19,7 @@ import (
 )
 
 // Public prime: in a clone of an open-source project that is public on
-// SageOx, anyone's AI coworker starts with the project's public thinking
+// SageOx, anyone's AI teammate starts with the project's public thinking
 // instead of nothing: member or not where nobody initialized the repo, and an
 // outside contributor's where the project did.
 // Read-only: no registration, no team join, nothing written to the repo.
@@ -141,7 +141,7 @@ func writePublicPrime(cmd *cobra.Command, projectRoot string, bundle *api.Public
 	return err
 }
 
-// publicPrimeXML wraps the block for an AI coworker. The project's lines are
+// publicPrimeXML wraps the block for an AI teammate. The project's lines are
 // written by its members and by a model; they are escaped and fenced as data.
 // Public rules are fenced apart: a maintainer published them for contributors
 // to follow, the way a repository's own AGENTS.md is followed.
@@ -175,7 +175,7 @@ func publicPrimeXML(block, rules string, initialized bool) string {
 // renderPublicRules lays each public rule out under a "Rule:" heading, with
 // the paths it applies to when it is scoped. Empty when there are none.
 // publicRulesBudget keeps the whole public prime under Claude Code's hook
-// output cap, past which the AI coworker sees only a short preview. It leaves
+// output cap, past which the AI teammate sees only a short preview. It leaves
 // room for the fixed instructions around the block and the rules.
 const publicRulesBudget = claudeHookOutputCap - 1500
 
@@ -301,7 +301,7 @@ func renderPublicPrimeFor(p *api.PublicPrimeResponse, loc *time.Location, shallo
 }
 
 // teamIDPattern guards the team id before it goes into a command an AI
-// coworker may run: a server value, but never pasted unchecked.
+// teammate may run: a server value, but never pasted unchecked.
 var teamIDPattern = regexp.MustCompile(`^team_[a-z0-9]+$`)
 
 func writePublicPrimeLine(b *strings.Builder, label, text, url string) {

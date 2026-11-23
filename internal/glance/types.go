@@ -17,7 +17,7 @@ type SessionRecord struct {
 
 // MurmurRecord represents a single murmur with its associated file paths.
 // Two flavors exist:
-//   - topic="wip": AI coworker intent signal, free-text content, no Files
+//   - topic="wip": AI teammate intent signal, free-text content, no Files
 //   - topic="file-changes": daemon filesystem observation, structured content, has Files+Branch+Worktree
 type MurmurRecord struct {
 	ID         string    `json:"id"`

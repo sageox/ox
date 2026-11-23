@@ -6,13 +6,13 @@ description: >-
   `ox pr header` at PR-creation time; it renders a thin, on-brand, dark/light-aware
   single line linking the session(s), plan(s), and discussion(s) that produced the
   change and naming the team. The CLI owns the sanitizer-fragile markup — you never
-  hand-author it. Use when opening a PR for AI coworker work, or when the user says
+  hand-author it. Use when opening a PR for AI teammate work, or when the user says
   "add the SageOx header", "credit the session on the PR", or "/ox-cli-pr-header".
 ---
 
 **Run the command and follow the `guidance` field it returns.** This skill is a
 thin relay: the behavioral rules ship in `ox pr header --json`, so every AI
-coworker gets them from the live binary — not just the ones that install skills.
+teammate gets them from the live binary — not just the ones that install skills.
 
 ```bash
 ox pr header --json

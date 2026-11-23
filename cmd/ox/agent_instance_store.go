@@ -14,7 +14,7 @@ import (
 // instance store for projectRoot: the repository's main worktree, so every
 // linked worktree reads and writes one store.
 //
-// An AI coworker's commands do not all run in the checkout that primed it. The
+// An AI teammate's commands do not all run in the checkout that primed it. The
 // Claude desktop app starts Claude Code with --project-config-root set to the
 // main checkout, which runs hooks — and so `ox agent prime` — there, while the
 // coworker's shell works in a linked worktree under .claude/worktrees/. With a
@@ -57,7 +57,7 @@ func instanceStoreRoot(projectRoot string) string {
 
 // checkoutInstanceStore returns projectRoot's own instance store when the
 // shared store lives elsewhere and this checkout's store has a file. ox before
-// #1407 kept a linked worktree's instances there, and an AI coworker primed by
+// #1407 kept a linked worktree's instances there, and an AI teammate primed by
 // such a version must still resolve. Returns nil otherwise, so a lookup never
 // creates an empty store in the worktree.
 func checkoutInstanceStore(projectRoot, sharedRoot, userSlug string) *agentinstance.Store {

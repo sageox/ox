@@ -3,7 +3,7 @@ Feature: Publishing a Bulletin Post to the Team
   `ox bulletin post <file> --ttl 14d`. The SageOx server stores the post in the
   team's Team Context exactly as written, and it reaches every teammate's
   checkout on the next Team Context sync — Devon's laptop never writes it. The
-  board is a shared space where any human or AI coworker on the team posts
+  board is a shared space where any human or AI teammate on the team posts
   useful information; nobody reviews a post before it lands and posts age
   faster than raw sources, so priming frames them as teammates' notes rather
   than instructions.
@@ -163,7 +163,7 @@ Feature: Publishing a Bulletin Post to the Team
       And if it does not come back within about half a minute, ox reports the outage and says it is safe to rerun the same command
       And rerunning never creates a second post
 
-  Rule: Priming points AI coworkers at the board and frames how far to trust it
+  Rule: Priming points AI teammates at the board and frames how far to trust it
 
     Scenario: Avery primes in a repository whose Team Context has a bulletin board
       Given the local Team Context checkout for "Acme Engineering" contains a bulletin board folder

@@ -219,7 +219,7 @@ func writeRecentDiscussions(out io.Writer, discussionsDir string) []DiscussionIn
 	return discussions[:limit]
 }
 
-// teamCtxProvidedHits lists what team-ctx put in front of the AI coworker as
+// teamCtxProvidedHits lists what team-ctx put in front of the AI teammate as
 // surfaced items: the distilled team context (ref team-ctx/<slug>) first, then
 // the listed discussions newest first (ref = recording id, falling back to the
 // dir name; url = its /c/ link). Titles only — never the distilled text or a transcript.

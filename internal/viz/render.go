@@ -53,7 +53,7 @@ var vizRenderers = map[string]func([]byte) (string, error){
 //
 // On a render failure (usually a JSON-shape mismatch), the error echoes the
 // pattern's expected `param:` shape from the catalog so the caller — typically an
-// AI coworker driving ox from inside another agent — can self-correct in one shot
+// AI teammate driving ox from inside another agent — can self-correct in one shot
 // instead of guessing the schema. (Goose's Auto Visualiser, which has the agent
 // supply the full chart spec, documented exactly this failure mode with no shape
 // hint to recover from; ox supplies data only, and names the shape on a miss.)

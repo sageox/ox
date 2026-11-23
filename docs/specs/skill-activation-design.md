@@ -24,7 +24,7 @@ This insight comes from analyzing [beads PR #718](https://github.com/steveyegge/
 
 ### Why the three names are one boundary
 
-- **Thin-relay → cross-agent conformance.** Portable skills reach Claude, Codex, and Gemini through their native mechanisms, but commands and rules remain host-specific and some AI coworkers have no native skill mechanism. Floor behavior therefore still belongs in prime/CLI output; otherwise support depth depends on the host surface.
+- **Thin-relay → cross-agent conformance.** Portable skills reach Claude, Codex, and Gemini through their native mechanisms, but commands and rules remain host-specific and some AI teammates have no native skill mechanism. Floor behavior therefore still belongs in prime/CLI output; otherwise support depth depends on the host surface.
 - **Layer 1 → staleness safety.** Layer 1 is always the live binary; it cannot drift from the code. Installed native skills are lockfile-owned projections of `extensions/skills/` and are gitignored under the reserved `ox-cli-*` namespace (ADR-031). The Claude-only command surface no longer exists: it folded into slash-only skills carrying `disable-model-invocation: true`, so the same lifecycle affordances now reach every adapter with a skills root. A copied body **can** go stale; the binary's `guidance` **cannot**. Keeping floor behavior in Layer 1 minimizes rollout drift even though Doctor can now reconcile the complete skill tree.
 
 ### Author decision checklist
@@ -34,7 +34,7 @@ For each piece of content you are about to author, route it by the first matchin
 - **(a) Is this floor / behavioral guidance** — use-when triggers, post-command branching, error handling, consult cues? → It belongs in **Layer 1**: the ox subcommand's JSON `guidance` field, NOT the skill body.
 - **(b) Is it behavioral AND backed by a single ox subcommand?** → **Thin relay only.** The body is a pointer to `ox <subcommand> --json` plus a one-line description. No behavioral copy in the body.
 - **(c) Is it agent-side orchestration NOT backed by a single ox subcommand** — a Claude-specific rendering spec or a multi-step flow? → **Thickness is ALLOWED, and only here.** See the sanctioned examples below.
-- **(d) Could an AI coworker without this native surface need it?** → Then it **MUST** reach Layer 1, regardless of (a)–(c). Host-specific bodies cannot carry the product floor.
+- **(d) Could an AI teammate without this native surface need it?** → Then it **MUST** reach Layer 1, regardless of (a)–(c). Host-specific bodies cannot carry the product floor.
 
 ### Content kind → layer → mechanism
 

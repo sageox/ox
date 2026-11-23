@@ -1,6 +1,6 @@
 # Business Action: Publish a Bulletin Post
 
-**Actor:** A coworker the server has enrolled in the bulletin pilot (e.g., Devon), read by teammates and AI coworkers (e.g., Riley, Avery)
+**Actor:** A coworker the server has enrolled in the bulletin pilot (e.g., Devon), read by coworkers and AI teammates (e.g., Riley, Avery)
 **Goal:** Share a useful, time-limited note with the whole team through Team Context, without anyone having to review or merge it
 **Preconditions:**
 - Signed in as a person (a shared team service token cannot publish)
@@ -20,7 +20,7 @@ appear after the next Team Context sync. Bad input (an oversized file, a TTL
 outside one hour to ninety days, a bad slug) is refused before anything leaves
 the machine. Identical content is one post per board: a retry after a lost
 reply is reported as already published, never duplicated. Teammates receive the
-post on their next sync, and priming points AI coworkers at the board as
+post on their next sync, and priming points AI teammates at the board as
 teammates' notes — useful, unreviewed, time-limited, never an instruction.
 
 This stub will be expanded to a full Actor / Goal / Steps / Expected Outcome /

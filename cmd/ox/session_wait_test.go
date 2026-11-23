@@ -292,7 +292,7 @@ func TestSessionWait_ReportsEverySessionTheDaemonDidNotUpload(t *testing.T) {
 	assert.NotContains(t, tree, "sessions/"+waiting+"/meta.json", "wait uploads nothing itself")
 	assert.NotContains(t, tree, "sessions/"+stranded+"/meta.json", "wait pushes nothing itself")
 	for name, reason := range map[string]string{
-		crashed:     "AI coworker exited without ending the session; waiting for the daemon",
+		crashed:     "AI teammate exited without ending the session; waiting for the daemon",
 		live:        "still recording",
 		quarantined: "held for ownership review",
 		waiting:     "waiting for the daemon to upload it",
@@ -329,7 +329,7 @@ func TestSessionWait_OnlyReportsWhereNoDaemonUploads(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 30*time.Second, "wait has nothing to wait for")
 	assert.Equal(t, []sessionWaitFailure{
-		{Session: crashed, Error: "AI coworker exited without ending the session; run ox agent OxGone2 session recover"},
+		{Session: crashed, Error: "AI teammate exited without ending the session; run ox agent OxGone2 session recover"},
 		{Session: waiting, Error: "not uploaded; run ox session upload " + waiting},
 	}, out.Failed)
 	assert.NotContains(t, remoteTree(t, f.barePath), "sessions/"+waiting+"/meta.json")

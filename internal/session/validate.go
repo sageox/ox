@@ -76,7 +76,7 @@ func ValidateCapturePriorInput(reader io.Reader) (*CapturedHistory, error) {
 
 // validateCapturePriorMeta checks a capture-prior header. Only schema_version is required:
 // CapturePrior takes a missing agent_id from its command line and defaults source, so an AI
-// coworker following an older or shorter example is not refused.
+// teammate following an older or shorter example is not refused.
 func validateCapturePriorMeta(meta *HistoryMeta) (*HistoryMeta, error) {
 	if meta.SchemaVersion == "" {
 		return nil, fmt.Errorf("%w: schema_version", ErrHistoryInvalidMeta)

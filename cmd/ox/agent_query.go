@@ -238,7 +238,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 }
 
 // writeAndTraceQueryResponse writes the response, then records each team and
-// local hit as a surfaced item in the AI coworker's session trace.
+// local hit as a surfaced item in the AI teammate's session trace.
 func writeAndTraceQueryResponse(combined *combinedQueryResponse, qa *queryArgs, projectRoot, agentID string) (int, error) {
 	n, err := writeQueryResponse(combined, qa, agentID)
 	if err == nil {
@@ -273,7 +273,7 @@ func queryProvidedHits(combined *combinedQueryResponse) []providedHit {
 	return hits
 }
 
-// queryUseGuidance tells the AI coworker how to report a hit it acts on.
+// queryUseGuidance tells the AI teammate how to report a hit it acts on.
 func queryUseGuidance(agentID string) string {
 	if agentID == "" {
 		agentID = "<id>"

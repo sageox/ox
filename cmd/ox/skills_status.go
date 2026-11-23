@@ -38,8 +38,8 @@ import (
 // skillsCmd is the parent for `ox skills …`.
 var skillsCmd = &cobra.Command{
 	Use:   "skills",
-	Short: "Inspect the skills your AI coworkers have",
-	Long: `Inspect and manage the skills your AI coworkers have here.
+	Short: "Inspect the skills your AI teammates have",
+	Long: `Inspect and manage the skills your AI teammates have here.
 
 Skills reach a repository from three places: the ones ox itself ships, the ones
 your team publishes to its Team Context, and the ones you wrote yourself. "list"
@@ -171,7 +171,7 @@ const (
 type teamSkillStatus struct {
 	Name string `json:"name"`
 	// InstalledAs is the DIRECTORY the skill occupies, which is also the name an
-	// AI coworker types to invoke it — `fork-scout` is published as
+	// AI teammate types to invoke it — `fork-scout` is published as
 	// `fork-scout-team`. Reporting only the team-side name left a reader with a
 	// name that does not resolve anywhere.
 	InstalledAs   string `json:"installed_as,omitempty"`
@@ -245,7 +245,7 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	// unconditionally told someone with a corrupt lockfile to run `ox init` on a
 	// repository that is already initialized — the one action that cannot help.
 	if !selected && desiredErr == nil {
-		out.Problems = append(out.Problems, "this repository has not selected an AI coworker, so no skills are installed — run `ox init`")
+		out.Problems = append(out.Problems, "this repository has not selected an AI teammate, so no skills are installed — run `ox init`")
 	}
 	// A slug that fell back to the directory name matches no `repos:` filter, so
 	// every targeted team skill silently vanishes. Saying so is the whole point:
@@ -511,7 +511,7 @@ func withoutString(values []string, drop string) []string {
 	return out
 }
 
-// skillsStatusGuidance is the single next action, for an AI coworker reading the
+// skillsStatusGuidance is the single next action, for an AI teammate reading the
 // JSON. One action, not a menu: a list of things that might help is a list the
 // caller has to triage, which is the work this command exists to have already done.
 func skillsStatusGuidance(out skillsStatusOutput) string {
@@ -793,7 +793,7 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		section("Team skills", "%s", trustSummary(out.Summary))
 		for _, s := range out.TeamSkills {
 			// The INSTALLED name, when there is one: that directory is what an AI
-			// coworker actually types, and it is the fact a reader came here for.
+			// teammate actually types, and it is the fact a reader came here for.
 			// Printing the team-side name alone handed them a name that resolves
 			// nowhere — `fork-scout` is invoked as `fork-scout-team`.
 			label := s.Name

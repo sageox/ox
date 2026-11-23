@@ -342,7 +342,7 @@ func TestSendInvites_EveryAddressCarriesTheResolvedRoleAndTeamRef(t *testing.T) 
 // created-invite id/expiry survive into the outcome.
 //
 // Failure prevented: --json emits `"status":"sent"` with no invite_id, so an
-// AI coworker or script has nothing to correlate against later.
+// AI teammate or script has nothing to correlate against later.
 func TestSendInvites_SentOutcomeCarriesTheServersInviteMetadata(t *testing.T) {
 	sender := &recordingSender{reply: func(email string) (*api.InviteResponse, error) {
 		return &api.InviteResponse{ID: "inv_123", Email: email, ExpiresAt: "2026-08-14T00:00:00Z"}, nil
@@ -479,7 +479,7 @@ func TestSendInvites_MapsEveryServerSentinelToItsStatus(t *testing.T) {
 // arm doesn't swallow diagnostic detail.
 //
 // Failure prevented: an unmapped 5xx renders as a bare "failed" with no
-// message, leaving the user (and any AI coworker reading --json) with nothing
+// message, leaving the user (and any AI teammate reading --json) with nothing
 // to act on.
 func TestSendInvites_UnknownErrorPreservesTheServersMessage(t *testing.T) {
 	sender := &recordingSender{reply: func(string) (*api.InviteResponse, error) {
@@ -679,7 +679,7 @@ func TestInviteResult_HasFailureMatchesTheExitContract(t *testing.T) {
 // the exit decision can never disagree.
 //
 // Failure prevented: the JSON summary reports `"failed": 0` while the command
-// exits 1 (or vice versa) — an AI coworker branching on the summary reaches the
+// exits 1 (or vice versa) — an AI teammate branching on the summary reaches the
 // opposite conclusion from a shell branching on `$?`.
 func TestInviteResult_CountsAgreeWithHasFailure(t *testing.T) {
 	all := []inviteStatus{
@@ -698,7 +698,7 @@ func TestInviteResult_CountsAgreeWithHasFailure(t *testing.T) {
 }
 
 // ============================================================================
-// J. renderInviteResult — the --json contract AI coworkers branch on
+// J. renderInviteResult — the --json contract AI teammates branch on
 // ============================================================================
 
 // documentedInviteStatuses is the closed set published in invite.go's contract.
@@ -725,7 +725,7 @@ func mixedInviteResult() inviteResult {
 // TestRenderInviteResult_JSONCarriesTheDocumentedEnvelope pins every top-level
 // key and the closed status set.
 //
-// Failure prevented: a field gets renamed or dropped and every AI coworker /
+// Failure prevented: a field gets renamed or dropped and every AI teammate /
 // script that parses `ox invite --json` breaks silently — the command still
 // exits 0, so nothing surfaces the breakage until someone notices nobody got
 // invited.
@@ -756,7 +756,7 @@ func TestRenderInviteResult_JSONCarriesTheDocumentedEnvelope(t *testing.T) {
 		status, ok := row["status"].(string)
 		require.True(t, ok, "result %d needs a string status", i)
 		assert.True(t, documentedInviteStatuses[status],
-			"result %d status %q is outside the documented closed set — AI coworkers branch on these", i, status)
+			"result %d status %q is outside the documented closed set — AI teammates branch on these", i, status)
 	}
 
 	assert.Equal(t, api.RoleAdmin, generic["role"])
@@ -820,7 +820,7 @@ func TestRenderInviteResult_JSONSummaryArithmeticMatchesTheOutcomes(t *testing.T
 //
 // Failure prevented: a server error message containing a quote or a newline
 // gets concatenated into the output and `ox invite --json | jq` fails, which
-// for an AI coworker looks like the command produced nothing at all.
+// for an AI teammate looks like the command produced nothing at all.
 func TestRenderInviteResult_JSONIsStillValidWithHostileFieldContent(t *testing.T) {
 	res := inviteResult{
 		Team: inviteTarget{Ref: `team"with'quotes`, ID: "team_1", Name: "Acme \"Corp\"\n", Slug: "acme"},
@@ -1205,7 +1205,7 @@ func TestRenderInviteResult_TextIsReadableWithNoColor(t *testing.T) {
 // TestInviteGuidance_TellsAnAgentWhatToDoNext covers the agent-facing field.
 //
 // Failure prevented: --json guidance omits the actionable next step for a
-// recoverable outcome, so an AI coworker retries the identical failing command
+// recoverable outcome, so an AI teammate retries the identical failing command
 // (or gives up) instead of correcting the address or lowering the role.
 func TestInviteGuidance_TellsAnAgentWhatToDoNext(t *testing.T) {
 	tests := []struct {
@@ -1240,7 +1240,7 @@ func TestInviteGuidance_TellsAnAgentWhatToDoNext(t *testing.T) {
 // idempotent-re-run wording.
 //
 // Failure prevented: guidance says "Exit code is 1" on a run that exits 0,
-// teaching an AI coworker to treat a successful no-op as a failure and retry
+// teaching an AI teammate to treat a successful no-op as a failure and retry
 // forever.
 func TestInviteGuidance_ReRunOfAnAlreadyInvitedBatchDoesNotClaimFailure(t *testing.T) {
 	res := inviteResult{
@@ -1551,7 +1551,7 @@ func TestRunInvite_InvalidRoleFailsBeforeAnythingIsSent(t *testing.T) {
 // TestRunInvite_NoAddressesInNonInteractiveModeFailsFast guards the agent path.
 //
 // Failure prevented: with no addresses and no TTY the command falls into the
-// interactive prompt and blocks forever — an AI coworker or CI job hangs
+// interactive prompt and blocks forever — an AI teammate or CI job hangs
 // instead of getting a usage error.
 func TestRunInvite_NoAddressesInNonInteractiveModeFailsFast(t *testing.T) {
 	_, log := newInviteCommandHarness(t, []inviteReply{{status: http.StatusCreated, body: createdInviteBody}})
@@ -1712,7 +1712,7 @@ func TestRunInvite_JSONOutputParsesEndToEnd(t *testing.T) {
 //
 // Failure prevented: `ox invite alice@acme.com --json` against a SageOx server
 // that predates CLI invitations invites nobody and exits 0 — so a provisioning
-// script or AI coworker records the onboarding step as done. The text path
+// script or AI teammate records the onboarding step as done. The text path
 // returns cli.ErrSilent correctly; --json must behave identically, since the
 // exit code is the ONLY signal a caller shares between the two modes.
 func TestRunInvite_UnsupportedServerExitsNonZero(t *testing.T) {
@@ -1841,7 +1841,7 @@ func TestRunInvite_PartialAbortJSONIsSingleEnvelope(t *testing.T) {
 // TestRunInvite_ModeFlagsNeverSilentlySwallowAddresses guards the mode split.
 //
 // Failure prevented: `ox invite alice@acme.com --list` (a plausible slip, or an
-// AI coworker composing flags) resolves as a listing, prints a table of
+// AI teammate composing flags) resolves as a listing, prints a table of
 // outstanding invitations, exits 0 — and alice is never invited. The user has
 // every reason to believe she was. The same applies to --cancel, and to the two
 // mode flags used together.
@@ -1975,7 +1975,7 @@ func TestRenderInviteList_FitsIn80Columns(t *testing.T) {
 }
 
 // Failure prevented: --json drifting from the documented shape that AI
-// coworkers parse, or the expiry being reported without the machine-readable
+// teammates parse, or the expiry being reported without the machine-readable
 // timestamp alongside the human one.
 func TestRenderInviteList_JSONCarriesIDsAndExpiry(t *testing.T) {
 	var buf bytes.Buffer

@@ -103,7 +103,7 @@ Only content inside ` ```redact ` blocks is parsed. Everything else is documenta
 ### How It Works
 
 Custom rules are applied automatically during session recording alongside
-built-in patterns. Your AI coworker can verify rules are working by using
+built-in patterns. Your AI teammate can verify rules are working by using
 the redaction policy API during a session.
 
 If you find a secret type that should be redacted but isn't, please

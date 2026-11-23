@@ -18,7 +18,7 @@ install: seed-repo.sh
 
 tests:
   # The user's problem only, as the README states it: humans repeat themselves
-  # and AI coworkers rebuild the same lost context every session.
+  # and AI teammates rebuild the same lost context every session.
   - name: zero-start
     prompt: >-
       Every coding session my AI agent starts from zero. My team keeps

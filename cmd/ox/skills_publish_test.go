@@ -245,7 +245,7 @@ func TestSkillsPublish_PromotesLocalSkillIntoTeamContext(t *testing.T) {
 
 	var got skillsChangeOutput
 	require.NoError(t, json.Unmarshal([]byte(out), &got), "output was not JSON: %q", out)
-	require.NotEmpty(t, got.Guidance, "AI coworkers need the next action in JSON")
+	require.NotEmpty(t, got.Guidance, "AI teammates need the next action in JSON")
 	requireAdviceResolves(t, got.Guidance)
 	require.Equal(t, team, got.TeamContext)
 	require.Equal(t, []skillChangeRow{{
@@ -309,7 +309,7 @@ func TestSkillsPublish_RefusesAnythingItCannotSafelyOwnOrCopy(t *testing.T) {
 	}{
 		{"block repos would widen scope", "repos:\n  - acme/install-test\n", "inline list"},
 		{"hidden skill would not publish", "visibility: hidden\n", "prevents this skill"},
-		{"human skill would not reach coworkers", "audience: human\n", "prevents AI coworkers"},
+		{"human skill would not reach coworkers", "audience: human\n", "prevents AI teammates"},
 		{"draft skill would not publish", "status: draft\n", "prevents this skill"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

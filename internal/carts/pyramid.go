@@ -6,7 +6,7 @@ import (
 )
 
 // Pyramid holds multi-resolution summaries for progressive disclosure.
-// AI coworkers scan L2 (2 words) for hundreds of items, then zoom into
+// AI teammates scan L2 (2 words) for hundreds of items, then zoom into
 // L4/L8/L16 only for items that need attention.
 //
 // Inspired by StrongDM's "Pyramid Summaries" technique for agentic factories.

@@ -187,7 +187,7 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 
 	// after every bubble has been cloned/pulled into its canonical XDG
 	// path, refresh this project's ergonomic symlinks so editors and AI
-	// coworkers can see them at <project>/.sageox/kb/team/<slug>. The
+	// teammates can see them at <project>/.sageox/kb/team/<slug>. The
 	// reconciler is idempotent and safe to call when nothing changed.
 	s.reconcileOwnProjectSymlinks(ctx, bubbles)
 }

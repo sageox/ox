@@ -143,7 +143,7 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 			;; \
 	esac; \
 	ox_cmd="'$$(printf '%s' "$$ox_bin/$(BINARY_NAME)" | sed "s/'/'\\\\''/g")'"; \
-	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
+	printf 'Next: run `%s doctor` to confirm your AI teammate can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
 	@$(call resolve-install-bin,install); \

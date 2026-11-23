@@ -49,7 +49,7 @@ func detectedSkillTargets(repoRoot string) ([]adapterprotocol.SkillTarget, error
 //
 // The catalog stays declarative and this is where policy lives, mirroring
 // syncFeatureGatedCommands for commands. Without the gate, `ox-cli-cart*`
-// installed for everyone and taught an AI coworker to drive `ox carts`, which
+// installed for everyone and taught an AI teammate to drive `ox carts`, which
 // refuses when FEATURE_CARTS is off — a skill pointing at a wall.
 //
 // Turning the feature off is not just a no-op for future installs: the cart

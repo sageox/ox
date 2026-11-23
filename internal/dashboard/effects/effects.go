@@ -37,7 +37,7 @@ type Client interface {
 	// Returns nil, nil on any filesystem error.
 	ListTeamDiscussions() ([]domain.TeamDiscussion, error)
 
-	// ListInstances returns active AI coworker instances from the daemon.
+	// ListInstances returns active AI teammate instances from the daemon.
 	// Returns nil, nil when the daemon is offline.
 	ListInstances() ([]daemon.InstanceInfo, error)
 

@@ -249,7 +249,7 @@ func TestRunPlanFeedbackShow_Empty(t *testing.T) {
 // TestReviewJSON_ConflictingCopiesAreNotComplete: a round stored twice with
 // differing content makes `ox plan feedback show --json` and `ox plan review
 // await` report complete=false with the conflict listed. Failure prevented:
-// an AI coworker trusts complete=true and acts on one copy's items while the
+// an AI teammate trusts complete=true and acts on one copy's items while the
 // other copy's are hidden.
 func TestReviewJSON_ConflictingCopiesAreNotComplete(t *testing.T) {
 	_, dir := saveFeedbackTestPlan(t, "twice-json")

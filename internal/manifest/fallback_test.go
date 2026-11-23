@@ -54,7 +54,7 @@ func TestFallbackConfigFor_TeamContext(t *testing.T) {
 // onto every machine; a pattern that is not root-anchored would match a
 // same-named path nested anywhere. Both are one careless edit away.
 //
-// Failure prevented: expired posts silently reaching every AI coworker's
+// Failure prevented: expired posts silently reaching every AI teammate's
 // Team Context checkout because the fallback include widened to the board root.
 func TestComputeSparseSet_TeamContextFallbackScopesBulletinToPosts(t *testing.T) {
 	t.Parallel()

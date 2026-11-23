@@ -92,7 +92,7 @@ func TestSessionList_HeldCopyOfAPublishedSessionIsListedAsHeld(t *testing.T) {
 	}
 }
 
-// Failure prevented: an AI coworker running agent doctor is told nothing about
+// Failure prevented: an AI teammate running agent doctor is told nothing about
 // sessions the coworker keeps on this machine, or is nudged to publish them
 // without being asked (GH #1095).
 func TestBuildAgentDoctorOutput_ReportsHeldSessionsWithoutPublishing(t *testing.T) {

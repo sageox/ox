@@ -1,6 +1,6 @@
 # CodeDB Agent Discoverability
 
-Investigation into why AI coworkers (Claude Code, Cursor, Codex, Windsurf) rarely
+Investigation into why AI teammates (Claude Code, Cursor, Codex, Windsurf) rarely
 reach for `ox code …` even when it would help, plus ranked recommendations and
 concrete proposed patches.
 

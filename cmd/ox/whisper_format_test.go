@@ -673,7 +673,7 @@ func TestFormatWhispers_MetadataFiles_NonMurmurEntry(t *testing.T) {
 
 // TestFormatWhispers_EntryIDIsCitable pins that every entry carries its id,
 // escaped as data, and that the murmur framing names the exact command to
-// cite it with. Failure prevented: an AI coworker that a murmur helped has no
+// cite it with. Failure prevented: an AI teammate that a murmur helped has no
 // id to report, or a hostile id breaks out of its attribute.
 func TestFormatWhispers_EntryIDIsCitable(t *testing.T) {
 	tests := []struct {

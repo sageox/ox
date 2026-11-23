@@ -140,7 +140,7 @@ func TestConverge_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
 	require.False(t, report.Converged())
 	require.Len(t, report.Outcomes, 1)
 	require.Equal(t, StatePending, report.Outcomes[0].State)
-	require.Contains(t, report.Outcomes[0].Detail, "active AI coworker session")
+	require.Contains(t, report.Outcomes[0].Detail, "active AI teammate session")
 	require.Equal(t, DeferralActiveSession, report.Outcomes[0].Deferral,
 		"a session hold must be recognizable without parsing Detail")
 	during, err := os.ReadFile(installed)

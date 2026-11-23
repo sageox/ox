@@ -1,6 +1,6 @@
 # Business Action: Load Team Context
 
-**Actor:** An AI coworker (e.g., Avery)
+**Actor:** An AI teammate (e.g., Avery)
 **Goal:** Plan against the team's accumulated judgment, not just the code in front of them
 **Preconditions:**
 - In a session for the team

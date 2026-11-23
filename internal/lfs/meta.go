@@ -791,7 +791,7 @@ func (b *SessionMetaBuilder) Build() *SessionMeta {
 const metaFilename = "meta.json"
 
 // SageoxScoreSourceSelfReported is the SageoxScoreSource value for a score the
-// AI coworker reported about itself via the per-agent score file.
+// AI teammate reported about itself via the per-agent score file.
 const SageoxScoreSourceSelfReported = "self-reported"
 
 // ContextUseRollupFromDir derives the context-use rollup from the

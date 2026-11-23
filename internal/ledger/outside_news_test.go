@@ -12,7 +12,7 @@ import (
 // --- A. Classification ---
 
 // TestIsOutsideNews pins which murmurs leave the teammate frame.
-// Failure prevented: a GitHub PR title reaches AI coworkers framed as a
+// Failure prevented: a GitHub PR title reaches AI teammates framed as a
 // teammate's trusted whisper because only one of its two markers was set.
 func TestIsOutsideNews(t *testing.T) {
 	tests := []struct {
@@ -27,7 +27,7 @@ func TestIsOutsideNews(t *testing.T) {
 		{"github source, any case", "human", map[string]string{"source": "GitHub"}, true},
 		{"both markers", "external", map[string]string{"source": "github"}, true},
 		{"teammate human", "human", map[string]string{"files": "a.go"}, false},
-		{"teammate AI coworker", "ai", nil, false},
+		{"teammate AI teammate", "ai", nil, false},
 		{"no principal type", "", nil, false},
 		{"another source", "human", map[string]string{"source": "file-change"}, false},
 	}
@@ -46,7 +46,7 @@ func TestIsOutsideNews(t *testing.T) {
 
 // TestOutsideNewsMetadata_KeepsOnlyKnownKeys proves extra metadata a writer
 // added never reaches a reader.
-// Failure prevented: an "instructions" key rides along into AI coworker context.
+// Failure prevented: an "instructions" key rides along into AI teammate context.
 func TestOutsideNewsMetadata_KeepsOnlyKnownKeys(t *testing.T) {
 	got := OutsideNewsMetadata(map[string]string{
 		"source":       "github",
@@ -81,7 +81,7 @@ func TestOutsideNewsMetadata_KeepsOnlyKnownKeys(t *testing.T) {
 // TestParseOutsideNewsPR shows that only values which cannot carry markup or
 // instructions survive: a github.com PR link, digits, and a GitHub login.
 // Failure prevented: a writer bug or tampered file puts a script link, a
-// look-alike host, or markup into an attribute AI coworkers read.
+// look-alike host, or markup into an attribute AI teammates read.
 func TestParseOutsideNewsPR(t *testing.T) {
 	tests := []struct {
 		name     string

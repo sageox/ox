@@ -108,7 +108,7 @@ func loadCatalog(root *os.Root, keep func(folder string) bool) (entries []catalo
 // summarizedFolderResolver is the FolderResolver (D3 seam) that answers an
 // INDEX.json miss from the catalog walk. Without it, a conversation that
 // search found — anything older than the index window — would come back
-// not_indexed the moment an AI coworker tried to read its transcript, and the
+// not_indexed the moment an AI teammate tried to read its transcript, and the
 // search would be a dead end. It resolves only summarized folders, the same
 // bar the index itself applies.
 type summarizedFolderResolver struct {

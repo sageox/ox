@@ -86,7 +86,7 @@ func renderConversationShowText(w io.Writer, env *read.Envelope) {
 }
 
 // traceConversationEnvelope records the conversation(s) a successful show or
-// search put in front of the AI coworker as surfaced items in its session
+// search put in front of the AI teammate as surfaced items in its session
 // trace. Best-effort and silent: no agent ID or no live recording, no trace.
 func traceConversationEnvelope(env *read.Envelope) {
 	if env == nil || env.Error != nil {
@@ -98,7 +98,7 @@ func traceConversationEnvelope(env *read.Envelope) {
 }
 
 // traceConversationRead records the one conversation a successful transcript,
-// topics, topic or walkthrough read put in front of the AI coworker, so a
+// topics, topic or walkthrough read put in front of the AI teammate, so a
 // session that read it can be credited with using it. Ref and title only —
 // never the transcript, topic or summary text the read printed (ADR-027). The
 // title comes from the walkthrough payload, else the reader's title lookup.
@@ -121,7 +121,7 @@ func traceConversationRead(env *read.Envelope, reader *read.Reader, idArg string
 	})
 }
 
-// traceConversationHits writes the hits build returns into the AI coworker's
+// traceConversationHits writes the hits build returns into the AI teammate's
 // live session trace, linking each to its /c/ page. build runs only when there
 // is an agent to credit.
 func traceConversationHits(build func(urlFor func(id string) string) []providedHit) {

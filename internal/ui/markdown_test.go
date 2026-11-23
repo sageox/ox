@@ -39,7 +39,7 @@ func TestGetSageOxLightStyle(t *testing.T) {
 // the Go test timeout on the Windows runner: with a non-console stdin,
 // lipgloss.HasDarkBackground substitutes CONIN$ and then blocks forever in
 // ReadConsole, because the reader it gets back cannot cancel an in-flight read
-// and so its own 2s timeout never fires. CI, Git Bash, and any AI coworker
+// and so its own 2s timeout never fires. CI, Git Bash, and any AI teammate
 // capturing ox's output all hand ox a redirected stdin, so a query here is a
 // hang for the user, not just a slow test.
 //

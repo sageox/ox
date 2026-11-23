@@ -341,7 +341,7 @@ func TestConversationShareLink_LookupFailuresDegrade(t *testing.T) {
 
 // TestConversationShareLink_Timeout: a lookup that never answers is abandoned
 // at the timeout and degrades with a timed-out reason. Failure prevented: a
-// hung server hanging the command (and the AI coworker waiting on it).
+// hung server hanging the command (and the AI teammate waiting on it).
 func TestConversationShareLink_Timeout(t *testing.T) {
 	useWalkthroughReader(t)
 	saveShareTestLogin(t, shareTestEndpoint, "test-env-access")

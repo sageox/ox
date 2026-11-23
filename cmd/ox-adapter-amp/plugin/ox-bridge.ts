@@ -212,7 +212,7 @@ export async function endSession(amp: PluginAPI, threadID: string): Promise<void
 /**
  * Starts recording the thread again after its session ended, the way the
  * model's own prime does: `ox agent prime` with the thread's URL in
- * AMP_THREAD_URL, which keys the AI coworker and the session it continues.
+ * AMP_THREAD_URL, which keys the AI teammate and the session it continues.
  * Its team context is for the model, which already has it, so only the
  * recording status is read. Resolves whether the thread is recording again.
  */

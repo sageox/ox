@@ -47,7 +47,7 @@ type SessionMarker struct {
 	PrimedAt           time.Time `json:"primed_at"`                      // when session was primed
 	// FullPrimeViaHook records that this native session received a full prime
 	// through its SessionStart hook, the one channel known to land in the AI
-	// coworker's context. Only then may a repeat prime be compact; a bare prime
+	// teammate's context. Only then may a repeat prime be compact; a bare prime
 	// can be piped through head or otherwise never read.
 	FullPrimeViaHook     bool                  `json:"full_prime_via_hook,omitempty"`
 	ParentPID            int                   `json:"parent_pid,omitempty"` // parent agent process ID
@@ -142,7 +142,7 @@ func FindSessionMarkerByPID(agentPID int) *SessionMarker {
 // by agent-ID-free commands. Multiple native sessions can legitimately share
 // one long-lived agent process across clear/resume boundaries. Return a marker
 // only when every live match agrees on the ox agent ID; selecting one distinct
-// ID by filename order would operate on an arbitrary AI coworker.
+// ID by filename order would operate on an arbitrary AI teammate.
 func FindUnambiguousSessionMarkerByPID(agentPID int) *SessionMarker {
 	matches := liveSessionMarkersByPID(agentPID)
 	if len(matches) == 0 {
@@ -163,9 +163,9 @@ func FindUnambiguousSessionMarkerByPID(agentPID int) *SessionMarker {
 }
 
 // FindUnambiguousSessionMarkerByAgentID returns a completed marker only when
-// one native conversation is associated with the requested AI coworker. Unlike
+// one native conversation is associated with the requested AI teammate. Unlike
 // the PID fallback it never infers a Cursor chat from the shared desktop
-// process; manual Cursor controls use this exact AI-coworker association.
+// process; manual Cursor controls use this exact AI-teammate association.
 func FindUnambiguousSessionMarkerByAgentID(agentID string) *SessionMarker {
 	if agentID == "" {
 		return nil

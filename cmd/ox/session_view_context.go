@@ -129,7 +129,7 @@ func viewContextTraceText(w io.Writer, events []contexttrace.Event, sessionName 
 	printShowField(w, "Events", fmt.Sprintf("%d", len(events)))
 	fmt.Fprintln(w)
 
-	// partition events. invoked events are ox calls the AI coworker made —
+	// partition events. invoked events are ox calls the AI teammate made —
 	// counted on their own, never as provided context.
 	var provided, influenced, invoked []contexttrace.Event
 	for _, ev := range events {

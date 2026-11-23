@@ -20,7 +20,7 @@ See `security/SECURITY.md#hunter-llm-trust` for the threat-model anchor.
 
 ## Why ox is the central LLM trust boundary
 
-The whole point of ox is to put a team's knowledge in front of AI coworkers. That knowledge is in user-writable git repos: the ledger, team-context, the project repo itself, knowledge bubbles. Anyone who can commit can change what the model sees, and the model's response drives tools that touch the filesystem, run commands, and write back to the very repos that just compromised it. The feedback loop is the threat.
+The whole point of ox is to put a team's knowledge in front of AI teammates. That knowledge is in user-writable git repos: the ledger, team-context, the project repo itself, knowledge bubbles. Anyone who can commit can change what the model sees, and the model's response drives tools that touch the filesystem, run commands, and write back to the very repos that just compromised it. The feedback loop is the threat.
 
 In ox specifically, indexed content reaches LLM adapters through:
 
@@ -35,7 +35,7 @@ In ox specifically, indexed content reaches LLM adapters through:
 |---|---|
 | Commit message in an indexed repo | One commit; appears in `git log`; consumed by anything that ingests commit history |
 | README / Markdown files in an indexed repo | One commit; trivially seen by anything indexing files |
-| Ledger entries | Any human or AI coworker on the team writes these (the threat model explicitly says so) |
+| Ledger entries | Any human or AI teammate on the team writes these (the threat model explicitly says so) |
 | Team-context files | Same as ledger |
 | Knowledge Bubble notes | User-writable git repo per the AGENTS.md guidance |
 | Whisper / murmur / friction events (cached) | Same-UID local process can write via daemon IPC (see hunter-daemon-ipc) |

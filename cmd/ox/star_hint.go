@@ -98,7 +98,7 @@ var starHintAutomated = detectAutomatedRun
 // asked, not because a person typed them. skipPostHogCommand covers the ones
 // telemetry already knows; the rest are the long-lived or machine-driven roots.
 var starHintAutomaticRoots = map[string]bool{
-	"agent":                 true, // `ox agent ...` is the AI coworker's interface
+	"agent":                 true, // `ox agent ...` is the AI teammate's interface
 	"hooks":                 true, // git hooks, run by git
 	"daemon":                true,
 	"mcp":                   true,

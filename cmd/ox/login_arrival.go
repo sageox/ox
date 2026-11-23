@@ -90,7 +90,7 @@ type loginArtEnv struct {
 }
 
 // allowed is true only for a person at a color terminal. A pipe, CI, an AI
-// coworker, --quiet, --json and NO_COLOR all get the text alone: calm, precise
+// teammate, --quiet, --json and NO_COLOR all get the text alone: calm, precise
 // output, in the same bytes every run.
 func (e loginArtEnv) allowed() bool {
 	return e.StdoutTerminal && e.Interactive && !e.Quiet && !e.JSON && !e.AgentContext &&

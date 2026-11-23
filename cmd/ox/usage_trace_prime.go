@@ -11,7 +11,7 @@ import (
 )
 
 // recordPrimeInvocation appends prime's own `invoked` event to the AI
-// coworker's usage trace: how many estimated tokens prime put in front of the
+// teammate's usage trace: how many estimated tokens prime put in front of the
 // model, split by who controls them, and — when a hook cap trimmed it — the
 // untrimmed size and which sections were deferred. The PostToolUse hook skips
 // `agent prime` so this is the only event a prime produces. Best-effort.

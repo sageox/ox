@@ -19,7 +19,7 @@ Use 'ox session status' to see active recordings and their agent IDs.
 
 Examples:
   ox session stop --agent-id OxzAbc    # stop a specific session
-  ox session stop --current             # stop the calling AI coworker's own recording
+  ox session stop --current             # stop the calling AI teammate's own recording
   ox session stop                       # lists active recordings if no agent ID given`,
 	RunE: runSessionForceStop,
 }
@@ -27,7 +27,7 @@ Examples:
 func init() {
 	sessionCmd.AddCommand(sessionForceStopCmd)
 	sessionForceStopCmd.Flags().String("agent-id", "", "agent ID of the session to stop")
-	sessionForceStopCmd.Flags().Bool("current", false, "stop the calling AI coworker's own recording (uses SAGEOX_AGENT_ID)")
+	sessionForceStopCmd.Flags().Bool("current", false, "stop the calling AI teammate's own recording (uses SAGEOX_AGENT_ID)")
 }
 
 func runSessionForceStop(cmd *cobra.Command, args []string) error {
@@ -39,7 +39,7 @@ func runSessionForceStop(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--current and --agent-id are mutually exclusive")
 		}
 		if cursorRequiresExplicitAgentID() {
-			return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI coworker ID: ox session stop --agent-id <id>")
+			return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI teammate ID: ox session stop --agent-id <id>")
 		}
 		agentID = os.Getenv("SAGEOX_AGENT_ID")
 		if agentID == "" {
@@ -65,7 +65,7 @@ func runSessionForceStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no active recording found for agent %q\nRun 'ox session status' to see active recordings", agentID)
 	}
 	if currentOnly && state.AdapterName == "cursor" {
-		return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI coworker ID: ox session stop --agent-id <id>")
+		return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI teammate ID: ox session stop --agent-id <id>")
 	}
 
 	// runAgentSessionStop only uses inst.AgentID

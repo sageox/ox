@@ -198,7 +198,7 @@ Frame-kind idempotency beyond the dedup key: `open` is additionally idempotent b
 `author_kind` uses the conversation turn format's closed actor set: `human`, `agent`, `service`,
 `automation`. There is no separate `participant_kind`: participants are derived from turn
 authors, never stored. A resolved identity, when known, is `usr_` for a person or `agt_` for an AI
-coworker.
+teammate.
 
 | `SessionEntry` (raw.jsonl) | stream `turn` |
 |---|---|

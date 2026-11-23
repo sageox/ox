@@ -62,7 +62,7 @@ type CodexResult struct {
 	Selected bool `json:"selected"`
 	// SelectedPet is whatever tui.pet currently holds.
 	SelectedPet string `json:"selected_pet,omitempty"`
-	// Guidance is one or two sentences for an AI coworker to relay.
+	// Guidance is one or two sentences for an AI teammate to relay.
 	Guidance string `json:"guidance,omitempty"`
 }
 

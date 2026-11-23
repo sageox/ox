@@ -1,9 +1,9 @@
-// The ox session report pane: what ox gave this session (what the AI coworker used,
+// The ox session report pane: what ox gave this session (what the AI teammate used,
 // with links, the context ox put in front of the model, what else was
 // available, whether SageOx would co-author the work, each ox call) in a
 // scrollable pane beside the chat. Installed and kept up to date by ox; the data is
 // `ox session report --json --recent 0`, re-read when the pane opens, after each ox
-// command the AI coworker runs through Bash, and every 15 seconds while open.
+// command the AI teammate runs through Bash, and every 15 seconds while open.
 //
 // In the terminal it opens only on `/ox-session-report`. In the Claude desktop app it
 // opens by itself, docked beside the chat, at session start and whenever the
@@ -946,7 +946,7 @@ export const register: Register = on => {
         sections.push(
           <Box key="legend">
             <Text dimColor wrap="wrap">
-              used = evidence from the transcript, a commit, or the AI coworker's report
+              used = evidence from the transcript, a commit, or the AI teammate's report
             </Text>
           </Box>,
         )

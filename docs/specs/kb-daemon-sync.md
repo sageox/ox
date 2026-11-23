@@ -9,7 +9,7 @@ distilled conversations for one area of work (ox ADR-028; sageox-mono
 ADR-073/097). Bubbles do **not** replace ledgers or team contexts — those are
 permanent conversation stores and sync via their own pipelines. What bubbles
 *share* with them is the transport shape: a single git repo cloned into a
-canonical XDG path and kept fresh by the daemon, mounted so AI coworkers can
+canonical XDG path and kept fresh by the daemon, mounted so AI teammates can
 navigate the published knowledge locally. This doc records how the CLI side
 handles that sync so the model isn't re-derived every time someone touches it.
 
@@ -178,7 +178,7 @@ project root, and the daemon's `syncBubbles` returns early when `ProjectRoot == 
 > caller's personal scope once `ox-cag9.8` lands) determines which bubbles are
 > listed and mounted. Do not implement the marker/env-var contract.
 
-Cloud Co-Work may run an AI coworker with **no git repo at all**. Bubbles are
+Cloud Co-Work may run an AI teammate with **no git repo at all**. Bubbles are
 not tied to repos, so the repo-bound assumption doesn't carry over cleanly.
 
 **Decision (now): keep the CLI repo-bound.** Breaking the repo binding touches

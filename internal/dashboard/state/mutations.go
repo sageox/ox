@@ -45,7 +45,7 @@ func ApplyDiscussions(s Store, discussions []domain.TeamDiscussion, err error) S
 	return s
 }
 
-// ApplyInstances returns a new Store with the AI coworker instance list applied.
+// ApplyInstances returns a new Store with the AI teammate instance list applied.
 func ApplyInstances(s Store, instances []daemon.InstanceInfo, err error) Store {
 	s.Instances = instances
 	s.InstancesErr = err

@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ox must never tell an AI coworker, or a person, to run a command that fails.
+// ox must never tell an AI teammate, or a person, to run a command that fails.
 // Hint strings, next-action lists, error remedies and shipped skill markdown
 // all name `ox ...` commands. Nothing tied those strings to the command tree,
 // so renames and removals left them behind: a replay of a month of real
@@ -467,7 +467,7 @@ func dispatcherTable(t *testing.T) (verbs, sessionVerbs map[string]bool) {
 }
 
 // catalogFirstWords returns the first word of every plain pattern in the
-// friction catalog: the invalid commands people and AI coworkers actually type.
+// friction catalog: the invalid commands people and AI teammates actually type.
 func catalogFirstWords(t *testing.T) map[string]bool {
 	t.Helper()
 	data, err := os.ReadFile(repoPath("default_catalog.json"))
@@ -812,7 +812,7 @@ func TestCommandRefs_ScanReachesRealStrings(t *testing.T) {
 		"claude-plugin/skills/ox/SKILL.md|ox agent team-ctx",
 		"cmd/ox/session_helpers.go|ox session redaction verify",
 		"internal/daemon/status_display.go|ox sync",
-		// the guidance that sent AI coworkers to a rejected command
+		// the guidance that sent AI teammates to a rejected command
 		"cmd/ox/agent_session.go|ox agent %s session log --role user --content",
 		"cmd/ox/agent_session.go|ox agent %s session record",
 	} {

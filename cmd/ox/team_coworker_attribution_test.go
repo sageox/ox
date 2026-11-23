@@ -165,7 +165,7 @@ func TestSessionMeta_TeamCoworker(t *testing.T) {
 }
 
 // Failure prevented: a coworker's Ledger commits are authored by its machine's
-// git identity, or a person's by the AI coworker a team token once stamped on
+// git identity, or a person's by the AI teammate a team token once stamped on
 // the same clone.
 func TestLedgerCommitAuthor_TeamToken(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())

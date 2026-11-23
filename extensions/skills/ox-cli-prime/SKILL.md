@@ -1,6 +1,6 @@
 ---
 name: ox-cli-prime
-description: "Load SageOx team context for this AI coworker session."
+description: "Load SageOx team context for this AI teammate session."
 # Lifecycle and diagnostic surfaces stay EXPLICIT (ADR-023): the user
 # invokes them, the model never does. This also keeps their descriptions
 # out of context, so folding the command surface in costs no tokens.

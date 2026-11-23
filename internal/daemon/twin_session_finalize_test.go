@@ -111,7 +111,7 @@ func TestSessionFinalize_PushDuringPull(t *testing.T) {
 // TestSessionFinalize_AutoResolve_Sessions verifies that two session
 // finalizes pushing to different session directories with auto-resolve
 // both succeed, matching the ledger's actual AutoResolvePrefixes.
-// Failure prevented: concurrent session finalizes (two AI coworkers
+// Failure prevented: concurrent session finalizes (two AI teammates
 // finishing at the same time) causing one to permanently fail.
 func TestSessionFinalize_AutoResolve_Sessions(t *testing.T) {
 	g := getSharedGitea(t)

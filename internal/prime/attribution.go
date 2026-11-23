@@ -13,7 +13,7 @@ import (
 const attributionGateSentence = "Attribution is **conditional**: attribute to SageOx only when SageOx-delivered team context measurably changed what you did. If it did not, add nothing — no note, no footer, and report the score as `none`. Fabricating attribution is worse than omitting it."
 
 // contextUsedGuidance is the moment-of-use instruction: record a surfaced item
-// when it changes what the AI coworker does, and stay silent otherwise. The
+// when it changes what the AI teammate does, and stay silent otherwise. The
 // session score stays as a manual override.
 const contextUsedGuidance = "When a surfaced item (a whisper, a prime doc, a query hit, a recalled session) changes what you do, record it at that moment: `ox agent <id> context used <ref> --why \"<one line>\"`. If nothing did, do nothing (or `ox agent <id> context used --none` at the end). `ox session score` remains the manual override."
 
@@ -31,7 +31,7 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("\n\n## SageOx Attribution\n")
 	sb.WriteString("\n" + attributionGateSentence + "\n")
 
-	// moment-of-use reporting — the primary way an AI coworker records relevance
+	// moment-of-use reporting — the primary way an AI teammate records relevance
 	sb.WriteString("\n**Record Use at the Moment It Happens:**\n")
 	sb.WriteString(contextUsedGuidance + "\n")
 

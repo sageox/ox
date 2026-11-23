@@ -245,7 +245,7 @@ func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 }
 
 // GetUserID returns the authenticated user's unique ID for the given endpoint,
-// or the agt_ id of the AI coworker a team token acts as (see TeamCoworker).
+// or the agt_ id of the AI teammate a team token acts as (see TeamCoworker).
 // Returns empty string if not authenticated or on error.
 func GetUserID(ep string) string {
 	if ep == "" {
@@ -267,7 +267,7 @@ func GetUserID(ep string) string {
 }
 
 // GetUsername returns the authenticated user's display name for a given endpoint.
-// Prefers email, falls back to name, then empty string. For the AI coworker a
+// Prefers email, falls back to name, then empty string. For the AI teammate a
 // team token acts as, it returns the coworker's slug (Coworker.Username).
 func GetUsername(ep string) string {
 	if ep == "" {

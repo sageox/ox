@@ -80,7 +80,7 @@ func itoa(n int) string {
 	return string(b)
 }
 
-// --- A. The timeline an AI coworker reads ---
+// --- A. The timeline an AI teammate reads ---
 
 // TestWalkthroughMomentsFromDesktopLayers pins the whole derived timeline
 // for a desktop-produced walkthrough: clicks named by the ax-tree, one dwell
@@ -215,7 +215,7 @@ func TestTranscriptFramesShareLocalImage(t *testing.T) {
 // TestWalkthroughNeverEmitsTypedTextOrQuery: AX values and every URL part
 // beyond scheme, host, and path never leave the reader.
 // Failure prevented: a password, search, or token the presenter typed or
-// carried in a link lands in an AI coworker's context.
+// carried in a link lands in an AI teammate's context.
 func TestWalkthroughNeverEmitsTypedTextOrQuery(t *testing.T) {
 	env, _ := readWalkthrough(t, desktopWalkRoot, desktopWalkCnv, WalkthroughOptions{})
 	b, err := json.Marshal(env)
@@ -598,7 +598,7 @@ func TestLongAXTreeKeepsLateSnapshots(t *testing.T) {
 
 // TestWalkthroughFollowsCitationSelectors: a sageox:// citation carries its
 // own window, as it does for transcript; explicit flags still win.
-// Failure prevented: an AI coworker following a cited moment gets the whole
+// Failure prevented: an AI teammate following a cited moment gets the whole
 // recording instead of the cited cues.
 func TestWalkthroughFollowsCitationSelectors(t *testing.T) {
 	base := "sageox://" + desktopWalkCnv + "/clyr_01a0f48b-0000-7000-8000-0000000000d1@1#"

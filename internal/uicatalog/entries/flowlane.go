@@ -17,7 +17,7 @@ func init() {
 		Package: "internal/flowlane",
 		Exports: []string{"Render", "Moving", "Lane", "Options"},
 		Since:   "0.27.0",
-		WhenToUse: "One line per ox call that moved team data between SageOx and an AI coworker's session: " +
+		WhenToUse: "One line per ox call that moved team data between SageOx and an AI teammate's session: " +
 			"which way, how much, how long. Stack several; the fixed-width track makes them small multiples.",
 		WhenNotTo: "Calls that move no team data (doctor, status, config), totals over a session " +
 			"(use the status line's counts), or anything that needs more than one line.",

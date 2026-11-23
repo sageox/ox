@@ -1,5 +1,5 @@
 Feature: Every Session Reaches the Ledger Before the Machine Goes Away
-  Some AI coworkers run on a machine that goes away after each job, such as a
+  Some AI teammates run on a machine that goes away after each job, such as a
   CI-like pod. There, as on a laptop, the ox daemon summarizes and uploads each
   session. Before the machine goes away, the job's runner waits until the
   daemon has put every session recorded there in the Ledger, and learns how
@@ -22,13 +22,13 @@ Feature: Every Session Reaches the Ledger Before the Machine Goes Away
       Then the daemon uploads it to the "Acme Engineering" Ledger
       And the report lists it as an older pending session
 
-  Rule: A crashed AI coworker's session is the daemon's to finish
+  Rule: A crashed AI teammate's session is the daemon's to finish
 
     Scenario: Avery crashes before the session ends
       Given Avery recorded a session on a pod and crashed before the session ended
       When the runner waits for the pod's sessions
       Then the runner waits while the daemon notices the crash and finishes Avery's session
-      And a recording whose AI coworker is still running is reported, not finished
+      And a recording whose AI teammate is still running is reported, not finished
 
   Rule: The runner learns when a session did not reach the Ledger
 

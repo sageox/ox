@@ -205,7 +205,7 @@ func DiscoverSkillsWithRejections(teamPath, repoSlug string) (installable, rejec
 	return installable, rejected, nil
 }
 
-// PublishedSkills returns every skill the team publishes to AI coworkers,
+// PublishedSkills returns every skill the team publishes to AI teammates,
 // before the per-repo `repos:` filter is applied.
 //
 // Split out from DiscoverSkills so a diagnostic can tell "the team published

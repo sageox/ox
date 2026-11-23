@@ -6,7 +6,7 @@
 
 ## Overview
 
-Recorded discussions (audio and video) produce artifacts that AI coworkers consume through progressive disclosure — loading more detail only when relevant. This spec defines what each artifact contains, when to use it, and how to extend it.
+Recorded discussions (audio and video) produce artifacts that AI teammates consume through progressive disclosure — loading more detail only when relevant. This spec defines what each artifact contains, when to use it, and how to extend it.
 
 ## Discussion Directory Layout
 
@@ -114,7 +114,7 @@ Agents decide at each layer whether to go deeper. Most discussions stop at L0 or
 
 ## Keyframe Enrichment
 
-Four semantic fields on each `Keyframe` in `keyframes.json` enable AI coworkers to understand visual content without fetching images.
+Four semantic fields on each `Keyframe` in `keyframes.json` enable AI teammates to understand visual content without fetching images.
 
 ### Server Pipeline (sageox-mono)
 

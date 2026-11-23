@@ -52,7 +52,7 @@ func checkTeamSuffixShadowIn(gitRoot string, _ bool) checkResult {
 	for _, root := range roots {
 		entries, readErr := os.ReadDir(filepath.Join(gitRoot, filepath.FromSlash(root)))
 		if readErr != nil {
-			continue // an unreadable root is the AI-coworker-assets check's business
+			continue // an unreadable root is the AI-teammate-assets check's business
 		}
 		for _, entry := range entries {
 			if !entry.IsDir() || !strings.HasSuffix(entry.Name(), skillmanager.TeamSuffix) {

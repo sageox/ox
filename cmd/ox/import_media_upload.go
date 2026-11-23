@@ -455,7 +455,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // uploadProgress prints bytes sent / total to stderr for large uploads. On a
-// terminal it redraws one line; otherwise (an AI coworker, a log file) it
+// terminal it redraws one line; otherwise (an AI teammate, a log file) it
 // prints a line per quarter, so a captured transcript stays short.
 type uploadProgress struct {
 	w     io.Writer

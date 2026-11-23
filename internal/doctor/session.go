@@ -791,7 +791,7 @@ func (c *SessionQuarantineCheck) Run(_ context.Context, _ bool) CheckResult {
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarn,
-		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
+		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI teammate's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
 		Fix:     fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine' to re-check ownership and upload if it now passes, or 'ox agent %s session abort %s' to discard the captured data", first.AgentID, first.AgentID, filepath.Base(first.SessionPath)),
 	}
 }

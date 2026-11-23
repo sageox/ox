@@ -119,7 +119,7 @@ type Outcome struct {
 	Deferral string `json:"deferral,omitempty"`
 }
 
-// DeferralActiveSession marks an artifact held back because a live AI coworker
+// DeferralActiveSession marks an artifact held back because a live AI teammate
 // session is using the current projection — the steady state whenever anyone
 // is working, not a convergence failure (ox#1242).
 const DeferralActiveSession = "active-session"

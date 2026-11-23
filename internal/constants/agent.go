@@ -138,7 +138,7 @@ const (
 const OxStatuslineCommandClaudeCode = "if command -v ox >/dev/null 2>&1; then ox statusline 2>/dev/null || true; fi"
 
 // OxStatuslineRefreshSeconds is the statusLine refreshInterval ox installs, so
-// a teammate's murmur appears even while the AI coworker is idle.
+// a teammate's murmur appears even while the AI teammate is idle.
 const OxStatuslineRefreshSeconds = 15
 
 // HookCommand fills an OxHookCommand*Template with the native event name.

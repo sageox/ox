@@ -202,7 +202,7 @@ func TestStop_ShowsLanesAnEarlierNoticeMissed(t *testing.T) {
 }
 
 // TestCodexNotice_FirstSkipsAnEarlierSittingsCalls: the not-recording trace
-// is kept per AI coworker for a week.
+// is kept per AI teammate for a week.
 // Failure prevented: a session's first notice replaying ox calls from days ago.
 func TestCodexNotice_FirstSkipsAnEarlierSittingsCalls(t *testing.T) {
 	root := codexDigestEnv(t, nil)
@@ -237,7 +237,7 @@ func TestFlowStart_OnlyOxCallsThatMoveTeamData(t *testing.T) {
 	}
 	assert.NoDirExists(t, flowDir, "nothing that moves team data: nothing written")
 
-	// An unprimed session has no AI coworker to file a start under.
+	// An unprimed session has no AI teammate to file a start under.
 	unprimed := codexToolInput(t, `ox query "x"`, "")
 	unprimed.SessionID = "never-primed"
 	recordFlowStart(root, unprimed, now)

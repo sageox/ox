@@ -1,4 +1,4 @@
-// Package prheader renders the SageOx "credit line" that an AI coworker pastes
+// Package prheader renders the SageOx "credit line" that an AI teammate pastes
 // at the TOP of a pull-request description body — the human-facing counterpart
 // to the machine `SageOx-Session:` trailer (see cmd/ox/session_url.go). It links
 // the session(s), plan(s), and discussion(s) that produced the change, and names

@@ -3,7 +3,7 @@ package config
 // PRVisualsConfig holds the `pr_visuals.*` settings namespace. Pointer fields
 // keep an explicit choice distinct from an inherited/default value.
 type PRVisualsConfig struct {
-	// Rich controls whether AI coworkers are guided to generate and upload
+	// Rich controls whether AI teammates are guided to generate and upload
 	// review-only rich PNG/SVG visuals for pull requests. It never disables the
 	// ox viz catalog or deterministic suggestions. Default: true.
 	Rich *bool `yaml:"rich,omitempty" json:"rich,omitempty" toml:"rich,omitempty"`

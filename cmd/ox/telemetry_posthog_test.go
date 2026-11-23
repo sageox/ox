@@ -111,7 +111,7 @@ func TestPostHogErrorKind(t *testing.T) {
 	}
 }
 
-// Failure prevented: an AI coworker guessing at `ox agent` subcommands is
+// Failure prevented: an AI teammate guessing at `ox agent` subcommands is
 // reported as the command failing, and its retries mark the install wedged.
 func TestPostHogErrorKind_AgentDispatcherMistakesAreUsage(t *testing.T) {
 	projectRoot := pauseResumeProject(t)
@@ -391,7 +391,7 @@ func TestShowTelemetryNoticeOnce_ShownOnceToAPersonAtATerminal(t *testing.T) {
 	assert.Empty(t, second.String(), "the notice appears once per install")
 }
 
-// Failure prevented: the notice lands in an AI coworker's transcript, and the
+// Failure prevented: the notice lands in an AI teammate's transcript, and the
 // person at a terminal later never sees it because the flag was already used.
 func TestShowTelemetryNoticeOnce_WaitsForAPerson(t *testing.T) {
 	withIsolatedConfig(t)

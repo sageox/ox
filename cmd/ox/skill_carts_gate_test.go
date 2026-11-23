@@ -12,7 +12,7 @@ import (
 //
 // `ox-cli-cart*` shipped in the "lifecycle" bundle (Default: true), so all four
 // installed for everyone — while `ox carts` is gated behind FEATURE_CARTS and
-// errors when it is off. An AI coworker reading the skill would follow it into
+// errors when it is off. An AI teammate reading the skill would follow it into
 // a command that refuses, with nothing in the skill explaining why.
 //
 // Failure prevented: any feature-gated command's skills drifting back into a

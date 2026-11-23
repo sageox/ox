@@ -1,6 +1,6 @@
 # Session ↔ Commit Linkage
 
-**Audience:** AI coworkers and engineers working on ox session, commit-trailer, or git-hook code.
+**Audience:** AI teammates and engineers working on ox session, commit-trailer, or git-hook code.
 **Status:** Phase A + Phase B of ox-bxo2 (Session↔Commit Linkage Hardening) shipped.
 **Companion docs:** [`session-pr-issue-linkage.md`](./session-pr-issue-linkage.md) (PR/issue mapping, follow-up epic).
 

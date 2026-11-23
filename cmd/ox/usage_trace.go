@@ -20,7 +20,7 @@ import (
 	"github.com/sageox/ox/internal/tokens"
 )
 
-// Usage trace: every ox call an AI coworker makes is recorded as an `invoked`
+// Usage trace: every ox call an AI teammate makes is recorded as an `invoked`
 // context-trace event, so `ox session report` can report what ox put in front of the
 // model in a session. Written from the PostToolUse hook for both harnesses.
 // Everything here is best-effort: errors are logged at debug and never reach
@@ -33,7 +33,7 @@ const agentTraceCacheMaxAge = 7 * 24 * time.Hour
 // recordOxToolCall classifies one harness tool call and, when it is ox work,
 // (a) counts a read of one item of team context (a plan, a discussion, the
 // Team Context) on the status line and (b) appends an `invoked` event to the
-// AI coworker's usage trace. Non-ox tools return after classification, paying
+// AI teammate's usage trace. Non-ox tools return after classification, paying
 // no config or recording-state read.
 func recordOxToolCall(projectRoot, agentID string, input *agentx.HookInput) {
 	if input == nil || projectRoot == "" || agentID == "" {
@@ -347,7 +347,7 @@ func toolOutput(resp json.RawMessage) string {
 	return string(trimmed)
 }
 
-// appendUsageTraceEvent writes one usage event to the AI coworker's trace:
+// appendUsageTraceEvent writes one usage event to the AI teammate's trace:
 // the live recording's context-trace.jsonl when recording (so it travels with
 // the session through upload, secret scan and abort), else a per-agent file in
 // the project cache (gitignored, pruned after a week).

@@ -100,7 +100,7 @@ func (c *SessionsConfig) GetMode() string {
 // AllowedAgentTypes is the set of valid AgentWorkerConfig.Agent values.
 var AllowedAgentTypes = []string{"none", "claude", "codex"}
 
-// AgentWorkerConfig controls daemon-spawned AI coworker invocations.
+// AgentWorkerConfig controls daemon-spawned AI teammate invocations.
 type AgentWorkerConfig struct {
 	// Agent selects which agent CLI the daemon uses for background work.
 	// "none" disables agent spawning, "claude" or "codex" selects that CLI.
@@ -516,7 +516,7 @@ func (c *UserConfig) SessionReportPaneSetting() *bool {
 // RecapConfig holds the user-level `recap.*` settings.
 type RecapConfig struct {
 	// TraceConsultations is ADR-027's opt-out: when false, ox writes no
-	// record of what this coworker's AI coworker read or which ox calls it
+	// record of what this coworker's AI teammate read or which ox calls it
 	// made (`consulted` and `invoked` context-trace events). nil = on.
 	TraceConsultations *bool `yaml:"trace_consultations,omitempty"`
 }

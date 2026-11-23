@@ -36,7 +36,7 @@ Commands:
 
 Priority: user > repo > team > default. User-level preferences apply even in
 repositories that have not run ox init; install the user-level integration
-for your AI coworker to receive the guidance everywhere.`,
+for your AI teammate to receive the guidance everywhere.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOutput := cfg != nil && cfg.JSON
 		if !jsonOutput && cli.IsInteractive() && term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {

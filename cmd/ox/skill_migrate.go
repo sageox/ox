@@ -286,7 +286,7 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 }
 
 const (
-	oxRuleDescription          = "SageOx behavioral guidance for AI coworkers"
+	oxRuleDescription          = "SageOx behavioral guidance for AI teammates"
 	teamContextRuleDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
 )
 
@@ -462,7 +462,7 @@ func migrationRuntimeBlocker(repoRoot string) string {
 }
 
 func migrationBlockerWithFootprint(repoRoot string, inspectFootprint bool) string {
-	// A LIVE recording session means an AI coworker is mid-turn in this repository.
+	// A LIVE recording session means an AI teammate is mid-turn in this repository.
 	// `ox doctor` is routinely run BY an agent during a session, so this is not a
 	// theoretical case — and a commit appearing under the user's session is exactly
 	// the surprise the #732 ruling was about.

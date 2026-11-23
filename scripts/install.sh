@@ -183,9 +183,9 @@ print_path_warning() {
 # rc file (e.g. ~/.zshrc), which looks fine here and still leaves a hook
 # shell unable to find ox. `ox doctor` spawns a scrubbed, non-interactive
 # shell to check for exactly that gap, so it's the one thing in this flow
-# that can actually confirm the install worked for AI coworker hooks.
+# that can actually confirm the install worked for AI teammate hooks.
 print_doctor_hint() {
-    echo "Next: run \`$BINARY doctor\` to confirm your AI coworker can actually see this install."
+    echo "Next: run \`$BINARY doctor\` to confirm your AI teammate can actually see this install."
     echo ""
 }
 

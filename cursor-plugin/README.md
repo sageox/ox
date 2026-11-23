@@ -1,6 +1,6 @@
 # SageOx
 
-Cursor plugin that connects AI coworkers in Grok Bot to [SageOx](https://sageox.ai)
+Cursor plugin that connects AI teammates in Grok Bot to [SageOx](https://sageox.ai)
 through SageOx's hosted [Model Context Protocol](https://modelcontextprotocol.io/) server.
 
 Search your team's discussions, docs, and sessions, read its knowledge bubbles,
@@ -37,7 +37,7 @@ registration. There is no API key to configure.
 one that completes SageOx sign-in. A SageOx server added to Grok Bot by hand can
 instead loop on a sign-in link that says it expired.
 
-## What AI coworkers can do
+## What AI teammates can do
 
 | Category | Capabilities |
 | --- | --- |
@@ -49,7 +49,7 @@ instead loop on a sign-in link that says it expired.
 | Plans | Save plans and check drafts against the team's context |
 
 The hosted server is the source of truth for tool names and schemas. The
-`sageox` skill tells the AI coworker which tool to start with.
+`sageox` skill tells the AI teammate which tool to start with.
 
 ## Notes
 
@@ -59,7 +59,7 @@ The hosted server is the source of truth for tool names and schemas. The
   Cursor setup under **Settings → Connections** on sageox.ai, or the
   [`ox` CLI](https://sageox.ai/docs/cli/quickstart).
 - If you added `https://sageox.ai/mcp` to Grok Bot by hand, remove that entry
-  after installing the plugin, so the AI coworker sees one set of SageOx tools.
+  after installing the plugin, so the AI teammate sees one set of SageOx tools.
 - Disconnect any time from **Settings → Security** on sageox.ai.
 
 ## Docs

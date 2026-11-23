@@ -51,7 +51,7 @@ func TestRunAgentDispatcher_ResolvesNativeSessionMarkerWithoutEnv(t *testing.T) 
 	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	assert.NotNil(t, state.SuspendedAt, "bare session command must dispatch to the marker's AI coworker")
+	assert.NotNil(t, state.SuspendedAt, "bare session command must dispatch to the marker's AI teammate")
 }
 
 // TestFindUnambiguousSessionMarkerByPID_DoesNotGuessAmongAgentIDs pins the

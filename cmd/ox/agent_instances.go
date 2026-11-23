@@ -16,7 +16,7 @@ import (
 // agentInstancesCmd is a hidden alias for "ox agent list", kept for backward compatibility.
 var agentInstancesCmd = &cobra.Command{
 	Use:    "instances",
-	Short:  "List active AI coworker instances (use 'list' instead)",
+	Short:  "List active AI teammate instances (use 'list' instead)",
 	Hidden: true,
 	RunE:   runAgentInstances,
 }
@@ -74,7 +74,7 @@ func outputInstancesJSON(w io.Writer, instances []daemon.InstanceInfo, err error
 
 func outputInstancesTable(w io.Writer, instances []daemon.InstanceInfo) error {
 	if len(instances) == 0 {
-		fmt.Fprintln(w, "No active AI coworker instances.")
+		fmt.Fprintln(w, "No active AI teammate instances.")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Instances appear when coworkers run 'ox agent prime' and hooks send heartbeats.")
 		fmt.Fprintln(w, "Run 'ox agent prime' in a repository to register this instance.")

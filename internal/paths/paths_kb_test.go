@@ -157,7 +157,7 @@ func TestKBCacheDir_EndpointIsolation(t *testing.T) {
 // the slug-keyed location inside the project's .sageox/kb/ directory.
 //
 // Failure prevented: drift between what the daemon writes (canonical layout)
-// and what AI coworkers reference in skills (slug-keyed link).
+// and what AI teammates reference in skills (slug-keyed link).
 func TestProjectKBLink_Composition(t *testing.T) {
 	link := ProjectKBLink("/home/user/proj", "personal")
 	want := filepath.Join("/home/user/proj", ".sageox", "kb", "personal")

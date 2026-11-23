@@ -13,7 +13,7 @@ exports: [SelectMany, MultiSelectOption]
 
 ## When to use
 
-`ox init` agent-hook installation ("which AI coworkers to enable?"), multi-team enablement, feature opt-ins. Bubbletea-driven in a TTY; falls back to a numbered toggle prompt in non-TTY. Space toggles, enter confirms.
+`ox init` agent-hook installation ("which AI teammates to enable?"), multi-team enablement, feature opt-ins. Bubbletea-driven in a TTY; falls back to a numbered toggle prompt in non-TTY. Space toggles, enter confirms.
 
 ## When NOT to use
 

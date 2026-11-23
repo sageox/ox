@@ -45,7 +45,7 @@ called out at the bottom — anything not in "Open questions" is decided.
   `YYYY-MM-DD-<uuid7>.md`), late-arriving days, and multi-summary days.
   After this change there is one canonical answer: `ox distill history since 24h
   --format=content`.
-- **Agents hard-coding `memory/...` paths.** Any AI coworker that wants
+- **Agents hard-coding `memory/...` paths.** Any AI teammate that wants
   to read the journal currently has to know the directory layout, the
   filename pattern, the frontmatter shape, and the citation rules. The
   read commands hide all of that behind a stable contract.
@@ -239,7 +239,7 @@ is `true`, `data.skipped_reason` is `"unchanged_source_hash"`, the
   "success": false,
   "error": {
     "code": "extractor_unavailable",
-    "message": "no AI coworker CLI detected; install claude or set OX_AGENT_CLI",
+    "message": "no AI teammate CLI detected; install claude or set OX_AGENT_CLI",
     "retryable": true
   }
 }

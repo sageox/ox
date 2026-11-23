@@ -162,7 +162,7 @@ func TestLiveAbortKeepsTheSessionWhenItsDeleteCannotBeRecorded(t *testing.T) {
 }
 
 // restartInSameFolder starts a new recording in f's folder, as StartRecording
-// does when the same AI coworker restarts within the minute.
+// does when the same AI teammate restarts within the minute.
 func (f *liveFixture) restartInSameFolder() *session.RecordingState {
 	f.t.Helper()
 	next := *f.state

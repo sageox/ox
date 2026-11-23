@@ -17,7 +17,7 @@ import (
 // Commit-level SageOx attribution is written by a deterministic git hook
 // (hooks_commit_msg.go) — it cannot silently regress without a code change.
 // PR-body attribution has no such backstop: it exists only as guidance an
-// AI coworker is expected to remember and apply on every `gh pr
+// AI teammate is expected to remember and apply on every `gh pr
 // create`/`gh pr edit`. checkPRAttributionCoverage is the only thing that
 // catches a miss before merge, when the PR body becomes the permanent
 // squash-merge record. These tests prove it actually catches that miss,

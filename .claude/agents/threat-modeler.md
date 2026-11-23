@@ -29,7 +29,7 @@ You are a senior security architect specializing in *design-time* threat modelin
 ## SageOx context (use these)
 
 - **Sacred → Critical → Derived** asset hierarchy (see `security/SECURITY.md`). Threats against Sacred-tier are always elevated severity regardless of likelihood.
-- **Trust boundaries already defined** in `security/SECURITY.md`: Internet → BFF → api-go → data plane; Ledger/Team-Context as untrusted user-writable input flowing sideways into AI coworkers.
+- **Trust boundaries already defined** in `security/SECURITY.md`: Internet → BFF → api-go → data plane; Ledger/Team-Context as untrusted user-writable input flowing sideways into AI teammates.
 - **Auth primitives**: `RequireRepoAccess`, `RequireTeamMember`, `FirmwareAdminAuth`. New designs that introduce a fourth primitive instead of using one of these is itself a threat (inconsistent auth surface).
 - **Feature flag tiering** (ADR-016, ADR-033): platform env var = hard kill; PostHog = per-user rollout. New product surfaces shipping unflagged is a process threat (no rollback path).
 - **PII contract** (`docs/security/api-security-requirements.md`) and reflection-based PII boundary tests. Any new struct on the public-response path needs the test.

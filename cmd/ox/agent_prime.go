@@ -93,7 +93,7 @@ func uniqueNonEmpty(vals ...string) []string {
 // you_aliases= and you_kind=. A person's aliases collect ALL name forms from
 // ALL sources (OAuth, git config, derived) because sessions use DisplayName,
 // murmurs use Username, discussions use full Name, and git commits use git
-// config user.name/user.email — each may differ. The AI coworker a team token
+// config user.name/user.email — each may differ. The AI teammate a team token
 // acts as goes by its name and slug only: the git identity on its machine is
 // not its own. kind is "ai" for that coworker and "" for a person.
 func currentUserIdentity(ep string) (name string, aliases []string, kind string) {
@@ -352,7 +352,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// PID. A known session ID that has no marker is a new native session, not a
 	// repeat: the Codex desktop app runs every chat under one long-lived
 	// app-server process, so matching by PID would hand chat B chat A's AI
-	// coworker identity and merge their recordings (#1385).
+	// teammate identity and merge their recordings (#1385).
 	pidFallbackAllowed := !isCursor && agentSessionID == "" && agentx.CurrentAgent() != nil
 	if existingMarker == nil && pidFallbackAllowed {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
@@ -434,7 +434,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// no Team Context for them (non-members are not given one), so it primes
 	// from the project's public slice instead, before any repair writes into
 	// a repo that is not theirs.
-	// Cursor's hook requires the prime to register an AI coworker, which the
+	// Cursor's hook requires the prime to register an AI teammate, which the
 	// read-only public prime never does, so Cursor keeps the ordinary prime.
 	if canonicalAgentType(agentType) != "cursor" {
 		if handled, err := emitPublicPrimeForNonMember(cmd, projectRoot, textMode || reviewMode); handled {
@@ -462,7 +462,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
-	// anti-entropy: an AI coworker commits its work as itself
+	// anti-entropy: an AI teammate commits its work as itself
 	reconcileProjectCoworker(projectRoot, false)
 
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
@@ -941,7 +941,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// quote command names in prose for scannability
 	output.Important = "SageOx has two SEPARATE knowledge sources. " +
 		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: 'ox agent team-ctx'. " +
-		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: 'ox session list'. " +
+		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI teammate coding sessions for THIS repo only. Browse with: 'ox session list'. " +
 		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
 
 	// discover other team contexts (non-primary)
@@ -962,7 +962,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		output.Important = fmt.Sprintf("SageOx has two SEPARATE knowledge sources. "+
 			"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. "+
 			"You have access to %d team contexts. Read with: 'ox agent team-ctx [slug]'. "+
-			"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. "+
+			"(2) SESSIONS/LEDGER: repo-specific archive of prior AI teammate coding sessions for THIS repo only. "+
 			"Browse with: 'ox session list'. "+
 			"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.", totalTeams)
 	}
@@ -1098,7 +1098,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	//
 	// UpdateAvailable/LatestVersion are DATA — always present, because anything
 	// parsing prime's output asked for them. UpdateHint and the UserNotices
-	// entry are the NOTICE: they instruct the AI coworker to raise the upgrade
+	// entry are the NOTICE: they instruct the AI teammate to raise the upgrade
 	// with the human out loud, so they go through the same ledger that caps the
 	// terminal tiers. Prime is where the calm tier lands when stderr belongs to
 	// an agent, so it carries the fact once per release line per day instead of
@@ -1266,7 +1266,7 @@ func resolveAgentIDFromStates(states []*session.RecordingState, envID string) st
 
 // launchedByAnotherAgent reports whether an inherited SAGEOX_AGENT_ID names a
 // different, still-recording agent process: this agent was launched from that
-// one's shell, so it is that session's child, not the same AI coworker. It is
+// one's shell, so it is that session's child, not the same AI teammate. It is
 // false whenever the processes cannot be told apart (no native session id of
 // its own, or a PID unknown on either side), which keeps the /clear and
 // repeat-prime reuse that the variable exists for.
@@ -1592,7 +1592,7 @@ func startCursorSessionRecording(projectRoot, agentID, agentType string, parent 
 		// marker through publication so that handoff cannot split again.
 		_, err := UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
 			if marker.AgentID != "" && marker.AgentID != agentID {
-				return fmt.Errorf("identity-conflict: Cursor startup belongs to another AI coworker")
+				return fmt.Errorf("identity-conflict: Cursor startup belongs to another AI teammate")
 			}
 			if marker.CursorSourceBoundary == nil && len(cursorBoundaries) > 0 && cursorBoundaries[0] != nil {
 				boundary := *cursorBoundaries[0]
@@ -2386,7 +2386,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		if output.Ledger.Exists {
 			fmt.Fprintln(cmd.OutOrStdout(), "## Ledger (Repo Session History)")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "The ledger is a repo-specific archive of prior AI coworker coding sessions.")
+			fmt.Fprintln(cmd.OutOrStdout(), "The ledger is a repo-specific archive of prior AI teammate coding sessions.")
 			fmt.Fprintln(cmd.OutOrStdout(), "It is NOT team context. Do NOT consult the ledger unless explicitly asked")
 			fmt.Fprintln(cmd.OutOrStdout(), "to review prior sessions or coding history for this repo.")
 			fmt.Fprintln(cmd.OutOrStdout())
@@ -3293,7 +3293,7 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		return &ledgerInfo{Exists: false}
 	}
 
-	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. If you encounter stub files, use 'ox fetch <path>' to get real content."
+	hint := "The ledger is a repo-specific archive of prior AI teammate coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. If you encounter stub files, use 'ox fetch <path>' to get real content."
 
 	return &ledgerInfo{
 		Exists: true,
@@ -3335,7 +3335,7 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 	infos := prime.BuildKBInfos(res, nil)
 
 	// Path = the local mount when the daemon has cloned the bubble. Only
-	// set when the checkout actually exists — an AI coworker following the
+	// set when the checkout actually exists — an AI teammate following the
 	// path must land on files, not an empty dir.
 	for i := range infos {
 		if infos[i].KBID == "" {
@@ -3422,7 +3422,7 @@ func ensureClaudeHooks(projectRoot string) bool {
 // settings.json. It writes nothing when the line is already current. It may
 // also move a legacy ox statusLine out of the shared settings.json, as doctor
 // does.
-// Non-fatal and log-only: hooks pipe prime's stderr into the AI coworker's
+// Non-fatal and log-only: hooks pipe prime's stderr into the AI teammate's
 // context, so a failure (unreadable or malformed settings) would repeat there
 // every session start. `ox doctor` surfaces it instead.
 func ensureClaudeStatusLine(projectRoot string) {

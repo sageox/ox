@@ -355,10 +355,10 @@ func renderSessions(store state.ReadOnlyStore, width, height, cursor int) (strin
 		}
 	}
 
-	// -- active AI coworkers --
+	// -- active AI teammates --
 	if len(instances) > 0 {
 		b.WriteByte('\n')
-		b.WriteString(sectionHeader(fmt.Sprintf("AI COWORKERS (%d)", len(instances)), width))
+		b.WriteString(sectionHeader(fmt.Sprintf("AI TEAMMATES (%d)", len(instances)), width))
 		b.WriteByte('\n')
 		for _, inst := range instances {
 			indicator := theme.StatusHealthy.Render("●")

@@ -17,7 +17,7 @@ import (
 
 // teamRosterPath is the cloud endpoint that returns a team's coworker roster —
 // the identity fields the server exposes for resolving who a teammate is (human
-// or AI coworker).
+// or AI teammate).
 //
 // Contract: GET /api/v1/teams/{team_ref}/roster returns a JSON
 // TeamRosterResponse. team_ref may be a team id or slug; the server resolves
@@ -45,7 +45,7 @@ var ErrTeamRosterUnsupported = errors.New("team roster endpoint not available (f
 // roster is informational, so a blip shouldn't be a hard failure.
 var ErrTeamRosterUnavailable = errors.New("team roster temporarily unavailable (could not reach the server)")
 
-// TeamMember is one coworker in a team roster — a human (usr_) or an AI coworker
+// TeamMember is one coworker in a team roster — a human (usr_) or an AI teammate
 // (agt_). Its fields are the identity attributes the server exposes for a
 // roster: display name, type, role, and the handles the coworker is known by.
 // The set of fields is the server's to decide; unknown fields decode away.

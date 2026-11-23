@@ -29,7 +29,7 @@ const postHogCommandEvent = "ox command run"
 
 // envStartedByOx is set by main in every ox process, so any ox it starts
 // (a hook running prime or a local query, sync starting the daemon) knows it
-// is automation rather than a command a person or an AI coworker chose to
+// is automation rather than a command a person or an AI teammate chose to
 // run.
 const envStartedByOx = "OX_STARTED_BY_OX"
 
@@ -312,7 +312,7 @@ const telemetryNotice = "ox sends usage data (commands, context use and murmur p
 	"Details: ox config get telemetry · Turn off: ox config set telemetry off"
 
 // showTelemetryNoticeOnce prints telemetryNotice unless it was shown before or
-// no person is reading. An AI coworker's transcript and --json output get no
+// no person is reading. An AI teammate's transcript and --json output get no
 // prose, the same audience rule as update notices. The shown flag is saved
 // before printing, so a config that can't be saved means no notice rather
 // than one on every run.

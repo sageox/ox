@@ -77,7 +77,7 @@ func init() {
 	f.Bool("allow-unconfirmed", false, "accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan/--discussion refs — without a warning (may 404)")
 }
 
-// prHeaderGuidance is the behavioral contract for the AI coworker pasting this
+// prHeaderGuidance is the behavioral contract for the AI teammate pasting this
 // line. It ships in the --json payload rather than only in a SKILL body: skills
 // are Claude-only, and Codex/Droid install no commands, so guidance that lives in
 // a skill never reaches them. One source of truth, delivered by the live binary,

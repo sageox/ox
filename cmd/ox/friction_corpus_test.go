@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// frictionCorpusCase is one anonymized invocation an AI coworker or person
+// frictionCorpusCase is one anonymized invocation an AI teammate or person
 // actually typed, with the outcome ox is meant to produce for it.
 type frictionCorpusCase struct {
 	Argv         []string `json:"argv"`
@@ -30,7 +30,7 @@ var corpusBannedSuggestions = []string{"gc", "uninstall", "logout"}
 // TestFrictionCorpus replays every invocation shape from a month of failed ox
 // commands and asserts what ox does with it today: run it as typed, correct
 // and run it, suggest a fix without running it, or keep it an error. A
-// regression here means an AI coworker is back to guessing.
+// regression here means an AI teammate is back to guessing.
 func TestFrictionCorpus(t *testing.T) {
 	unregisterGatedCommandsForTest(t)
 	restoreRootCmdState(t)

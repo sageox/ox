@@ -104,7 +104,7 @@ func TestImportE2E_AbortedRecordingIsNeverImported(t *testing.T) {
 		abort  func(t *testing.T, recording string)
 	}{
 		{
-			name: "live recording aborted by its own AI coworker",
+			name: "live recording aborted by its own AI teammate",
 			record: func(t *testing.T, f *importFixture, nativePath string) (string, string) {
 				state, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
 					AgentID: "OxAbrt", AdapterName: "claude-code", Username: "devon",
@@ -482,7 +482,7 @@ func TestImportE2E_FinalizedKillWithUnreadableMeta(t *testing.T) {
 
 // Concurrent aborts each keep their entry.
 //
-// Failure prevented: two AI coworkers aborting at once, each rewriting the
+// Failure prevented: two AI teammates aborting at once, each rewriting the
 // record from what it read, and one discarded session coming back.
 func TestRecordAbortedSessions_ConcurrentAbortsKeepEveryEntry(t *testing.T) {
 	ledgerPath := t.TempDir()

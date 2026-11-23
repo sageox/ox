@@ -24,11 +24,11 @@ var sessionWaitCmd = &cobra.Command{
 	Use:   "wait --since <time>",
 	Short: "Wait until this machine's sessions reach the Ledger, and report what did",
 	Long: `Make sure every session recorded on this machine is in the Ledger before the
-machine goes away, such as a CI-like pod. Run it after the AI coworkers exit.
+machine goes away, such as a CI-like pod. Run it after the AI teammates exit.
 
 Where the daemon uploads sessions, as on a laptop or a pod, wait hands it every
 session that has ended and waits up to --timeout for the daemon to upload them.
-A crashed AI coworker's session is the daemon's to finish. Elsewhere session end
+A crashed AI teammate's session is the daemon's to finish. Elsewhere session end
 has already uploaded, and wait only reports. wait never uploads anything itself.
 
 The report counts the sessions finished since --since and how many of them are
@@ -197,11 +197,11 @@ func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, 
 			// not handed over: the daemon's dead-agent check drains the last entries first
 			crashed := outsideSession{
 				name:     name,
-				reason:   "AI coworker exited without ending the session; run ox agent " + rec.AgentID + " session recover",
+				reason:   "AI teammate exited without ending the session; run ox agent " + rec.AgentID + " session recover",
 				finished: session.ResolveStoppedAt(rec.StoppedAt, filepath.Join(rec.SessionPath, ledgerFileRaw), time.Now()),
 			}
 			if daemonUploads {
-				crashed.reason, crashed.pending = "AI coworker exited without ending the session; waiting for the daemon", true
+				crashed.reason, crashed.pending = "AI teammate exited without ending the session; waiting for the daemon", true
 			}
 			add(crashed)
 		}
@@ -253,7 +253,7 @@ func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, 
 
 // publishedSince counts sessions on the Ledger's remote that finished at or
 // after since and were committed by this clone's Git author. The author is a
-// person or an AI coworker, not a machine, so it also counts that author's
+// person or an AI teammate, not a machine, so it also counts that author's
 // sessions from other machines.
 func publishedSince(ctx context.Context, ledgerPath string, since time.Time) (int, error) {
 	ident, err := gitutil.RunGit(ctx, ledgerPath, "var", "GIT_AUTHOR_IDENT")

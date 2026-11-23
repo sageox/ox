@@ -23,7 +23,7 @@ It is the terminal twin of the repo-initialized email's facts card: same facts, 
 
 Commands that change nothing a teammate can see: a box that always appears gets skimmed.
 
-Framed output is for a terminal only. Pipes, CI and AI coworkers get the same facts as labeled lines.
+Framed output is for a terminal only. Pipes, CI and AI teammates get the same facts as labeled lines.
 
 ## What it says
 

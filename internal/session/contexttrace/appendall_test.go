@@ -9,7 +9,7 @@ import (
 
 // TestAppendAll prevents a batched trace write from landing half a batch (or
 // an empty file) — a torn context-trace would misreport what ox put in front
-// of the AI coworker.
+// of the AI teammate.
 func TestAppendAll(t *testing.T) {
 	tests := []struct {
 		name      string

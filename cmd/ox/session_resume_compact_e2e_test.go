@@ -97,7 +97,7 @@ func TestCompactedClaudeSession_IsRecordedAndPublishedOnStop(t *testing.T) {
 }
 
 // When the transcript cannot be found at all, what the recording already holds
-// (here, history an AI coworker reconstructed with capture-prior) is still the
+// (here, history an AI teammate reconstructed with capture-prior) is still the
 // session, under either publishing mode. Failure prevented: stop returned
 // success but published nothing and left the recording marked live, so
 // `ox session upload` refused it as "still recording" and only
@@ -140,7 +140,7 @@ func (r *claudeRecordingFixture) setSessionPublishing(mode string) {
 }
 
 // captureHistoryWithoutTranscript primes a recording whose transcript does not
-// exist and gives it two turns an AI coworker reconstructed with capture-prior.
+// exist and gives it two turns an AI teammate reconstructed with capture-prior.
 func (r *claudeRecordingFixture) captureHistoryWithoutTranscript() string {
 	t := r.t
 	t.Helper()
@@ -181,7 +181,7 @@ func newClaudeRecordingFixture(t *testing.T) *claudeRecordingFixture {
 	// built before the fixture moves HOME, so the build uses the real Go cache
 	adapterDir := buildClaudeAdapterForTest(t)
 	for _, key := range []string{"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AMP_THREAD_URL", "PI_SESSION_ID", "OMP_SESSION_ID", "GC_RUN_ID"} {
-		t.Setenv(key, "") // the test binary may itself run inside an AI coworker
+		t.Setenv(key, "") // the test binary may itself run inside an AI teammate
 	}
 	f := newDownloadLedgerFixture(t)
 	// Prime records only once it finds the Ledger where it clones one, and

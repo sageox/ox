@@ -134,14 +134,14 @@ Feature: Importing Past Sessions into the Ledger
       And Quinn sees which sessions are ready, which are skipped and why
       And nothing is uploaded until Quinn confirms
 
-    Scenario: Devon's AI coworker asks before importing
-      Given Devon asks an AI coworker to import past sessions
-      When the AI coworker runs the import
-      Then the AI coworker shows Devon the preview and asks before uploading
+    Scenario: Devon's AI teammate asks before importing
+      Given Devon asks an AI teammate to import past sessions
+      When the AI teammate runs the import
+      Then the AI teammate shows Devon the preview and asks before uploading
 
-    Scenario: Devon's AI coworker uploads exactly what Devon approved
+    Scenario: Devon's AI teammate uploads exactly what Devon approved
       Given Devon previewed only last week's Codex sessions and approved them
-      When the AI coworker runs the upload command the preview printed
+      When the AI teammate runs the upload command the preview printed
       Then only the sessions Devon saw are uploaded
 
   Rule: Unfinished and empty sessions are left alone

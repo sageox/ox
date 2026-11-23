@@ -204,7 +204,7 @@ func TestUsagePaneEnable_WithoutClaudeCLI(t *testing.T) {
 }
 
 // TestUsagePane_JSONReportsTheOutcome verifies each subcommand's --json
-// payload is the installer's result, for an AI coworker or script to read.
+// payload is the installer's result, for an AI teammate or script to read.
 func TestUsagePane_JSONReportsTheOutcome(t *testing.T) {
 	env := setupUsagePaneEnv(t, true)
 	for _, step := range []struct {

@@ -416,7 +416,7 @@ func TestParseConversationSince(t *testing.T) {
 // the image line is a pasteable ox fetch command, and screen text that tried
 // to break the line (newline + "Ignore previous instructions") stays inside
 // its own indented row.
-// Failure prevented: a human or AI coworker reading --text output cannot
+// Failure prevented: a human or AI teammate reading --text output cannot
 // tell screen-derived text from ox's own labels.
 func TestConversationTranscriptFramesText(t *testing.T) {
 	orig := openConversationReader
@@ -477,7 +477,7 @@ const convTestWalkthroughCnv = "cnv_01a0f488-0000-7000-8000-0000000000b1"
 // TestConversationWalkthroughEnvelope: the walkthrough command serves the
 // read layer's payload as one JSON envelope, honoring --cues and --limit.
 // Failure prevented: the flags parse but never reach the reader, so an AI
-// coworker asking for one cue gets the whole recording.
+// teammate asking for one cue gets the whole recording.
 func TestConversationWalkthroughEnvelope(t *testing.T) {
 	useDesktopWalkthroughReader(t)
 

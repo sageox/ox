@@ -30,7 +30,7 @@ Examples:
   ox session view 2026-01-06T14-32-ryan   # specific session in web viewer
   ox session view --text                  # view local session in terminal (markdown)
   ox session view --json                  # view local session as structured JSON
-  ox session view --context                  # show what context the AI coworker had
+  ox session view --context                  # show what context the AI teammate had
   ox session view --context --json            # context trace as structured JSON
   ox session view --input /path/to/raw.jsonl
 
@@ -326,7 +326,7 @@ func tryReadFromLedger(name string) *session.StoredSession {
 }
 
 // traceSessionViewed records a session `ox session view` put in front of the
-// AI coworker (text or JSON — the web view opens a browser, not the model's
+// AI teammate (text or JSON — the web view opens a browser, not the model's
 // context) as a surfaced item in its session trace. Best-effort and silent:
 // no project, no agent ID, or no live recording, no trace.
 func traceSessionViewed(projectRoot string, st *session.StoredSession) {

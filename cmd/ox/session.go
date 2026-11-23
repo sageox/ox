@@ -8,11 +8,11 @@ var sessionCmd = &cobra.Command{
 	Use:   "session",
 	Args:  cobra.NoArgs,
 	RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
-	Short: "Manage AI coworker sessions",
-	Long: `View and manage sessions of human + AI coworker conversations.
+	Short: "Manage AI teammate sessions",
+	Long: `View and manage sessions of human + AI teammate conversations.
 
 Sessions are recordings of interactive discussions between developers
-and AI coworkers. Capture struggles, solutions, and learnings to build
+and AI teammates. Capture struggles, solutions, and learnings to build
 collective team knowledge.
 
 Commands:

@@ -96,7 +96,7 @@ func TestIsAlive(t *testing.T) {
 
 // Failure prevented: a recording left by a machine that went away names a PID
 // that a process on the next machine reuses, and liveness checks take that
-// process for the recording's AI coworker for as long as it runs.
+// process for the recording's AI teammate for as long as it runs.
 func TestIsReused(t *testing.T) {
 	self := os.Getpid()
 	start, ok := StartTime(self)

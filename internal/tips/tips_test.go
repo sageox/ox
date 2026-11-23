@@ -121,12 +121,12 @@ func TestGetPrimeUserTip_EmptyAgentType(t *testing.T) {
 	found := false
 	for i := 0; i < 100; i++ {
 		tip := GetPrimeUserTip("")
-		if strings.Contains(tip, "your AI coworker") {
+		if strings.Contains(tip, "your AI teammate") {
 			found = true
 			break
 		}
 	}
-	assert.True(t, found, "expected fallback to 'your AI coworker' for empty agent type")
+	assert.True(t, found, "expected fallback to 'your AI teammate' for empty agent type")
 }
 
 func TestFriendlyAgentName(t *testing.T) {
@@ -138,7 +138,7 @@ func TestFriendlyAgentName(t *testing.T) {
 		{"claude-code", "Claude Code"},
 		{"cursor", "Cursor"},
 		{"Windsurf", "Windsurf"},
-		{"", "your AI coworker"},
+		{"", "your AI teammate"},
 		{"custom-agent", "Custom-agent"},
 	}
 

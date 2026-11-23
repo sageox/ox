@@ -10,7 +10,7 @@ import (
 
 // annotationTimeOrdered marks a list command whose rows are ordered by time.
 // flag_vocabulary_test.go requires every command carrying it to expose
-// --limit, --since, --until, and --json: AI coworkers generalize a flag they
+// --limit, --since, --until, and --json: AI teammates generalize a flag they
 // learned on one sibling to the next, so the siblings must agree.
 const annotationTimeOrdered = "ox:time-ordered"
 

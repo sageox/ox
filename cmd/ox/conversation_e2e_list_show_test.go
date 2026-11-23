@@ -241,7 +241,7 @@ func TestConversationE2E_InvalidIDs(t *testing.T) {
 // TestConversationE2E_PastedLinks proves a sageox.ai link pasted from a
 // browser or a desktop receipt opens the same conversation as its id, at the
 // binary level, for every command that takes an id.
-// Failure prevented: an AI coworker handed a link has no local way in and
+// Failure prevented: an AI teammate handed a link has no local way in and
 // falls back to web-fetching a sign-in wall.
 func TestConversationE2E_PastedLinks(t *testing.T) {
 	t.Parallel()

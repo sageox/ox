@@ -102,7 +102,7 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
 
 // runAgentSessionRecover recovers a stale/crashed session.
 //
-// When an AI coworker crashes or loses context, it may leave behind a stale
+// When an AI teammate crashes or loses context, it may leave behind a stale
 // .recording.json without properly running session stop. This command recovers
 // whatever session data is available and uploads it to the ledger.
 //
@@ -347,7 +347,7 @@ var clearRecoveredRecording = session.ClearRecordingStateAt
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
-// the AI coworker's original session file has been cleaned up.
+// the AI teammate's original session file has been cleaned up.
 //
 // Interactive terminals get a confirmation prompt before uploading.
 // Non-interactive contexts (agents) auto-upload for backward compatibility.

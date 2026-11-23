@@ -11,7 +11,7 @@ Feature: Loading Team Context for Planning
   See also: priming/prime-session.feature
   See also: plan-enrichment/enrich-while-drafting.feature
 
-  Rule: Team context is available for AI-coworker planning
+  Rule: Team context is available for AI-teammate planning
 
     Scenario: Avery pulls team context before planning a change
       Given Avery is in a session for "Acme Engineering"

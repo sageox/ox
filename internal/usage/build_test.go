@@ -44,7 +44,7 @@ func surfacedRefs(r Report) []string {
 }
 
 // TestBuild covers the rules `ox session report` reports by. Failure prevented: the
-// report double-counts prime, claims use the AI coworker never reported, or
+// report double-counts prime, claims use the AI teammate never reported, or
 // asks for a self-report it cannot write (not recording).
 func TestBuild(t *testing.T) {
 	tests := []struct {
@@ -154,7 +154,7 @@ func TestBuild(t *testing.T) {
 			},
 		},
 		{
-			name: "recording, unreported: the self-report command names this AI coworker",
+			name: "recording, unreported: the self-report command names this AI teammate",
 			in:   Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{memoryProvided()}},
 			assert: func(t *testing.T, r Report) {
 				require.NotNil(t, r.Used.SelfReport)
@@ -187,7 +187,7 @@ func TestBuild(t *testing.T) {
 				require.NotNil(t, r.Used.SageoxScore)
 				assert.Equal(t, Score{Category: "moderate", Reason: "r"}, *r.Used.SageoxScore)
 				assert.Equal(t, 2, r.Used.ProducedCommits)
-				assert.Contains(t, r.Display, "co-author  moderate · would attribute (threshold 0.5)\n           reported by the AI coworker: r\n")
+				assert.Contains(t, r.Display, "co-author  moderate · would attribute (threshold 0.5)\n           reported by the AI teammate: r\n")
 			},
 		},
 		{
@@ -321,7 +321,7 @@ func TestBuild_NoURLWithoutEndpoint(t *testing.T) {
 
 // TestBuild_NextActions_NoReportNag: a recording with unreported items gets
 // no "report which surfaced items" follow-up, and the self-report command is
-// still available for the AI coworker to use quietly. Failure prevented: the
+// still available for the AI teammate to use quietly. Failure prevented: the
 // brief nags the coworker about plumbing instead of showing value.
 func TestBuild_NextActions_NoReportNag(t *testing.T) {
 	r := Build(Input{TraceSource: TraceSourceSession, AgentID: "OxAb12", Recording: true, Events: []contexttrace.Event{memoryProvided()}})

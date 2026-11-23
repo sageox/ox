@@ -67,7 +67,7 @@ func TestDiscoverDocs(t *testing.T) {
 			// surfacing as a bogus "discussion" citation.
 			name: "unfilled scaffold excluded by sentinel text",
 			files: map[string]string{
-				"glossary.md": "# Glossary\n\nDefine your team's critical domain-specific terms, acronyms, jargon here for AI coworkers to reference.\n\n<!-- Replace or extend the examples below with your own terms. -->\n",
+				"glossary.md": "# Glossary\n\nDefine your team's critical domain-specific terms, acronyms, jargon here for AI teammates to reference.\n\n<!-- Replace or extend the examples below with your own terms. -->\n",
 				"real.md":     "# Real Doc\nActual filled-in team knowledge.",
 			},
 			wantDocs: []string{"real.md"},

@@ -142,7 +142,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		nodes = append(nodes, domain.NavNode{
 			ID:    "hint-murmurs",
 			Kind:  domain.NavNodeHint,
-			Label: "murmurs appear here when AI coworkers share WIP",
+			Label: "murmurs appear here when AI teammates share WIP",
 			Depth: 1,
 		})
 	}
@@ -178,11 +178,11 @@ func BuildNav(s *Store) []domain.NavNode {
 		})
 	}
 
-	// AI Coworkers section — active AI coworker instances from the daemon.
+	// AI Teammates section — active AI teammate instances from the daemon.
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-ai-coworkers",
 		Kind:       domain.NavNodeSection,
-		Label:      fmt.Sprintf("AI Coworkers (%d)", len(s.Instances)),
+		Label:      fmt.Sprintf("AI Teammates (%d)", len(s.Instances)),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
@@ -535,7 +535,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		}
 	}
 
-	// Whisper history section — recent whispers delivered to AI coworkers.
+	// Whisper history section — recent whispers delivered to AI teammates.
 	if len(s.WhisperHistory) > 0 {
 		nodes = append(nodes, domain.NavNode{
 			ID:         "section-whispers",

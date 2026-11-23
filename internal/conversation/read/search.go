@@ -18,7 +18,7 @@ import (
 const (
 	DefaultSearchLimit = 10
 	MaxSearchLimit     = 50
-	// maxHitsPerResult keeps one result to a few lines an AI coworker can
+	// maxHitsPerResult keeps one result to a few lines an AI teammate can
 	// act on; the transcript command is the way to read further.
 	maxHitsPerResult = 3
 	// snippetRunes is the snippet budget. Long enough to recognize the
@@ -110,7 +110,7 @@ type SearchData struct {
 // Search finds conversations by keyword, participant, speaker and date over
 // every summarized conversation in the team context — not only the ones
 // INDEX.json lists (see catalogEntry). It is lexical on purpose (ox
-// ADR-024: agentic and tool-driven, not vector RAG): an AI coworker reads the
+// ADR-024: agentic and tool-driven, not vector RAG): an AI teammate reads the
 // hits, then descends with transcript --cues or show. Semantic recall over
 // the whole team context stays with ox query.
 func (r *Reader) Search(opts SearchOptions) *Envelope {

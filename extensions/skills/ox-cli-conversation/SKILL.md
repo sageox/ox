@@ -17,7 +17,7 @@ description: >-
      forms, pinning semantics, and each next step — lives in the `guidance`
      field of every `ox conversation` JSON envelope and in
      `ox guide conversations` (Layer-1: the prime KB block names the verb),
-     which reach every primed AI coworker. This native skill adds discovery
+     which reach every primed AI teammate. This native skill adds discovery
      and activation ergonomics; it duplicates no reasoning. Do not grow
      this body. -->
 

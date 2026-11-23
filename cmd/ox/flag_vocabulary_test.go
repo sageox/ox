@@ -8,7 +8,7 @@ import (
 )
 
 // timeOrderedVocabulary is the flag set every time-ordered list shares. AI
-// coworkers generalize a flag they saw on one sibling to the next, so a
+// teammates generalize a flag they saw on one sibling to the next, so a
 // sibling that lacks one fails them (observed: `plan list --limit`,
 // `session list --since`, `conversation list --until`).
 var timeOrderedVocabulary = []string{"limit", "since", "until", "json"}
@@ -66,7 +66,7 @@ func exposedFlagVisible(cmd *cobra.Command, name string) bool {
 // TestTimeOrderedListsShareFlagVocabulary: every list annotated as
 // time-ordered answers to --limit, --since, --until, and --json.
 // Failure prevented: a new (or edited) list command ships a subset, and the
-// next AI coworker that generalizes from a sibling hits "unknown flag".
+// next AI teammate that generalizes from a sibling hits "unknown flag".
 func TestTimeOrderedListsShareFlagVocabulary(t *testing.T) {
 	annotated := 0
 	for _, cmd := range allCommandsIncludingGated() {

@@ -32,7 +32,7 @@ import (
 //	  - Any UI or metadata that could be shared beyond the user
 //
 // Fallback chain (best → worst):
-//  0. The AI coworker a team token acts as (auth.TeamCoworker) — when named,
+//  0. The AI teammate a team token acts as (auth.TeamCoworker) — when named,
 //     it is the whole attribution; nothing below is consulted
 //  1. SageOx OAuth (ox login) — verified identity
 //  2. Config display_name (ox config) — DisplayName only
@@ -74,7 +74,7 @@ type Attribution struct {
 	// any output that could be seen by teammates.
 	DisplayName string
 
-	// AI is true when the work belongs to the AI coworker a team token acts
+	// AI is true when the work belongs to the AI teammate a team token acts
 	// as. Username is then the coworker's slug (or agt_ id), Name and
 	// DisplayName its name as set in SageOx, unabbreviated, and Email is "".
 	AI bool
@@ -190,7 +190,7 @@ func signedInUser(ep string) (id, email, name string) {
 		if id == "" {
 			// A login stored before user_id existed names the account only in
 			// its access token's subject; LocalUserID recovers it without
-			// treating a team token's AI coworker as a signed-in account.
+			// treating a team token's AI teammate as a signed-in account.
 			id = auth.LocalUserID(ep)
 		}
 	}
@@ -209,7 +209,7 @@ func signedInUser(ep string) (id, email, name string) {
 const accountEmailDomain = "@sageox-account.invalid"
 
 // LedgerAuthor is who ox commits as in a clone whose origin is remoteURL, on
-// that clone's git server: the AI coworker a team token acts as, else the
+// that clone's git server: the AI teammate a team token acts as, else the
 // signed-in person, named by their DisplayName and an address built from
 // their account ID, because those commits reach teammates (PRIVACY RULE). An
 // expired sign-in still counts; only signing out ends it. Both results are ""
@@ -246,7 +246,7 @@ func CachedCoworkerAuthor(ep string) (name, email string, known bool) {
 	return c.Name(), gitserver.CoworkerEmail(c.ID), true
 }
 
-// CoworkerAuthor is the commit identity of the AI coworker a team token at ep
+// CoworkerAuthor is the commit identity of the AI teammate a team token at ep
 // acts as: its name and its agt_ address. Both are "" for any other credential,
 // including a team token the server names no coworker for.
 func CoworkerAuthor(ep string) (name, email string) {
@@ -305,7 +305,7 @@ func AttributionUsername(ep, configDisplayName string) string {
 // then $USER. It never consults a token and so never reaches the network,
 // which makes it safe for per-keystroke surfaces like the status line. It
 // differs from AttributionUsername only where that one is decided by a
-// token: a team token's AI coworker, and an Amp orb's verified identity.
+// token: a team token's AI teammate, and an Amp orb's verified identity.
 func LocalAttributionUsername() string {
 	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
 		if slug := gitIdent.Slug(); slug != "" {

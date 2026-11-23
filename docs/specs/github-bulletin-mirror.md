@@ -4,7 +4,7 @@
 
 Each eligible pull request and issue within the 90-day activity window becomes a read-only post on the team's
 `github` bulletin board. The post is injection-scanned, replaced in place when the item changes,
-and expires 90 days after the last material change. AI coworkers in every repo see recent GitHub
+and expires 90 days after the last material change. AI teammates in every repo see recent GitHub
 context without the bot noise. The mirror runs beside the Ledger `data/github` sync and replaces
 it once the board is proven.
 

@@ -38,7 +38,7 @@ func LoadTeamDiscussionsCmd(c Client, gen int) tea.Cmd {
 	}
 }
 
-// LoadInstancesCmd returns a tea.Cmd that fetches active AI coworker instances
+// LoadInstancesCmd returns a tea.Cmd that fetches active AI teammate instances
 // asynchronously and wraps the result in InstancesLoadedMsg.
 func LoadInstancesCmd(c Client, gen int) tea.Cmd {
 	return func() tea.Msg {

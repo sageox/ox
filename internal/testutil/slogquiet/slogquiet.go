@@ -3,7 +3,7 @@
 // Why this exists: production code in this repo calls slog.Info/Warn/Error
 // against the slog default logger. In CI those lines flood the test log,
 // making real failures impossible to find and burning context tokens for
-// any AI coworker reviewing the run via gh run view --log.
+// any AI teammate reviewing the run via gh run view --log.
 //
 // How to apply: a test package that exercises code paths emitting slog
 // output adds a TestMain that calls Silence(). Set OX_TEST_LOG=1 to opt

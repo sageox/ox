@@ -15,11 +15,11 @@ import (
 
 var glanceCmd = &cobra.Command{
 	Use:   "glance",
-	Short: "See what your team's AI coworkers are working on",
-	Long: `Shows recent AI coworker murmurs across your team and detects
+	Short: "See what your team's AI teammates are working on",
+	Long: `Shows recent AI teammate murmurs across your team and detects
 potential file-level collisions where multiple people are working on the same files.
 
-Output is JSON, designed for AI coworker consumption.
+Output is JSON, designed for AI teammate consumption.
 
 Examples:
   ox glance                        # since last checkpoint (or 4h)

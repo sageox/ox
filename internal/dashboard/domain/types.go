@@ -19,7 +19,7 @@ const (
 	TargetSession                            // a recorded agent session
 	TargetWorkspace                          // a daemon-synced workspace (ledger or team context)
 	TargetIssue                              // a DaemonIssue flagged by the daemon
-	TargetMurmur                             // a WIP broadcast from an AI coworker
+	TargetMurmur                             // a WIP broadcast from an AI teammate
 	TargetTeamDiscussion                     // a recorded team discussion document
 	TargetAuth                               // authentication status and token info
 	TargetCodeDB                             // code index (codedb) statistics
@@ -54,7 +54,7 @@ type InspectorTarget struct {
 	WhisperHistory []WhisperHistoryEntry      // for TargetWhisperHistory
 }
 
-// WhisperHistoryEntry is a single whisper delivered to an AI coworker.
+// WhisperHistoryEntry is a single whisper delivered to an AI teammate.
 // Populated from the daemon's WhisperHistory IPC endpoint.
 type WhisperHistoryEntry struct {
 	AgentID   string
@@ -84,7 +84,7 @@ type SOULDocument struct {
 	Content  string
 }
 
-// MurmurEntry is a WIP broadcast emitted by an AI coworker during an active session.
+// MurmurEntry is a WIP broadcast emitted by an AI teammate during an active session.
 type MurmurEntry struct {
 	AgentID   string
 	Author    string
@@ -117,7 +117,7 @@ const (
 	NavNodeAuth                               // authentication status node
 	NavNodeSyncHealth                         // sync health summary node
 	NavNodeSOUL                               // SOUL.md team identity node
-	NavNodeAICoworker                         // active AI coworker instance node
+	NavNodeAICoworker                         // active AI teammate instance node
 	NavNodeDaemon                             // daemon health section header
 	NavNodeDaemonErrors                       // stored errors sub-node
 	NavNodeAgentWork                          // agent work queue sub-node
@@ -174,7 +174,7 @@ const (
 type TimelineEntry struct {
 	ID        string
 	Kind      TimelineEntryKind
-	Actor     string // human or AI coworker that generated the event
+	Actor     string // human or AI teammate that generated the event
 	Summary   string // one-line description shown in the list
 	Timestamp time.Time
 	Target    *InspectorTarget // non-nil when selecting this entry updates the inspector

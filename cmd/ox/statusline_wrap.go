@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// `ox statusline --wrap -- <command>` runs an AI coworker's terminal app
+// `ox statusline --wrap -- <command>` runs an AI teammate's terminal app
 // (Codex) inside ox and keeps the bottom row of that same terminal for ox:
 // the status line, then the flow lane of the latest ox call, animating as it
 // lands. It exists because Codex gives a command no place to draw: its status

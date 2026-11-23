@@ -10,7 +10,7 @@ import (
 // from the coworker's own environment, instead of the current one.
 //
 // The ox binary sets NO_COLOR=1 during startup whenever stdout is not a
-// terminal or an AI coworker is detected (cmd/ox/main.go init), which is
+// terminal or an AI teammate is detected (cmd/ox/main.go init), which is
 // always the case inside a harness hook. After that, ColorAllowed reports
 // false for every coworker. Callers in the ox binary pass the value captured
 // before that override.

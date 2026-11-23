@@ -24,9 +24,9 @@ Feature: A Coworker's Config Choices Take Effect
 
   Rule: Turning session recording off records nothing
 
-    Scenario: Avery disables session recording, then starts an AI coworker
+    Scenario: Avery disables session recording, then starts an AI teammate
       Given Avery has set session recording to disabled
-      When Avery primes an AI coworker and works for several turns
+      When Avery primes an AI teammate and works for several turns
       Then no session is recorded to the Ledger
       And the session's /c/ link never resolves, because there is nothing to link
 
@@ -34,13 +34,13 @@ Feature: A Coworker's Config Choices Take Effect
 
     Scenario: Riley works with the default privacy settings
       Given Riley has not enabled the cloud query
-      When Riley submits a prompt to an AI coworker
+      When Riley submits a prompt to an AI teammate
       Then ox answers from the local Ledger only and makes no network call
       And no remote-tagged context is injected into the prompt
 
     Scenario: Riley opts in to the cloud query
       Given Riley has enabled the cloud query and is signed in
-      When Riley submits a prompt to an AI coworker
+      When Riley submits a prompt to an AI teammate
       Then ox also asks the cloud, and the remote-tagged context appears
 
   Rule: Turning off plan HTML silences the render and its nudge

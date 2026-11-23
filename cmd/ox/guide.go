@@ -38,9 +38,9 @@ containing Markdown without frontmatter. --json and --raw cannot be combined.
 
 Examples:
   ox guide                    # list all topics
-  ox guide team-rules         # how to share AI coworker rules across the team
+  ox guide team-rules         # how to share AI teammate rules across the team
   ox guide getting-started    # five-minute walkthrough
-  ox guide team-rules --raw   # plain markdown (for piping to AI coworkers)
+  ox guide team-rules --raw   # plain markdown (for piping to AI teammates)
   ox guide --json             # topic metadata as JSON
   ox guide team-rules --json  # metadata and Markdown content as JSON`,
 	Args: cobra.MaximumNArgs(1),

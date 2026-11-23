@@ -19,7 +19,7 @@ import (
 
 // Failure prevented: a recording replaced without its stop (or whose stop
 // never closed the stream) stayed "Live" on SageOx for good, so one AI
-// coworker piled up open streams across /clear boundaries.
+// teammate piled up open streams across /clear boundaries.
 func TestLiveNewRecordingByTheSameAICoworkerClosesItsPreviousStream(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: three recordings and a close against the fake server")
@@ -31,7 +31,7 @@ func TestLiveNewRecordingByTheSameAICoworkerClosesItsPreviousStream(t *testing.T
 	// the recording ends with its stream still open
 	require.NoError(t, session.ClearRecordingStateForAgent(f.projectRoot, f.agentID))
 
-	// another AI coworker's open stream in the same project; the usernames
+	// another AI teammate's open stream in the same project; the usernames
 	// only put each recording in its own folder, as a later minute would
 	other, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{AgentID: "OxOther", AdapterName: "claude-code", Username: "person-c"})
 	require.NoError(t, err)
@@ -44,8 +44,8 @@ func TestLiveNewRecordingByTheSameAICoworkerClosesItsPreviousStream(t *testing.T
 
 	prev, err := livesession.ReadState(oldDir)
 	require.NoError(t, err)
-	assert.True(t, prev.CloseRequested, "the same AI coworker's previous stream must be closed")
-	for name, dir := range map[string]string{"another AI coworker's stream": other.SessionPath, "the new recording's own stream": next.SessionPath} {
+	assert.True(t, prev.CloseRequested, "the same AI teammate's previous stream must be closed")
+	for name, dir := range map[string]string{"another AI teammate's stream": other.SessionPath, "the new recording's own stream": next.SessionPath} {
 		st, err := livesession.ReadState(dir)
 		require.NoError(t, err)
 		assert.Equal(t, livesession.StatusPending, st.Status, name)
@@ -165,7 +165,7 @@ func TestSessionStartTextReportsAFailedWrite(t *testing.T) {
 }
 
 // Failure prevented (PR 1971 review): a recording that publishes manually
-// returned before the superseded-stream cleanup, so switching an AI coworker
+// returned before the superseded-stream cleanup, so switching an AI teammate
 // to manual publishing left its previous automatic stream open.
 func TestLiveManualRecordingStillClosesThePreviousStream(t *testing.T) {
 	if testing.Short() {
@@ -180,7 +180,7 @@ func TestLiveManualRecordingStillClosesThePreviousStream(t *testing.T) {
 
 	liveSessionBegin(f.projectRoot, next, nil)
 
-	assert.True(t, f.liveState().CloseRequested, "the AI coworker's previous automatic stream must be closed")
+	assert.True(t, f.liveState().CloseRequested, "the AI teammate's previous automatic stream must be closed")
 	_, err := livesession.ReadState(next.SessionPath)
 	assert.ErrorIs(t, err, livesession.ErrNotStreaming, "a manual recording never streams itself")
 }

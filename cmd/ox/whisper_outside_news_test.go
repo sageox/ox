@@ -15,7 +15,7 @@ import (
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
-// --- Outside news: a new GitHub pull request reaches AI coworkers as untrusted
+// --- Outside news: a new GitHub pull request reaches AI teammates as untrusted
 // data, outside the trusted <system-reminder>, without teammate framing. ---
 
 // outsideNews builds a relayed new-PR whisper the way the daemon stores it.
@@ -88,10 +88,10 @@ func editedFiles(files ...string) editedFilesFunc {
 }
 
 // TestFormatWhispers_HostileOutsideNewsGolden pins the exact bytes an AI
-// coworker receives for hostile PR titles. Regenerate with UPDATE_GOLDEN=1
+// teammate receives for hostile PR titles. Regenerate with UPDATE_GOLDEN=1
 // after an intentional change, and read the diff: every stranger-written
 // title must stay inside the quotes of its <news> element.
-// Failure prevented: a PR title steers a contributor's AI coworker by
+// Failure prevented: a PR title steers a contributor's AI teammate by
 // escaping the quoted frame or posing as a trusted teammate whisper.
 func TestFormatWhispers_HostileOutsideNewsGolden(t *testing.T) {
 	var buf bytes.Buffer

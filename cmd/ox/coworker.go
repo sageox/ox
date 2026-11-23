@@ -84,7 +84,7 @@ Use 'ox coworker load <name>' to load a coworker's expertise into your context.`
 var coworkerLoadCmd = &cobra.Command{
 	Use:   "load <name>",
 	Short: "Load a coworker's prompt into context",
-	Long: `Load a coworker's full prompt content into your AI coworker context.
+	Long: `Load a coworker's full prompt content into your AI teammate context.
 
 This outputs the coworker's expertise as markdown, which can then be used
 for specialized tasks. The load event is also logged to the session for

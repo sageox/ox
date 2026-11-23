@@ -10,7 +10,7 @@ import (
 	"github.com/sageox/ox/internal/dashboard/theme"
 )
 
-// RenderInstance renders an AI coworker instance in the inspector pane.
+// RenderInstance renders an AI teammate instance in the inspector pane.
 // Shows agent identity, status (with color), workspace, and activity metrics.
 func RenderInstance(target domain.InspectorTarget, width int) string {
 	if target.Instance == nil {
@@ -19,7 +19,7 @@ func RenderInstance(target domain.InspectorTarget, width int) string {
 	inst := target.Instance
 
 	var lines []string
-	title := "AI Coworker"
+	title := "AI Teammate"
 	if inst.AgentType != "" {
 		title = inst.AgentType
 	}

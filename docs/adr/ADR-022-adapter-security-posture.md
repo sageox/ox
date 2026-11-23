@@ -5,7 +5,7 @@
 
 ## Context
 
-Adapters (ADR-008) let any engineer extend ox to drive a new AI coworker backend
+Adapters (ADR-008) let any engineer extend ox to drive a new AI teammate backend
 by shipping a standalone `ox-adapter-<name>` binary that speaks the adapter
 protocol (ADR-010). ox discovers it (ADR-009), installs it (ADR-013), and the
 daemon runs it — one-shot or long-lived in `--serve` mode (ADR-012). **Executing

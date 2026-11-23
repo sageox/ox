@@ -71,7 +71,7 @@ mock_init() {
     printf "  1. Commit .sageox/:  ${S}git add .sageox/ && git commit${R}\n"
     printf "  2. Verify setup:     ${S}ox doctor${R}\n"
     echo ""
-    printf "${DM}Your AI coworker auto-runs ${R}${S}ox agent prime${R}${DM} at session start.${R}\n"
+    printf "${DM}Your AI teammate auto-runs ${R}${S}ox agent prime${R}${DM} at session start.${R}\n"
 }
 
 mock_doctor() {
@@ -117,7 +117,7 @@ mock_status() {
     printf "Status            ${G}✓ running, syncing${R} (pid 20966)\n"
     printf "Syncing           ${B}2 workspace(s)${R}\n"
     echo ""
-    printf "${S}✦${R} Ask your AI coworker about prior sessions — context loads on ${S}ox agent prime${R}\n"
+    printf "${S}✦${R} Ask your AI teammate about prior sessions — context loads on ${S}ox agent prime${R}\n"
 }
 
 mock_agent_prime() {

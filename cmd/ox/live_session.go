@@ -119,14 +119,14 @@ func fetchLiveSettings(ep string) *flags.CLISettingsResponse {
 // header must not reach an already-streaming spool), or on any failure.
 //
 // Live state belongs to one recording, named by its ses_ id (C4). Folder names
-// have minute precision, so an AI coworker restarted within the minute reuses
+// have minute precision, so an AI teammate restarted within the minute reuses
 // the folder of the recording before it; that recording's stream is retired
 // first (retirePreviousLiveStream) and never reused.
 func liveSessionBegin(projectRoot string, state *session.RecordingState, header []byte) {
 	if state == nil || state.SessionID == "" || state.SessionPath == "" {
 		return
 	}
-	// a new recording ends the AI coworker's earlier ones whatever its own
+	// a new recording ends the AI teammate's earlier ones whatever its own
 	// publishing; a manual one just never streams itself
 	closeSupersededLiveStreams(state)
 	if state.RecordedManualPublishing() {
@@ -263,7 +263,7 @@ func ownSessionLink(state *session.RecordingState, id string) string {
 }
 
 // closeSupersededLiveStreams requests the close of every stream an earlier
-// recording by the same AI coworker instance left open in this project. A new
+// recording by the same AI teammate instance left open in this project. A new
 // recording means that one ended, whatever stopped it or failed to: left open,
 // it read as a live session on SageOx for good. It is the normal close with no
 // summary, finished by the daemon, since a start never waits on the network.
@@ -288,7 +288,7 @@ func closeSupersededLiveStreams(state *session.RecordingState) {
 			(st.Status != livesession.StatusPending && st.Status != livesession.StatusStreaming) {
 			continue
 		}
-		// the raw.jsonl header names the AI coworker instance that recorded it
+		// the raw.jsonl header names the AI teammate instance that recorded it
 		if meta := session.ReadHeaderMeta(filepath.Join(dir, "raw.jsonl")); meta == nil || meta.AgentID != state.AgentID {
 			continue
 		}
@@ -690,7 +690,7 @@ func liveSessionFinishAtHook(projectRoot string, state *session.RecordingState, 
 
 // liveSessionCloseEnded requests the close of the live stream of a recording
 // that ended without a stop to close it (recovered from the cache after its AI
-// coworker crashed), then kicks the daemon, which finishes the close with a
+// teammate crashed), then kicks the daemon, which finishes the close with a
 // summary. A held session's stream is left to the daemon's stopHeld, which
 // deletes its live copy (livesession.RequestCloseOfEnded).
 func liveSessionCloseEnded(state *session.RecordingState) {

@@ -129,7 +129,7 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 	return rules, nil
 }
 
-// PublishedRules returns every rule the team publishes to AI coworkers, before
+// PublishedRules returns every rule the team publishes to AI teammates, before
 // the per-repo `repos:` filter is applied and without loading bodies.
 //
 // Split out from DiscoverRules for the same reason PublishedSkills was: a

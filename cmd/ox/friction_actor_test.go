@@ -12,7 +12,7 @@ import (
 // `ox command run` and friction event.
 //
 // Failure prevented: a person running ox in a repository that has a .codex/
-// directory (ox writes .codex/hooks.json there) filed as an AI coworker,
+// directory (ox writes .codex/hooks.json there) filed as an AI teammate,
 // because agentx's Codex detector falls back to that directory.
 func TestOxActorDetector_EnvSignalsOnly(t *testing.T) {
 	tests := []struct {

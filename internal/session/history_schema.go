@@ -41,7 +41,7 @@ const HistorySchemaVersion = "1"
 // HistorySourcePlanningHistory is the source marker for planning history entries.
 const HistorySourcePlanningHistory = "planning_history"
 
-// HistorySourceAgentReconstruction marks a history an AI coworker rebuilt from its own context.
+// HistorySourceAgentReconstruction marks a history an AI teammate rebuilt from its own context.
 const HistorySourceAgentReconstruction = "agent_reconstruction"
 
 // HistoryMeta is the metadata header for captured history.

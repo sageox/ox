@@ -935,7 +935,7 @@ func IsRecording(projectRoot string) bool {
 }
 
 // HasLiveRecording reports whether any active recording for the repository is
-// still owned by a live AI coworker process. A stale recording marker is not a
+// still owned by a live AI teammate process. A stale recording marker is not a
 // live session and must not defer convergence forever.
 func HasLiveRecording(projectRoot string) (bool, error) {
 	live := false
@@ -1508,7 +1508,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("known start offset must not be negative")
 	}
 
-	// A team token with no AI coworker attached would record the session under
+	// A team token with no AI teammate attached would record the session under
 	// the git identity of the machine running it. Cursor prepares this check
 	// outside its startup lock so auth cannot block prompt admission.
 	prepared := opts.PreparedIdentity
@@ -1634,7 +1634,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
 	}
 
-	// auto-detect session origin if not explicitly provided; an AI coworker's
+	// auto-detect session origin if not explicitly provided; an AI teammate's
 	// session has no human in the loop
 	origin := opts.Origin
 	if origin == "" {

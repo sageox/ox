@@ -18,7 +18,7 @@ import (
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
-// Usage trace: the PostToolUse hook records every ox call an AI coworker makes
+// Usage trace: the PostToolUse hook records every ox call an AI teammate makes
 // as an `invoked` context-trace event, so `ox session report` can say what ox put in
 // front of the model. These tests drive the REAL handleAfterTool.
 
@@ -91,7 +91,7 @@ func jsonString(t *testing.T, s string) json.RawMessage {
 // --- A. ox calls land in the session trace, with their size ---
 
 // TestAfterTool_RecordsOxCallIntoSessionTrace is the customer claim: an ox
-// call an AI coworker makes, in either harness and on either surface, shows up
+// call an AI teammate makes, in either harness and on either surface, shows up
 // in the session trace with what it returned. Failure prevented: `ox session report`
 // reports zero ox calls (or zero tokens) for a session that ran them.
 func TestAfterTool_RecordsOxCallIntoSessionTrace(t *testing.T) {
@@ -204,7 +204,7 @@ func TestAfterTool_NoInvokedEventForNonOxWork(t *testing.T) {
 // --- B. Destination when not recording ---
 
 // TestAfterTool_NotRecordingWritesAgentCache keeps the call when no recording
-// is live. Failure prevented: an AI coworker that runs ox before (or without)
+// is live. Failure prevented: an AI teammate that runs ox before (or without)
 // recording leaves no usage trace at all, or writes into the git-tracked
 // project tree.
 func TestAfterTool_NotRecordingWritesAgentCache(t *testing.T) {
@@ -380,7 +380,7 @@ func TestAfterTool_MurmurBodyNeverReachesTrace(t *testing.T) {
 
 // TestAfterTool_OptOutWritesNoInvokedEvent turns recap.trace_consultations
 // off. Failure prevented: a coworker who opted out still has every ox call
-// their AI coworker made synced to the team.
+// their AI teammate made synced to the team.
 func TestAfterTool_OptOutWritesNoInvokedEvent(t *testing.T) {
 	root := usageTraceEnv(t, nil)
 	state := startUsageRecording(t, root)

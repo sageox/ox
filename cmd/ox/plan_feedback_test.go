@@ -372,7 +372,7 @@ func TestEnqueueFailureIsSettled_ClassifiesKnownErrors(t *testing.T) {
 		"task title exceeds 500 bytes",
 		"task body exceeds 4000 bytes",
 		"task payload exceeds 2000 bytes",
-		`task payload key "token" looks sensitive; payload is surfaced to an AI coworker and must not carry secrets`,
+		`task payload key "token" looks sensitive; payload is surfaced to an AI teammate and must not carry secrets`,
 		`new tasks must start "ready", got "in_progress"`,
 		"failed to encode payload: json: unsupported value",
 	}

@@ -17,12 +17,12 @@ import (
 	"github.com/sageox/ox/internal/session/contexttrace"
 )
 
-// "N used" on the status line: the use evidence is in the AI coworker's
+// "N used" on the status line: the use evidence is in the AI teammate's
 // reply, so the Stop hook scans the turn as it lands. Before this, only
 // `ox session report` ran the scan and the line sat stale until the pane ran.
 
 // turnUsesEnv is liveBriefEnv plus the session marker `ox statusline` needs
-// to tie the harness session to the recording's AI coworker. The trace
+// to tie the harness session to the recording's AI teammate. The trace
 // surfaces two conversations; the reply names the second by title.
 func turnUsesEnv(t *testing.T) (string, *session.RecordingState) {
 	t.Helper()
@@ -91,7 +91,7 @@ func TestStop_CountsTurnUsesOnStatusline(t *testing.T) {
 }
 
 // TestStop_TurnUsesSilentCases: nothing is counted or cached when the status
-// line is off, or there is no live recording for the AI coworker.
+// line is off, or there is no live recording for the AI teammate.
 func TestStop_TurnUsesSilentCases(t *testing.T) {
 	t.Run("status line off", func(t *testing.T) {
 		root, state := turnUsesEnv(t)
@@ -123,7 +123,7 @@ func TestStop_TurnUsesSilentCases(t *testing.T) {
 	})
 	t.Run("not recording", func(t *testing.T) {
 		root, _ := turnUsesEnv(t)
-		runStopFor(t, root, "OxOthr1") // an AI coworker with no recording
+		runStopFor(t, root, "OxOthr1") // an AI teammate with no recording
 		assert.Equal(t, 0, oxactivity.LoadState(root, oxactivity.StateKey("OxOthr1", liveHarnessSess)).Used)
 	})
 }

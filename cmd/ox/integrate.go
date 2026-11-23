@@ -95,8 +95,8 @@ The integration ensures that 'ox agent prime' runs when an AI coding session sta
 
 var integrateInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install SageOx integration for AI coworkers",
-	Long: `Install SageOx hooks for AI coworkers.
+	Short: "Install SageOx integration for AI teammates",
+	Long: `Install SageOx hooks for AI teammates.
 
 Default: Claude Code (adds hooks to ~/.claude/settings.json).
 Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects, including
@@ -116,8 +116,8 @@ Other agents can be installed with their respective flags:
 
 var integrateUninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Uninstall SageOx integration from AI coworkers",
-	Long: `Remove SageOx integration from AI coworkers.
+	Short: "Uninstall SageOx integration from AI teammates",
+	Long: `Remove SageOx integration from AI teammates.
 
 Default: Claude Code (removes hooks from ~/.claude/settings.json).
 Use agent-specific flags to uninstall from other agents.`,
@@ -238,7 +238,7 @@ func runIntegrateInteractive() error {
 		}
 	}
 	if allInstalled {
-		fmt.Println("All detected AI coworkers are already integrated.")
+		fmt.Println("All detected AI teammates are already integrated.")
 		for _, a := range agents {
 			fmt.Printf("  %s %s\n", ui.PassStyle.Render("✓"), a.displayName)
 		}
@@ -246,7 +246,7 @@ func runIntegrateInteractive() error {
 	}
 
 	chosen, err := cli.SelectMany(
-		"Which AI coworkers should ox integrate with this repo?",
+		"Which AI teammates should ox integrate with this repo?",
 		options,
 	)
 	if err != nil {
@@ -629,7 +629,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 func runIntegrateList(cmd *cobra.Command, args []string) error {
 	gitRoot := findGitRoot()
 
-	fmt.Println(ui.RenderCategory("AI Coworker Integrations"))
+	fmt.Println(ui.RenderCategory("AI Teammate Integrations"))
 	fmt.Println()
 
 	// Claude Code

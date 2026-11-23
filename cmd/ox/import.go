@@ -549,7 +549,7 @@ func inferTitle(path string) string {
 
 // ensureMetadataGitattributes ensures metadata.json is excluded from LFS.
 // The data/** LFS rule covers source files and extracted.md, but metadata.json
-// must remain a plain-text git object so AI coworkers can read it without hydration.
+// must remain a plain-text git object so AI teammates can read it without hydration.
 func ensureMetadataGitattributes(tcPath string) error {
 	gitattrsPath := filepath.Join(tcPath, ".gitattributes")
 

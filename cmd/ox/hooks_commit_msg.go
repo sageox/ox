@@ -22,7 +22,7 @@ import (
 //
 // This is a deterministic hook called by git's prepare-commit-msg, not by AI
 // agents. It emits predictable output based on config and recording state.
-// Compare with "ox agent <id> hook" which handles AI coworker lifecycle
+// Compare with "ox agent <id> hook" which handles AI teammate lifecycle
 // events with non-deterministic guidance output.
 var hooksCommitMsgCmd = &cobra.Command{
 	Use:   "commit-msg",

@@ -272,7 +272,7 @@ func TestCursorHostCurrentStopRejectsInheritedCoworkerID(t *testing.T) {
 	t.Cleanup(func() { resetSessionForceStopFlags(t) })
 	cmd := sessionForceStopCmd
 	require.NoError(t, cmd.Flags().Set("current", "true"))
-	require.ErrorContains(t, runSessionForceStop(cmd, nil), "explicit AI coworker ID")
+	require.ErrorContains(t, runSessionForceStop(cmd, nil), "explicit AI teammate ID")
 	saved, err := session.LoadRecordingStateForAgent(f.root, state.AgentID)
 	require.NoError(t, err)
 	require.NotNil(t, saved)

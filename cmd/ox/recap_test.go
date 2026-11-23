@@ -19,7 +19,7 @@ import (
 // mutate (or race on) the shared global recapCmd.Flags() FlagSet.
 func newThrowawayRecapFlags() *cobra.Command {
 	cmd := &cobra.Command{Use: "recap"}
-	cmd.Flags().Bool("json", false, "structured JSON evidence bundle for AI coworkers")
+	cmd.Flags().Bool("json", false, "structured JSON evidence bundle for AI teammates")
 	cmd.Flags().String("since", "30d", "reporting window")
 	cmd.Flags().String("user", "", "report for a specific coworker")
 	return cmd

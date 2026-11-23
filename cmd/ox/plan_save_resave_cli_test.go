@@ -322,7 +322,7 @@ func TestPlanSaveFile_ValidKindReachesMeta(t *testing.T) {
 
 // TestPrimeGuidance_SaveCommandNamesTheKindFlag is the other end of the --kind
 // story, and the reason it belongs beside the validation tests above: the CLI
-// can validate --kind all it likes, but if the command every AI coworker is
+// can validate --kind all it likes, but if the command every AI teammate is
 // primed with omits the flag, every mockup, review sheet and evidence page
 // still lands in the ledger labeled "plan". The guidance used to mention the
 // kinds in a parenthetical detached from the command, which reads as optional

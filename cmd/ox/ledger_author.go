@@ -9,7 +9,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 )
 
-// ox commits to the Ledger and Team Context as the AI coworker a team token
+// ox commits to the Ledger and Team Context as the AI teammate a team token
 // acts as, else the signed-in SageOx account, so session recordings save even
 // on a machine whose git has no identity. Wired here because only package main
 // reaches auth, identity and user config together; gitserver falls back to
@@ -20,7 +20,7 @@ func init() {
 	}
 }
 
-// reconcileProjectCoworker makes the AI coworker a team token acts as the
+// reconcileProjectCoworker makes the AI teammate a team token acts as the
 // author of its commits in the project at projectRoot ("" finds it from the
 // working directory), so its work is attributed to it and commits succeed on a
 // machine whose git has no identity. With no coworker, it removes a stamp an
@@ -50,6 +50,6 @@ func reconcileProjectCoworker(projectRoot string, cachedOnly bool) {
 		name, email = identity.CoworkerAuthor(ep)
 	}
 	if err := gitserver.StampProjectAuthor(projectRoot, name, email); err != nil {
-		slog.Warn("set AI coworker as project commit author failed", "repo", projectRoot, "error", err)
+		slog.Warn("set AI teammate as project commit author failed", "repo", projectRoot, "error", err)
 	}
 }

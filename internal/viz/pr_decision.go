@@ -11,7 +11,7 @@ const (
 	PRMediumRich    PRMedium = "rich"
 )
 
-// PRDecision is deterministic guidance for an AI coworker. Rich is never a
+// PRDecision is deterministic guidance for an AI teammate. Rich is never a
 // default simply because a prompt asks to "show" something.
 type PRDecision struct {
 	Medium           PRMedium        `json:"medium"`

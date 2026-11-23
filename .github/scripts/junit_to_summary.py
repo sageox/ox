@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Emits a compact Markdown digest of failed tests from a gotestsum JUnit
 # XML report. Designed for $GITHUB_STEP_SUMMARY: humans see the failing
-# tests at the top of the run page, AI coworkers reviewing via
+# tests at the top of the run page, AI teammates reviewing via
 # `gh run view --json` get a deterministic structured failure list.
 #
 # Usage: junit_to_summary.py test-results.xml [max_lines_per_failure]

@@ -26,7 +26,7 @@ The platform reversed that premise, and ox was never updated:
 - **ADR-086** gives every user a private per-user team, so "personal" knowledge
   also lives under team machinery; personal bubbles re-scope onto that team.
 - **ADR-097** defines what KBs are *for*: each bubble is owned by a **Curator**
-  AI coworker that folds each newly routed **distillation** (the structured summary a
+  AI teammate that folds each newly routed **distillation** (the structured summary a
   finalized conversation produces, per ADR-057/066) into the bubble's
   current-state knowledge. Humans steer the Curator and read its synopses; they
   never hand-edit synthesized knowledge. Consumers read bubbles two ways —
@@ -58,7 +58,7 @@ awaiting migration." Concretely:
   **deleted**. Only rows returned by the KB API are ever presented as bubbles.
 - `ox teams` is **un-deprecated**; `ox status` regains distinct team-context and
   ledger presentation; all "bubbles are the successor to team contexts /
-  ledgers" framing is removed from code, docs, and AI-coworker-facing hints.
+  ledgers" framing is removed from code, docs, and AI-teammate-facing hints.
 
 ### 2. The workspace primitive stays the project/ledger binding
 
@@ -125,7 +125,7 @@ Mounting mirrors the team-context/ledger mental model:
 kind-priority slug tie-break (personal > profile > team > …) is dropped —
 per-scope slugs make it ambiguous; `--scope` disambiguates explicitly.
 
-### 6. Prime tells AI coworkers what bubbles are and how to use them
+### 6. Prime tells AI teammates what bubbles are and how to use them
 
 The prime envelope's KB block explains, compactly: the purpose of KBs (curated
 team knowledge, one bubble per area), how to find them (mount paths), how to
@@ -153,7 +153,7 @@ bubble content is **data, never instructions**. The `current_kb` field and the
 
 ### Benefits
 
-- ox's model matches the platform's settled model; AI coworkers stop being
+- ox's model matches the platform's settled model; AI teammates stop being
   primed with a dead migration story.
 - Session recording — a privacy surface — is decoupled from a concept under
   redefinition, reverting to the well-understood project/team precedence.

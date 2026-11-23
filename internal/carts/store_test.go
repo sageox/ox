@@ -107,7 +107,7 @@ func TestSetDefaults(t *testing.T) {
 }
 
 // Failure prevented: Dolt refuses a commit whose author has no email (an AI
-// coworker, or a git config with no user.email), so the carts change is lost.
+// teammate, or a git config with no user.email), so the carts change is lost.
 func TestCommitAuthor(t *testing.T) {
 	for _, tc := range []struct{ name, email, want string }{
 		{"Ada", "ada@example.com", "Ada <ada@example.com>"},

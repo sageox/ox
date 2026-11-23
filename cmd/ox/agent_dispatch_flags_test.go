@@ -88,7 +88,7 @@ func dispatchTestEnv(t *testing.T) string {
 	return resolved
 }
 
-// startDispatchRecording registers an AI coworker and starts a generic-adapter
+// startDispatchRecording registers an AI teammate and starts a generic-adapter
 // recording for it, returning the file `session log` appends to.
 func startDispatchRecording(t *testing.T, projectRoot, agentID string) string {
 	t.Helper()
@@ -184,7 +184,7 @@ func TestExecuteRootCLI_RestoresCLIOutputModes(t *testing.T) {
 	assert.False(t, cli.AssumeYes(), "--yes leaked past executeRootCLI")
 }
 
-// pipeStdin makes os.Stdin a pipe carrying content, as when an AI coworker
+// pipeStdin makes os.Stdin a pipe carrying content, as when an AI teammate
 // runs `echo ... | ox agent <id> session log --stdin`.
 func pipeStdin(t *testing.T, content string) {
 	t.Helper()
@@ -204,7 +204,7 @@ func pipeStdin(t *testing.T, content string) {
 
 // TestAgentSessionLog_RootCommandAcceptsEveryDocumentedForm is the regression
 // test for `ox agent <id> session log --role user --content "..."` failing with
-// "unknown flag: --role". ox's own session-start guidance tells AI coworkers to
+// "unknown flag: --role". ox's own session-start guidance tells AI teammates to
 // run exactly that command.
 //
 // Failure prevented: a coworker follows ox's next_actions verbatim and gets a
@@ -392,7 +392,7 @@ func TestAgentQuery_RootCommandForwardsFlagsToParser(t *testing.T) {
 }
 
 // TestAgentID_FlagSuppliesIdentityForShorthand covers `ox agent heartbeat
-// --agent-id <id>`: AI coworkers generalize `ox murmur list --agent-id`.
+// --agent-id <id>`: AI teammates generalize `ox murmur list --agent-id`.
 func TestAgentID_FlagSuppliesIdentityForShorthand(t *testing.T) {
 	t.Run("heartbeat resolves the named coworker", func(t *testing.T) {
 		root := dispatchTestEnv(t)

@@ -25,7 +25,7 @@ import (
 var ErrInvalidAgentID = errors.New("invalid agent ID")
 
 // State counts the team context that influenced one harness session of one
-// AI coworker: how many distinct discussions, plans, docs, sessions and
+// AI teammate: how many distinct discussions, plans, docs, sessions and
 // murmurs ox put to work in it. It is local-only derived data, bumped by
 // hooks and use-evidence writers (RecordInfluence) and only ever read by
 // `ox statusline`.
@@ -43,7 +43,7 @@ type State struct {
 	// last, capped at MaxSeenRefs. An item that falls off the cap can count
 	// again; at that size the line is already saturated.
 	SeenRefs []string `json:"seen_refs,omitempty"`
-	// Used counts the distinct items the AI coworker reported using or cited
+	// Used counts the distinct items the AI teammate reported using or cited
 	// in a commit (RecordUse), whether or not a hook saw them fetched.
 	Used int `json:"used,omitempty"`
 	// UsedRefs dedups Used the way SeenRefs dedups the kind buckets, with the
@@ -327,7 +327,7 @@ func RecordInfluenceIn(projectRoot, agentID, harnessSessionID, recordingID, refT
 }
 
 // RecordUse counts one item of team context as used — reported by the AI
-// coworker (`ox agent <id> context used <ref>`) or cited in a commit message —
+// teammate (`ox agent <id> context used <ref>`) or cited in a commit message —
 // in a harness session: Used goes up once per distinct item, and the item is
 // also counted in its kind bucket if no hook saw it fetched under ref or any
 // of aliases, its other names (see State.MarkUsed). harnessSessionID, the no-op rules and the locking are as
@@ -366,7 +366,7 @@ func record(projectRoot, agentID, harnessSessionID, recordingID, refType, ref st
 	return nil
 }
 
-// StateKey names the state file for one harness session of one AI coworker:
+// StateKey names the state file for one harness session of one AI teammate:
 // "<agentID>" alone when sessionID is empty, else "<agentID>.<sessionID>".
 // An ox agent ID can outlive a Claude Code or Codex session and be shared by
 // several windows in one repo, so state keyed by it alone shows one window's

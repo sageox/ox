@@ -32,7 +32,7 @@ The cheapest review is the one that never has to happen because the code was rig
 
 ## What is ox?
 
-ox is agentic context infrastructure for software teams. It makes architectural decisions, team knowledge, and session history automatically available to AI coworkers — so every coding session starts with the full picture, not from zero.
+ox is agentic context infrastructure for software teams. It makes architectural decisions, team knowledge, and session history automatically available to AI teammates — so every coding session starts with the full picture, not from zero.
 
 ### Quick Start
 
@@ -40,7 +40,7 @@ ox is agentic context infrastructure for software teams. It makes architectural 
 2. `ox version` — verify in PATH
 3. `cd ~/src/my-project` → `ox login` → `ox init` → `git add .sageox/ && git commit -m "initialize SageOx" && git push`
 4. `ox doctor` then `ox status` — verify
-5. Record discussions at [sageox.ai](https://sageox.ai) — context flows automatically to AI coworkers
+5. Record discussions at [sageox.ai](https://sageox.ai) — context flows automatically to AI teammates
 
 | Command | Purpose |
 |---------|---------|
@@ -56,20 +56,20 @@ ox is agentic context infrastructure for software teams. It makes architectural 
 **Canonical terms** - use these exact names:
 
 - **Coworker** - Any team member, human or AI
-- **AI Coworker** - An AI participant on a team. Never just "agent" in user-facing copy
+- **AI Teammate** - An AI participant on a team. Never just "agent" in user-facing copy
 - **Ledger** - Historical record of work, decisions, discussions on a specific repo
 - **Team Context** - Shared knowledge base: norms, conventions, decisions, docs, learnings
-- **Session** - A human-to-AI coworker conversation / plan recording
+- **Session** - A human-to-AI teammate conversation / plan recording
 - **Transcript** - RESERVED for human-to-human voice discussion
-- **Agent Instance** - An active AI coworker in a repo (internal term; user-facing: "AI coworker")
+- **Agent Instance** - An active AI teammate in a repo (internal term; user-facing: "AI teammate")
 
 | Internal Term | User-Facing Term |
 |--------------|------------------|
-| agent, AI agent | `AI coworker` |
+| agent, AI agent | `AI teammate` |
 | human user | `coworker` |
 | dehydrated/hydrated/pointer file (LFS) | `stub` / `local` |
 
-**Rejected terms:** "context lake" → Ledger. "team norms" → Team Context. "shadow repo" → Ledger. "transcript" (for AI sessions) → Session.
+**Rejected terms:** "context lake" → Ledger. "team norms" → Team Context. "shadow repo" → Ledger. "transcript" (for AI sessions) → Session. "AI coworker" → AI teammate.
 
 **Note:** "agent" is fine in internal/technical contexts (code, CLI subcommands, variable names, logs). The restriction applies to user-facing copy.
 

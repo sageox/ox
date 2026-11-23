@@ -145,7 +145,7 @@ func TestBulletinLocalPostsDir_FallsBackToTheRelativeDir(t *testing.T) {
 // TestRenderBulletinReceipt_EmptyTeamIDFallsBackToTheRef guards the JSON
 // receipt against a server that omits team_id.
 //
-// Failure prevented: an AI coworker reading "team_id": "" and concluding
+// Failure prevented: an AI teammate reading "team_id": "" and concluding
 // the post landed nowhere.
 func TestRenderBulletinReceipt_EmptyTeamIDFallsBackToTheRef(t *testing.T) {
 	var buf bytes.Buffer
@@ -223,7 +223,7 @@ func TestBulletinTitle_FallsBackToTheFileStemThenRefuses(t *testing.T) {
 // validation error naming the flag — not as a generic failure whose guidance
 // says to rerun the identical command.
 //
-// Failure prevented: an AI coworker told "rerun the same command; an
+// Failure prevented: an AI teammate told "rerun the same command; an
 // identical retry is safe" for a deterministic local refusal, looping on a
 // command that can never succeed.
 func TestBulletinPost_InvalidTeamFlagIsALocalRefusal(t *testing.T) {
@@ -251,7 +251,7 @@ func TestBulletinPost_InvalidTeamFlagIsALocalRefusal(t *testing.T) {
 // real (no TTY). This is the test that goes red if --yes or --json stop
 // suppressing the prompt, or if "no" stops canceling.
 //
-// Failure prevented: an AI coworker's --json run blocking on "Publish?" from
+// Failure prevented: an AI teammate's --json run blocking on "Publish?" from
 // a real TTY; a human's "n" being ignored and the post published anyway.
 func TestBulletinPost_PromptIsDecidedByYesAndJSON(t *testing.T) {
 	tests := []struct {
@@ -324,7 +324,7 @@ func TestBulletinPost_OversizedFileIsNotReportedAsOneByteOver(t *testing.T) {
 // receipt wording for a --team this machine has no checkout for.
 //
 // Failure prevented: "Appears in bulletin/general/posts after the next sync"
-// pointing an AI coworker at a directory relative to its cwd that no sync on
+// pointing an AI teammate at a directory relative to its cwd that no sync on
 // this machine will ever create.
 func TestBulletinWhereItAppears_RelativePathDoesNotPromiseALocalSync(t *testing.T) {
 	assert.Contains(t, bulletinWhereItAppears("/home/x/teams/t/bulletin/general/posts"), "Appears in /home/x/teams/t/bulletin/general/posts after the next Team Context sync.")

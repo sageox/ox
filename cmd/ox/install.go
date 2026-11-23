@@ -40,7 +40,7 @@ var installCmd = &cobra.Command{
 	Long: `Copy ox and its adapters into a directory on PATH, then log in to SageOx.
 
 This is what "npx @sageox/ox@latest install" runs. It sets up this machine
-only: it changes no repository and installs no AI coworker hooks. To link a
+only: it changes no repository and installs no AI teammate hooks. To link a
 repository afterwards, run ox init inside it.
 
 The binaries go to /usr/local/bin when it is writable, otherwise to

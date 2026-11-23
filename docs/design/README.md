@@ -10,7 +10,7 @@ ox dev catalog --component=timeline  # just one
 ox dev catalog --json                # machine-readable manifest
 ```
 
-`ox dev` is a hidden command — by design, end users and AI coworkers shouldn't trip over it during ordinary workflows. The published browser-rendered version lives at [sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/](https://sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/).
+`ox dev` is a hidden command — by design, end users and AI teammates shouldn't trip over it during ordinary workflows. The published browser-rendered version lives at [sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/](https://sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/).
 
 ## Components
 

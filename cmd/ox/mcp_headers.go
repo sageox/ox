@@ -15,7 +15,7 @@ var mcpCmd = &cobra.Command{
 	Hidden: true,
 	// Bare `ox mcp`, `ox mcp serve` and other words stay an unknown command,
 	// worded as cobra words it, so friction recovery still records an AI
-	// coworker looking for an MCP server.
+	// teammate looking for an MCP server.
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("unknown command %q for %q", cmd.Name(), cmd.Parent().CommandPath())

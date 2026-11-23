@@ -1,6 +1,6 @@
 # Business Action: Murmur Work-in-Progress
 
-**Actor:** An AI coworker (e.g., Avery), heard by teammates (e.g., Riley)
+**Actor:** An AI teammate (e.g., Avery), heard by teammates (e.g., Riley)
 **Goal:** Keep teammates in sync about what's being built and which files are touched
 **Preconditions:**
 - In a session on a repo with teammates

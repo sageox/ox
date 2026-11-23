@@ -32,7 +32,7 @@ import (
 // Claude Code session through the real ox binary and the real Claude adapter,
 // in each place a session runs:
 //
-//   - plain checkout: Claude Code, its hooks, and the AI coworker's commands
+//   - plain checkout: Claude Code, its hooks, and the AI teammate's commands
 //     all run in the main checkout;
 //   - desktop app: Claude Code runs in a linked worktree under
 //     <repo>/.claude/worktrees/<name> and writes its transcript to that
@@ -287,7 +287,7 @@ func (w *worktreeSessionE2E) uploadedRawJSONL(t *testing.T, agentID string) stri
 
 var primedAgentIDPattern = regexp.MustCompile(`agent_id="(Ox[A-Za-z0-9]+)"`)
 
-// primedAgentID reads the agent ID that prime hands the AI coworker.
+// primedAgentID reads the agent ID that prime hands the AI teammate.
 func primedAgentID(t *testing.T, primeOut string) string {
 	t.Helper()
 	m := primedAgentIDPattern.FindStringSubmatch(primeOut)

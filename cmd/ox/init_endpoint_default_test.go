@@ -12,7 +12,7 @@ import (
 )
 
 // Failure prevented: `ox init --no-input` demanded --endpoint from a coworker
-// who is logged in to exactly one endpoint, so scripted/AI-coworker setups
+// who is logged in to exactly one endpoint, so scripted/AI-teammate setups
 // failed on a choice that had only one answer.
 func TestSelectInitEndpoint_NoInputDefaultsToSoleLoggedInEndpoint(t *testing.T) {
 	tests := []struct {

@@ -114,7 +114,7 @@ func TestClassify_QueryIsCapped(t *testing.T) {
 }
 
 // TestClassify_MCPCommandAndKind gives SageOx MCP tools the same kinds as
-// their CLI twins. Failure prevented: an AI coworker on the MCP surface shows
+// their CLI twins. Failure prevented: an AI teammate on the MCP surface shows
 // up in the usage report with no command or the wrong kind.
 func TestClassify_MCPCommandAndKind(t *testing.T) {
 	t.Parallel()

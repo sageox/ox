@@ -38,7 +38,7 @@ var usagePaneCmd = &cobra.Command{
 
 The pane keeps the ox session report summary on top (ox calls, estimated context
 tokens, team items surfaced and used) and a scrollable list of every ox call
-your AI coworker made in this session underneath.
+your AI teammate made in this session underneath.
 
 The same plugin draws a one-line flow lane in the transcript under each ox call
 that moves team data (a search, a murmur, a plan, a session upload; not status

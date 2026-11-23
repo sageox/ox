@@ -21,7 +21,7 @@ import (
 // Live use evidence for `ox session report`. Finalize (tagSessionConsults) is the
 // writer of record for `used` events; until then a recording's trace holds
 // only self-reports, so a brief taken mid-session would say nothing surfaced
-// was used even when the AI coworker re-opened it or named it in its reply.
+// was used even when the AI teammate re-opened it or named it in its reply.
 // This file runs the same deterministic scan (consultscan.ScanUses, same
 // roots, same surfaced set) over the live raw.jsonl and adds what it finds to
 // the brief IN MEMORY. It never writes the trace; finalize re-scans from zero
@@ -30,7 +30,7 @@ import (
 // or not anything ever asks for the brief.
 
 // briefUsesCacheSubdir holds the incremental scan cache, one file per AI
-// coworker, under the ledger's local-only .sageox/cache/ (ledger-cache rule).
+// teammate, under the ledger's local-only .sageox/cache/ (ledger-cache rule).
 const briefUsesCacheSubdir = "brief-uses"
 
 // loadRawEntriesFrom is consultscan.LoadRawEntriesFrom; a var so tests can

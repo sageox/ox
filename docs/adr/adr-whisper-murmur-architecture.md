@@ -7,7 +7,7 @@
 
 ## Context
 
-AI coworkers operating on the same repo (or across repos in a team) need real-time coordination — knowing what others are working on, hearing about breaking changes, and avoiding stepping on each other's toes. Before this ADR, the ox daemon had three ad-hoc systems that partially addressed this:
+AI teammates operating on the same repo (or across repos in a team) need real-time coordination — knowing what others are working on, hearing about breaking changes, and avoiding stepping on each other's toes. Before this ADR, the ox daemon had three ad-hoc systems that partially addressed this:
 
 1. **`NotificationStore`** — in-memory bounded buffer tracking team context file changes, with per-agent cursors. Lost on daemon restart. No filtering by importance or topic.
 2. **`ox agent prime`** — one-shot context injection at session start. No ongoing updates.
@@ -34,10 +34,10 @@ The entire system uses a consistent voice/hearing metaphor:
 
 ```mermaid
 graph LR
-    A[AI Coworker A] -->|murmur| L[Ledger / Team Context]
+    A[AI Teammate A] -->|murmur| L[Ledger / Team Context]
     L -->|daemon git pull| D[Daemon]
-    D -->|whisper| B[AI Coworker B]
-    D -->|whisper| C[AI Coworker C]
+    D -->|whisper| B[AI Teammate B]
+    D -->|whisper| C[AI Teammate C]
 
     style L fill:#fff3e0
     style D fill:#e1f5fe
@@ -145,9 +145,9 @@ These serve fundamentally different purposes and must not be conflated:
 
 Every murmur optionally records who created it:
 
-- **`agent_id`**: Which AI coworker instance (e.g., "Oxa7b3")
+- **`agent_id`**: Which AI teammate instance (e.g., "Oxa7b3")
 - **`principal_id`**: Who the agent works for (e.g., user email). Optional.
-- **`principal_type`**: `"human"`, `"ai"` for an AI coworker, or `"external"` for outside news (see the 2026-10-19 addendum). Optional.
+- **`principal_type`**: `"human"`, `"ai"` for an AI teammate, or `"external"` for outside news (see the 2026-10-19 addendum). Optional.
 
 All three fields are optional. This enables self-filtering (agents don't hear their own murmurs) and attribution when present.
 
@@ -449,7 +449,7 @@ For murmurs to gain genuine system authority on Opus 4.8, **Claude Code would ne
 
 ### Context
 
-SageOx writes a murmur into a repo's Ledger when a pull request is opened on GitHub, so AI coworkers hear about it on their next prompt and can spot a collision with their own work. Its title, file paths, and login come from people outside the team. If ox rendered it like a teammate's murmur, a stranger's PR title would reach the AI coworker as trusted team context. That rendering means inside `<system-reminder>`, under the "SageOx noticed [name] is working on…" framing, with a `from=` derived from the principal and the metadata passed through.
+SageOx writes a murmur into a repo's Ledger when a pull request is opened on GitHub, so AI teammates hear about it on their next prompt and can spot a collision with their own work. Its title, file paths, and login come from people outside the team. If ox rendered it like a teammate's murmur, a stranger's PR title would reach the AI teammate as trusted team context. That rendering means inside `<system-reminder>`, under the "SageOx noticed [name] is working on…" framing, with a `from=` derived from the principal and the metadata passed through.
 
 ### Decision
 

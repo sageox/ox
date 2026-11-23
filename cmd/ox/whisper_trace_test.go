@@ -77,7 +77,7 @@ func TestTraceWhisperDelivery_OnlyMurmurEntries(t *testing.T) {
 
 // TestTraceWhisperDelivery_RecordsInlineTokens drives a real recording.
 // Failure prevented: whisper volume is invisible to the usage report — a
-// delivered murmur lands in the AI coworker's context but its size is never
+// delivered murmur lands in the AI teammate's context but its size is never
 // recorded, so "context injected" undercounts.
 func TestTraceWhisperDelivery_RecordsInlineTokens(t *testing.T) {
 	projectRoot := setupSessionTestProject(t)

@@ -1095,7 +1095,7 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// hand-author their own SageOx credit or footnote/ⓘ markers — `ox plan
 	// render` deterministically owns the footer credit and auto-injects an OX
 	// marker on references it surfaced context for; the rest use the
-	// `ox viz ox-annotation` pattern. ~51 tokens, accepted to stop AI coworkers
+	// `ox viz ox-annotation` pattern. ~51 tokens, accepted to stop AI teammates
 	// shipping context-blind brand look-alikes that compete with ox's own.
 	//
 	// Raised 1610 -> 1950 (ox decision v1): the <decision-record-guidance>

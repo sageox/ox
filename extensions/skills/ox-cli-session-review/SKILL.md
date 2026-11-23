@@ -12,7 +12,7 @@ description: >-
 
 <!-- Keep this file thin on behavioral guidance that belongs in `ox` CLI JSON
      output (guidance field). Native skills are portable wrappers; ox serves all
-     AI coworkers. This skill is intentionally richer than most because
+     AI teammates. This skill is intentionally richer than most because
      the audit + regeneration flow is not backed by a single ox subcommand. -->
 
 This skill carries the operational knowledge from the 2026-04-25 cleanup

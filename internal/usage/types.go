@@ -1,12 +1,12 @@
-// Package usage builds the `ox session report` report: what ox did in an AI coworker's
+// Package usage builds the `ox session report` report: what ox did in an AI teammate's
 // session — the ox calls it made, how much context ox put in front of the
 // model, which team items were surfaced by name, and which of those the AI
-// coworker reports it actually used.
+// teammate reports it actually used.
 //
 // The package is pure: callers resolve the trace, recording state and score
 // and hand them in (Input); Build turns them into a Report; Display renders
 // the plain-text block both harnesses print verbatim. Behavior for the AI
-// coworker lives in the Report's guidance field, not in the skill body, so
+// teammate lives in the Report's guidance field, not in the skill body, so
 // every adapter gets identical behavior.
 package usage
 
@@ -165,7 +165,7 @@ type Relevant struct {
 	SurfacedCount int            `json:"surfaced_count"`
 	ByEvidence    map[string]int `json:"by_evidence,omitempty"` // always read, cited, reported, judged
 	Items         []RelevantItem `json:"items,omitempty"`
-	// ReportedNone — the AI coworker explicitly reported that nothing
+	// ReportedNone — the AI teammate explicitly reported that nothing
 	// surfaced was used, and no other use evidence contradicts it.
 	ReportedNone bool     `json:"reported_none,omitempty"`
 	Derived      *Derived `json:"derived,omitempty"`
@@ -181,7 +181,7 @@ type Derived struct {
 // display bucket (read | cited | reported | judged); Detail is the raw
 // evidence behind it (read | requery | cited | cited_commit | reported |
 // judged) so a renderer can say "re-opened" or "cited in commit 3e1c9d0".
-// Why is the AI coworker's own one-line --why — the only free text here.
+// Why is the AI teammate's own one-line --why — the only free text here.
 type RelevantItem struct {
 	Ref      string `json:"ref"`
 	RefType  string `json:"ref_type,omitempty"`
@@ -211,7 +211,7 @@ const (
 	AttributionDerived      = "derived"
 )
 
-// Used is the evidence of what the AI coworker actually used, by grade.
+// Used is the evidence of what the AI teammate actually used, by grade.
 type Used struct {
 	SelfReported    []SelfReported `json:"self_reported"`
 	Retrieval       []Retrieval    `json:"retrieval"`
@@ -221,7 +221,7 @@ type Used struct {
 	SelfReport      *SelfReportCmd `json:"self_report,omitempty"`
 }
 
-// SelfReported is an `influenced` event the AI coworker wrote.
+// SelfReported is an `influenced` event the AI teammate wrote.
 type SelfReported struct {
 	Ref             string `json:"ref"`
 	RefType         string `json:"ref_type,omitempty"`
@@ -230,7 +230,7 @@ type SelfReported struct {
 	MatchedSurfaced bool   `json:"matched_surfaced"`
 }
 
-// Retrieval is an ox retrieval call the AI coworker ran.
+// Retrieval is an ox retrieval call the AI teammate ran.
 type Retrieval struct {
 	Label string `json:"label"`
 	Query string `json:"query,omitempty"`
@@ -252,7 +252,7 @@ type Score struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// SelfReportCmd tells the AI coworker how to report what it used: Command
+// SelfReportCmd tells the AI teammate how to report what it used: Command
 // records one use at the moment it happens; the batch path takes JSONL lines
 // shaped like BatchExampleLine on stdin.
 type SelfReportCmd struct {
@@ -268,7 +268,7 @@ type NextAction struct {
 }
 
 // guidanceText is the honesty contract for narrating a session report. It is
-// load-bearing: the AI coworker claims use only from relevant.items evidence,
+// load-bearing: the AI teammate claims use only from relevant.items evidence,
 // prints the pre-rendered display so the report reads identically in every
 // harness, and reports its own use quietly, at the moment of use. Behavior
 // lives here, in the command's JSON, rather than in the ox-cli-session-report skill body.

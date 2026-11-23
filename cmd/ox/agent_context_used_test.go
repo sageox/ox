@@ -301,7 +301,7 @@ func TestCapContextWhy(t *testing.T) {
 }
 
 // TestAgentContextUsed_Recording drives `context used` against a live
-// recording. Failure prevented: an AI coworker's report of which murmur
+// recording. Failure prevented: an AI teammate's report of which murmur
 // changed its work never reaches the session trace, so "relevant" stays empty.
 func TestAgentContextUsed_Recording(t *testing.T) {
 	projectRoot := setupSessionTestProject(t)
@@ -488,7 +488,7 @@ func TestAgentContextUsed_CountsOnStatusline(t *testing.T) {
 }
 
 // TestAgentContextUsed_StatuslineHarnessSession: a reported use reaches the
-// status line of the one harness session the AI coworker runs in, whether or
+// status line of the one harness session the AI teammate runs in, whether or
 // not that session is recording. Without a recording the harness session
 // comes from the agent's primed session marker, and an agent ID primed in two
 // harness sessions names neither. Failure prevented: a primed but unrecorded
@@ -579,7 +579,7 @@ func mkdirAll(t *testing.T, dir string) string {
 // TestResolveSurfacedRef_AnyName: an item surfaced under one name resolves
 // from any other name it goes by — its rec_ twin, a /c/ link, a citation, a
 // plan slug or dated directory — and counts once for prefix ambiguity.
-// Failure prevented: an AI coworker reports the link or slug it saw and gets
+// Failure prevented: an AI teammate reports the link or slug it saw and gets
 // unknown_ref, so a real use of team context is never recorded.
 func TestResolveSurfacedRef_AnyName(t *testing.T) {
 	const (
@@ -624,7 +624,7 @@ func TestResolveSurfacedRef_AnyName(t *testing.T) {
 }
 
 // TestAgentContextUsed_AnySurfacedName drives `context used` with the names an
-// AI coworker actually has in hand — a slug, a /c/ link, a rec_ id — and checks
+// AI teammate actually has in hand — a slug, a /c/ link, a rec_ id — and checks
 // the used event names the surfaced item canonically and carries its aliases,
 // so `ox session report` attaches the use to the item that was surfaced.
 func TestAgentContextUsed_AnySurfacedName(t *testing.T) {

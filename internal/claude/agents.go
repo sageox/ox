@@ -30,7 +30,7 @@ const CommandsDir = "coworkers/commands"
 // agents/commands/ as canonical, naming coworkers/ the "legacy location ...
 // still read for backward compat". Only agents/rules/ was ever wired up, so a
 // profile or command authored exactly where the docs said to put it was
-// invisible to every AI coworker. These mirror teamdocs.DiscoverRules: walk
+// invisible to every AI teammate. These mirror teamdocs.DiscoverRules: walk
 // canonical first, then legacy, and dedupe by name so canonical wins.
 var (
 	ProfileDirs = []string{"agents/profiles", AgentsDir}

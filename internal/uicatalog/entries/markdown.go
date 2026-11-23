@@ -22,7 +22,7 @@ func init() {
 				"- Hidden `ox dev catalog` command\n" +
 				"- Theme tokens documented in `docs/design/`\n" +
 				"- Published at [sageox-design.netlify.app](https://sageox-design.netlify.app/)\n\n" +
-				"> Calm, precise output for humans and AI coworkers.\n"
+				"> Calm, precise output for humans and AI teammates.\n"
 			return ui.RenderMarkdown(source)
 		},
 	})

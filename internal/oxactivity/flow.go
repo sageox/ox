@@ -2,7 +2,7 @@ package oxactivity
 
 import "strings"
 
-// Direction is which way an ox call moved team data: into the AI coworker's
+// Direction is which way an ox call moved team data: into the AI teammate's
 // session, or out of it to SageOx.
 type Direction string
 

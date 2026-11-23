@@ -38,7 +38,7 @@ func commitIdentity(t *testing.T, dir string) string {
 
 // Failure prevented: on a machine whose global config sets author.email or
 // committer.email, ox's Ledger commits carry that address instead of the AI
-// coworker's, because those keys outrank the stamped local user.email.
+// teammate's, because those keys outrank the stamped local user.email.
 func TestMigrateLedgerCredentials_StampOutranksAGlobalAuthorEmail(t *testing.T) {
 	withGlobalIdentityOverride(t)
 	dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", coworkerAuthor)

@@ -1,4 +1,4 @@
-# Driving AI coworkers to choose `ox plan render`
+# Driving AI teammates to choose `ox plan render`
 
 **Status:** active · **Owner:** plan/enrich · **Related:** [ADR-021](../adr/ADR-021-ox-plan-context-not-inference.md) (context, not inference), [ADR-023](../adr/ADR-023-skill-injection-two-layer-model.md) (skill injection two-layer model)
 
@@ -10,10 +10,10 @@ routing — and `ox plan save` persists it to the ledger where teammates find it
 Since the HTML-first inversion ([plan-authoring-html.md](plan-authoring-html.md)),
 the primary path is an *authored* page (`--file plan.html`) into which ox injects
 its chrome; the binary still renders the page itself on the quick markdown path.
-Either way, none of the enrichment is reproducible by an AI coworker on its own: it
+Either way, none of the enrichment is reproducible by an AI teammate on its own: it
 lives **behind the SageOx API**.
 
-Yet AI coworkers often **don't** use it. They emit a plain-markdown plan, or author an
+Yet AI teammates often **don't** use it. They emit a plain-markdown plan, or author an
 HTML page and stop there — never passing it through `ox plan save` / `ox plan
 render` — producing a *context-blind orphan*: a page that carries none of the
 team context, gets no review loop, and never reaches the ledger. Authoring the

@@ -26,7 +26,7 @@ import (
 //	└── review-pr.md      # review-pr command
 //
 // Team commands are NOT installed as host slash commands by ox — they are
-// cataloged with their path so an AI coworker can read the file on demand.
+// cataloged with their path so an AI teammate can read the file on demand.
 func DiscoverTeamCommands(teamPath string) ([]Command, error) {
 	var commands []Command
 	for _, root := range CommandDirs {

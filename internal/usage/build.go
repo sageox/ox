@@ -264,7 +264,7 @@ func buildSurfaced(events []contexttrace.Event) ([]Surfaced, []contextuse.Surfac
 
 // capSurfaced trims the surfaced list to n for display without cutting what
 // matters most: every used item survives (so the list can exceed n), then what
-// the AI coworker fetched itself, then startup context (prime docs, whispers,
+// the AI teammate fetched itself, then startup context (prime docs, whispers,
 // recall), which arrives first and would otherwise fill the cap on its own.
 // Arrival order is kept within each group and in the result.
 func capSurfaced(surfaced []Surfaced, n int) []Surfaced {
@@ -326,9 +326,9 @@ func kindOf(ev contexttrace.Event) oxactivity.Kind {
 	return act.Kind
 }
 
-// isSelfReport reports whether an event is the AI coworker's own attribution:
+// isSelfReport reports whether an event is the AI teammate's own attribution:
 // a used event it reported at the moment of use, or a legacy influenced event
-// (those carry no mechanism; they were written by the same AI-coworker-reported
+// (those carry no mechanism; they were written by the same AI-teammate-reported
 // path, so they count as self-assessed too).
 func isSelfReport(ev contexttrace.Event) bool {
 	switch ev.Type {
@@ -475,7 +475,7 @@ func sameRef(surfacedRef, usedRef string) bool {
 }
 
 // buildAttribution says whether the session clears the project's attribution
-// threshold. A manual score (ox session score) is the AI coworker's own call
+// threshold. A manual score (ox session score) is the AI teammate's own call
 // and wins over the derived category; both are display-only here.
 func buildAttribution(in Input, rollup contextuse.Rollup) Attribution {
 	a := Attribution{Threshold: in.ScoreThreshold}

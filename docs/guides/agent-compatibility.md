@@ -1,4 +1,4 @@
-# AI Coworker Compatibility
+# AI Teammate Compatibility
 
 ox works with multiple AI coding agents. Support depth varies by agent — here's what works where.
 
@@ -112,11 +112,11 @@ and modified retired files.
 
 Run `/ox-cli-session-report` (Claude Code slash command, or pick it in Codex's skill
 picker) to see what SageOx gave the current session: the ox calls your AI
-coworker made, the team context ox put in front of it and from where, the
+teammate made, the team context ox put in front of it and from where, the
 decisions, rules, murmurs and sessions it read, and which of those the coworker
 reports were useful. `/ox-cli-session-report me` rolls up your recent sessions in this
 repo; `/ox-cli-session-report team` shows team-wide totals only, never per-person reads.
-The skill is a thin relay over `ox session report --json`, so other AI coworkers get the
+The skill is a thin relay over `ox session report --json`, so other AI teammates get the
 same report by running that command.
 
 ### Codex

@@ -25,7 +25,7 @@ type File struct {
 }
 
 const (
-	PrimaryDescription     = "SageOx behavioral guidance for AI coworkers"
+	PrimaryDescription     = "SageOx behavioral guidance for AI teammates"
 	TeamContextDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
 )
 

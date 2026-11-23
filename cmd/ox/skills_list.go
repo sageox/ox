@@ -24,7 +24,7 @@ import (
 
 // skills_list.go — `ox skills list`.
 //
-// One inventory of everything an AI coworker in this repository can actually
+// One inventory of everything an AI teammate in this repository can actually
 // reach, whoever put it there. The three provenances are the whole point: ox's
 // own skills, the team's, and — the majority in any real repository — the ones a
 // human hand-authored and ox does not own.
@@ -370,7 +370,7 @@ func skillsListGuidance(out skillsListOutput) string {
 		return out.Problems[0]
 	}
 	if len(out.Roots) == 0 {
-		return "No AI coworker is selected for this repository — run `ox init`."
+		return "No AI teammate is selected for this repository — run `ox init`."
 	}
 	if len(out.Skills) == 0 {
 		// The roots are lockfile-authored, so naming them here carries the same

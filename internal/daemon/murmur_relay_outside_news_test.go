@@ -30,7 +30,7 @@ func writeRawMurmur(t *testing.T, baseDir, id string, ts time.Time, raw string) 
 // TestMurmurRelay_OutsideNewsReachesNormalAttention relays a new-PR murmur in
 // the shape SageOx's server writes it: ambient, so older ox never delivers it,
 // all-string metadata, and the title in metadata rather than content. This
-// release must deliver it to AI coworkers at the default attention level,
+// release must deliver it to AI teammates at the default attention level,
 // carrying only the metadata the outside news frame reads.
 // Failure prevented: coworkers never hear about a new PR, or an extra
 // metadata key written into the file rides along into their context.

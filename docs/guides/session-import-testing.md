@@ -21,7 +21,7 @@ check. Excerpts help choose a session; importing retains the
 redacted conversation and available tool activity and generates its summary
 after confirmation. The last reply does not imply the work is complete.
 
-Unattended, AI coworker, JSON, and `--dry-run` invocations retain their structural
+Unattended, AI teammate, JSON, and `--dry-run` invocations retain their structural
 preview behavior. `--yes` continues to import the explicitly selected sessions.
 Browser review cannot be combined with `--yes` or JSON output. If terminal input
 is disabled, `--browse` falls back to a structural preview without launching.

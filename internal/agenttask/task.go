@@ -1,6 +1,6 @@
 // Package agenttask implements a shared, project-local queue of work items
 // scheduled by internal producers (the daemon, doctor, scripts) for the next
-// available AI coworker to execute — typically as a fresh-context subagent.
+// available AI teammate to execute — typically as a fresh-context subagent.
 //
 // It is deliberately NOT a beads (bd) replacement: bd tracks human-facing
 // project work, agenttask tracks ephemeral, machine-scheduled chores run on

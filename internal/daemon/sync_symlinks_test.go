@@ -69,7 +69,7 @@ func kbXDGEnv(t *testing.T) string {
 // relevance, so there is no per-type policy).
 //
 // Failure prevented: a fresh `ox init` followed by daemon sync silently
-// no-ops the ergonomic surface, and AI coworkers never find their
+// no-ops the ergonomic surface, and AI teammates never find their
 // team's bubbles inside the project tree.
 func TestReconcileProjectSymlinks_InitialCreate(t *testing.T) {
 	kbXDGEnv(t)
@@ -201,7 +201,7 @@ func TestReconcileProjectSymlinks_KBRevoked_PrunesLinkButNotTarget(t *testing.T)
 // removed on reconcile and the scoped link (.sageox/kb/team/<slug>) is
 // created for the same bubble. Regression class: a layout migration
 // that only writes the new location leaves dangling links at the old
-// one forever — editors and AI coworkers keep following the stale path.
+// one forever — editors and AI teammates keep following the stale path.
 func TestReconcileProjectSymlinks_FlatLayoutMigration(t *testing.T) {
 	kbXDGEnv(t)
 	projectRoot := symlinkTestProject(t, "")
@@ -555,7 +555,7 @@ func TestReconcileProjectSymlinks_ProjectVanished(t *testing.T) {
 //
 // Failure prevented: stale symlinks pointing at a vanished old target dir
 // would dangle indefinitely after a GC bluegreen swap, leaving editors
-// unable to follow the link and AI coworkers reading nothing.
+// unable to follow the link and AI teammates reading nothing.
 func TestReconcileProjectSymlinks_TargetRelocated(t *testing.T) {
 	kbXDGEnv(t)
 	projectRoot := symlinkTestProject(t, "")

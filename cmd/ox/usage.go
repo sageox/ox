@@ -24,12 +24,12 @@ import (
 var usageCmd = &cobra.Command{
 	Use:   "report",
 	Short: "Show what SageOx gave this session",
-	Long: `Show what SageOx gave this session: the ox calls your AI coworker made, how
+	Long: `Show what SageOx gave this session: the ox calls your AI teammate made, how
 much context ox put in front of the model (estimated tokens), what it read by
 title (with sageox.ai links where one exists), and which items have evidence
 they were used. Murmurs are listed only when they were useful.
 
-When called by an AI coworker it emits JSON with a pre-rendered display and
+When called by an AI teammate it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
 recent sessions; --team shows a team-wide aggregate only — never who did what.
 
@@ -39,7 +39,7 @@ In the session view, calls.recent in the JSON lists the 10 newest ox calls;
   ox session report --session <name>    # a recorded session in the Ledger
   ox session report --me --since 14d    # your recent sessions, one row each
   ox session report --team              # team-wide aggregate (no per-person data)
-  ox session report --json              # structured report for AI coworkers
+  ox session report --json              # structured report for AI teammates
   ox session report --json --recent 0   # every ox call in calls.recent`,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
@@ -52,7 +52,7 @@ func init() {
 	usageCmd.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
 	usageCmd.Flags().Int("limit", 10, "maximum sessions for --me")
 	usageCmd.Flags().Int("recent", 10, "session view: ox calls listed in the JSON calls.recent (0 = all)")
-	usageCmd.Flags().Bool("json", false, "structured JSON report for AI coworkers")
+	usageCmd.Flags().Bool("json", false, "structured JSON report for AI teammates")
 	usageCmd.MarkFlagsMutuallyExclusive("session", "me", "team")
 }
 
@@ -146,7 +146,7 @@ func usageAttributionSettings(projectRoot string) (threshold float64, allowJudge
 }
 
 // writeUsageReport prints the JSON payload or the human text and charges the
-// bytes to the AI coworker's context budget.
+// bytes to the AI teammate's context budget.
 func writeUsageReport(w io.Writer, jsonOut bool, payload any, human func() string) error {
 	var n int
 	if jsonOut {
@@ -169,7 +169,7 @@ func writeUsageReport(w io.Writer, jsonOut bool, payload any, human func() strin
 	return nil
 }
 
-// usageInputForCurrentSession resolves the calling AI coworker's usage trace:
+// usageInputForCurrentSession resolves the calling AI teammate's usage trace:
 // its live recording's context-trace.jsonl, else its not-recording cache file.
 func usageInputForCurrentSession(projectRoot, agentID string) usage.Input {
 	in := usage.Input{AgentID: agentID, TraceSource: usage.TraceSourceNone}
@@ -177,7 +177,7 @@ func usageInputForCurrentSession(projectRoot, agentID string) usage.Input {
 		in.Harness = string(agent.Type())
 	}
 	if agentID == "" {
-		in.TraceReason = "no AI coworker identity found — run this from a primed AI coworker session (ox agent prime)"
+		in.TraceReason = "no AI teammate identity found — run this from a primed AI teammate session (ox agent prime)"
 		return in
 	}
 	if sf, err := session.ReadSageoxScore(agentID); err == nil && sf != nil {

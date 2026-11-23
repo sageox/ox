@@ -57,14 +57,14 @@ The CLI validates repository-relative paths and deduplicates targets by their
 canonical root and format. Codex and Gemini therefore produce one shared
 `.agents/skills` projection and one truthful change count.
 
-| AI coworker | Target | Format |
+| AI teammate | Target | Format |
 |---|---|---|
 | Claude Code | `.claude/skills/<skill>/` | Native Agent Skills |
 | Codex | `.agents/skills/<skill>/` | Portable Agent Skills |
 | Gemini CLI | `.agents/skills/<skill>/` | Portable Agent Skills (shared with Codex) |
-| AI coworker without native skills | None | Future Skill Bridge; not implemented speculatively |
+| AI teammate without native skills | None | Future Skill Bridge; not implemented speculatively |
 
-| AI coworker | Rule target | Format |
+| AI teammate | Rule target | Format |
 |---|---|---|
 | Claude Code | `.claude/rules/*.md` | Native Markdown rules |
 | Factory Droid | `.factory/rules/*.md` | Native Markdown rules |
@@ -168,13 +168,13 @@ distinguishes interrupted SageOx writes from coincidentally similar user files.
   the old process does not attempt to execute a newly installed catalog.
 
 AMENDED by ADR-031: the daemon now runs a DETERMINISTIC reconcile check on its
-slow tick (`skills-inventory-drift`). The objection below was to an AI coworker
+slow tick (`skills-inventory-drift`). The objection below was to an AI teammate
 performing repair; this is the same code path `ox doctor` runs, and it is bounded
 — it never installs into a repository that selected no targets, never runs while
 a session is recording, never touches the git index, and never rewrites a tracked
-file. The sentence below stands for the AI-coworker case only.
+file. The sentence below stands for the AI-teammate case only.
 
-The daemon does not schedule an AI coworker to perform deterministic skill
+The daemon does not schedule an AI teammate to perform deterministic skill
 repair. Explicit lifecycle commands own reconciliation. Current desired state
 produces an empty plan and no daemon task.
 
@@ -195,7 +195,7 @@ An add-on packages three things:
 
 | | What it is |
 |---|---|
-| **Skills** | what an AI coworker should do, and when to do it |
+| **Skills** | what an AI teammate should do, and when to do it |
 | **Rules** | conventions it should follow |
 | **Context** | the reference material *those skills carry* — briefs, tables, examples, source material |
 
@@ -225,7 +225,7 @@ A tool-artifact kind was rejected for a related reason: it would have shipped
 with no handler behind it.
 
 A team selects an add-on once. Every repository on the team then receives it,
-and every teammate's AI coworker sees the same selection — the opposite of
+and every coworker's AI teammate sees the same selection — the opposite of
 the withdrawn model, where the same content was chosen once per repository
 and drifted per repository as a result.
 
@@ -282,7 +282,7 @@ overwritten.
 When an add-on's Team Skills and Team Rules reach a product repository, they
 project through the same target-descriptor mechanism Part 1 describes, reserved
 under the `-team` suffix (ADR-033, amending ADR-031's `sageox-team-*` prefix). **Delivery mechanics vary
-by artifact and by AI coworker, the same way Part 1's native-target table
+by artifact and by AI teammate, the same way Part 1's native-target table
 varies by coworker** — the promise is that a supported coworker can use the
 Team Context content that applies to it, not that every coworker materializes
 every artifact identically.
@@ -444,8 +444,8 @@ ox addons remove post-cutoff
 
 ## Skill Bridge follow-on
 
-Only an AI coworker that genuinely lacks native skill discovery should receive
+Only an AI teammate that genuinely lacks native skill discovery should receive
 a compact catalog through `ox agent prime` and activate a playbook through a
 future `ox skill activate <id> --json` or equivalent MCP tool. Native-capable
-AI coworkers continue receiving real native skills. Enabling the bridge for a
+AI teammates continue receiving real native skills. Enabling the bridge for a
 native-capable client requires measured activation-quality evidence first.

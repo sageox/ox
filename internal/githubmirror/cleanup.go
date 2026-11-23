@@ -41,7 +41,7 @@ func isInvisible(r rune) bool {
 	return false
 }
 
-// Cleanup removes text GitHub hides from people but an AI coworker reads:
+// Cleanup removes text GitHub hides from people but an AI teammate reads:
 // HTML comments and invisible/bidi control characters. Each removed span is
 // replaced by HiddenTextMarker. It returns the cleaned text and how many spans
 // were removed. Deterministic; never "detects" injections — that is the

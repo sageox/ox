@@ -227,7 +227,7 @@ Three tools, targeting ~1.5k tokens total for tool catalog overhead.
 
 ### Tool 3: `ox_murmur`
 
-**Purpose:** Publish and list coordination signals to/from other AI coworkers and humans.
+**Purpose:** Publish and list coordination signals to/from other AI teammates and humans.
 
 **Data source:** Daemon IPC (`murmur` message type for publish, `whisper_history` for list).
 
@@ -660,7 +660,7 @@ ox mcp serve
 
 Start the SageOx MCP server for Claude Chat and cowork sessions.
 
-The MCP server connects AI coworkers in Claude Chat, Claude Code cowork, and
+The MCP server connects AI teammates in Claude Chat, Claude Code cowork, and
 other MCP clients to your team's shared knowledge. It exposes three tools:
 
   ox_ctx  Read team discussions, decisions, and principles

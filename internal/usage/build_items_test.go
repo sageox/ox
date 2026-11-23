@@ -181,8 +181,8 @@ func TestBuild_AllowJudged(t *testing.T) {
 }
 
 // TestGuidanceText pins the substance of the narration contract while
-// keeping it short (it is AI coworker context; every token costs). Failure
-// prevented: the AI coworker claims an available item was used, nags the
+// keeping it short (it is AI teammate context; every token costs). Failure
+// prevented: the AI teammate claims an available item was used, nags the
 // coworker about reporting, or is pointed at the retired command name.
 func TestGuidanceText(t *testing.T) {
 	for _, want := range []string{

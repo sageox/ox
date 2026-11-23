@@ -14,7 +14,7 @@ import (
 
 // Counts is what the status line shows: how many distinct items of each kind
 // of team context influenced the harness session, and how many of them the AI
-// coworker actually used. Zero buckets are omitted.
+// teammate actually used. Zero buckets are omitted.
 type Counts struct {
 	Discussions int `json:"discussions,omitempty"`
 	Plans       int `json:"plans,omitempty"`

@@ -126,7 +126,7 @@ func Adapt(c color.Color) color.Color {
 
 // AdaptTo downgrades a color to an explicit profile instead of the one
 // detected for ox's own stdout. Use it only when ox's bytes are painted by a
-// terminal ox cannot see: an AI coworker harness captures ox through a pipe
+// terminal ox cannot see: an AI teammate harness captures ox through a pipe
 // (Profile resolves to NoTTY) yet renders the ANSI it receives — Claude Code's
 // status line, Codex's hook messages. Pass colorprofile.ANSI256 there: it is
 // safe on 256-color terminals, which misread 24-bit codes as backgrounds.
@@ -136,7 +136,7 @@ func AdaptTo(p colorprofile.Profile, c color.Color) color.Color {
 
 // ColorEnabled reports whether the resolved profile can carry color at all —
 // false under NO_COLOR, `OX_COLOR_PROFILE=ascii`, and any non-TTY stdout
-// (a pipe, a redirect, an AI coworker's capture buffer).
+// (a pipe, a redirect, an AI teammate's capture buffer).
 //
 // It asks Adapt rather than comparing Profile against an enum so it stays
 // correct if colorprofile renumbers its constants: Adapt's documented contract

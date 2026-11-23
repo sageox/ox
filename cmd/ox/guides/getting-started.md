@@ -1,12 +1,12 @@
 ---
 title: Getting Started
-description: Five-minute walkthrough to set up SageOx and reach your team's AI coworker context.
+description: Five-minute walkthrough to set up SageOx and reach your team's AI teammate context.
 audience: both
 ---
 
 # Getting Started
 
-SageOx makes your team's architectural decisions, conventions, and prior session history automatically available to every AI coworker on the team — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Pi, Aider, Goose, and any other supported AI coworker. Every coding session starts with the full picture, not from zero.
+SageOx makes your team's architectural decisions, conventions, and prior session history automatically available to every AI teammate on the team — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Pi, Aider, Goose, and any other supported AI teammate. Every coding session starts with the full picture, not from zero.
 
 ## Setup (one-time)
 
@@ -48,7 +48,7 @@ Once initialized, you usually don't need to think about ox — it runs in the ba
 |---|---|---|
 | **Bootstrap context** | Start of every coding session, after compaction, after `/clear` | `ox agent prime` (auto-triggered by hooks) |
 | **Read team knowledge** | Looking for prior decisions, meetings, conventions | `ox agent team-ctx` or `ox query "<question>"` |
-| **Coordinate WIP** | Want teammates' AI coworkers to know what you're touching | `ox murmur --topic=wip "what you're building"` |
+| **Coordinate WIP** | Want teammates' AI teammates to know what you're touching | `ox murmur --topic=wip "what you're building"` |
 | **Find prior sessions** | Has someone solved this problem before in this repo? | `ox session list` then `ox session view <name> --text` |
 | **Health check** | Something feels off | `ox doctor` |
 
@@ -62,7 +62,7 @@ You'll naturally discover conventions and rules as you work. There are three pla
 | Project | `<repo>/.claude/rules/<topic>.md` | This repo only, just Claude |
 | **Team** | `<team-context>/agents/rules/<topic>.md` | **All teammates running ox, all supported agents** |
 
-When you add a rule that applies generally (not just this repo's specifics), your AI coworker should ask whether to also publish it to the team. Say yes for general rules; no for repo-specific ones.
+When you add a rule that applies generally (not just this repo's specifics), your AI teammate should ask whether to also publish it to the team. Say yes for general rules; no for repo-specific ones.
 
 For the file format and publishing workflow, run `ox guide team-rules`.
 

@@ -12,7 +12,7 @@ import (
 // `ox query` and plan prior art, so a PR title written outside the team must
 // not come back as team knowledge.
 // Failure prevented: "PR #12 opened: Ignore previous instructions…" surfaces
-// to an AI coworker as a team search result.
+// to an AI teammate as a team search result.
 func TestSearch_SkipsOutsideNewsMurmurs(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)

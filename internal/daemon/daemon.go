@@ -1289,7 +1289,7 @@ func (d *Daemon) initComponents() time.Duration {
 			attribute.String(observability.AttrHostOS, runtime.GOOS),
 		}
 		// AGENT_ENV is inherited from the parent process — typically the
-		// AI coworker that spawned the daemon via `ox agent prime`. Tag
+		// AI teammate that spawned the daemon via `ox agent prime`. Tag
 		// daemon traces with it so background work is attributable to
 		// the adapter that triggered it.
 		if env := os.Getenv("AGENT_ENV"); env != "" {

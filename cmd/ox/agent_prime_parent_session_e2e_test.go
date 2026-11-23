@@ -37,7 +37,7 @@ func TestRunAgentPrime_AgentLaunchedFromARecordedSessionRecordsItsParent(t *test
 	primeWithHook(t, childSession, "startup")
 
 	childAgent, _ := nativeSessionAgentID(t, childSession)
-	require.NotEqual(t, parentAgent, childAgent, "the launched agent took over its parent's AI coworker identity")
+	require.NotEqual(t, parentAgent, childAgent, "the launched agent took over its parent's AI teammate identity")
 	childState, err := session.LoadRecordingStateForAgent(env.Root, childAgent)
 	require.NoError(t, err)
 	require.NotNil(t, childState, "the launched agent must record a session of its own")

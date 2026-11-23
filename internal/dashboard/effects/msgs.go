@@ -36,7 +36,7 @@ type TeamDiscussionsLoadedMsg struct {
 	Err         error
 }
 
-// InstancesLoadedMsg is sent when the active AI coworker instance list fetch completes.
+// InstancesLoadedMsg is sent when the active AI teammate instance list fetch completes.
 type InstancesLoadedMsg struct {
 	Instances []daemon.InstanceInfo
 	Gen       int

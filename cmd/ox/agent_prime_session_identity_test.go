@@ -18,7 +18,7 @@ import (
 
 // primeWithHook runs one real in-process prime. A non-empty sessionID delivers
 // a hook payload on stdin the way Claude Code does; an empty one is a bare
-// `ox agent prime` typed by the coworker or run by the AI coworker itself.
+// `ox agent prime` typed by the coworker or run by the AI teammate itself.
 func primeWithHook(t *testing.T, sessionID, source string) string {
 	t.Helper()
 	return primeWithHookAs(t, "claude-code", sessionID, source)
@@ -79,7 +79,7 @@ func requireFullPrime(t *testing.T, out, msg string) {
 
 // Failure prevented: a coworker's second Claude Code session got the short
 // "already primed" prime, which omits team knowledge, because ox matched it to
-// the first session's AI coworker identity (same parent process / inherited
+// the first session's AI teammate identity (same parent process / inherited
 // SAGEOX_AGENT_ID) even though this native session had never been primed.
 func TestRunAgentPrime_NewNativeSessionNeverGetsCompactPrime(t *testing.T) {
 	initializedE2E(t)
@@ -120,7 +120,7 @@ func TestRunAgentPrime_RepeatInsideHookPrimedSessionStaysCompact(t *testing.T) {
 	assert.True(t, isCompactPrime(repeat), "a repeat inside a session the hook already primed should be compact")
 }
 
-// Failure prevented: an AI coworker ran `ox agent prime | head -100` (or any
+// Failure prevented: an AI teammate ran `ox agent prime | head -100` (or any
 // bare prime whose output may never have reached its context), then ran it
 // again and was told "you were already primed earlier", so the team context was
 // never read. Only a hook-delivered full prime licenses a later compact one.
@@ -175,7 +175,7 @@ func TestRunAgentPrime_CappedHookPrimeDoesNotLicenseCompact(t *testing.T) {
 	requireFullPrime(t, repeat, "a bare prime after a capped hook prime must be full so the deferred context reaches the model")
 }
 
-// nativeSessionAgentID returns the AI coworker identity a prime recorded for one
+// nativeSessionAgentID returns the AI teammate identity a prime recorded for one
 // native session.
 func nativeSessionAgentID(t *testing.T, sessionID string) (agentID string, parentPID int) {
 	t.Helper()
@@ -199,7 +199,7 @@ func asDetectedCodex(t *testing.T) {
 // Failure prevented (#1385): in the Codex desktop app every chat is a child of
 // one app-server process. Chat B's SessionStart carries its own session_id but
 // has no marker yet, so the PID fallback matched chat A's marker and reused its
-// agent_id: two chats shared one AI coworker and one recording, and one chat's
+// agent_id: two chats shared one AI teammate and one recording, and one chat's
 // history was lost from the Ledger.
 func TestRunAgentPrime_TwoNativeSessionsUnderOneAgentProcessGetTwoAgents(t *testing.T) {
 	initializedE2E(t)
@@ -213,12 +213,12 @@ func TestRunAgentPrime_TwoNativeSessionsUnderOneAgentProcessGetTwoAgents(t *test
 	agentB, pidB := nativeSessionAgentID(t, chatB)
 	require.Positive(t, pidA)
 	require.Equal(t, pidA, pidB, "harness: both chats must resolve the same agent ancestor PID")
-	assert.NotEqual(t, agentA, agentB, "two native sessions under one agent process were merged into one AI coworker")
+	assert.NotEqual(t, agentA, agentB, "two native sessions under one agent process were merged into one AI teammate")
 }
 
 // Failure prevented: the over-correction of #1385. A second prime inside the
 // same session with no hook stdin and no native session id (#527/#529) must
-// still find the hook prime's marker by PID and keep its AI coworker identity.
+// still find the hook prime's marker by PID and keep its AI teammate identity.
 func TestRunAgentPrime_BarePrimeWithoutSessionIDReusesAgentByPID(t *testing.T) {
 	initializedE2E(t)
 	asDetectedCodex(t)
@@ -228,7 +228,7 @@ func TestRunAgentPrime_BarePrimeWithoutSessionIDReusesAgentByPID(t *testing.T) {
 	agentID, _ := nativeSessionAgentID(t, chat)
 
 	repeat := primeWithHookAs(t, "codex", "", "")
-	assert.Contains(t, repeat, agentID, "a bare repeat prime in the same agent process lost the session's AI coworker identity")
+	assert.Contains(t, repeat, agentID, "a bare repeat prime in the same agent process lost the session's AI teammate identity")
 	again, _ := nativeSessionAgentID(t, chat)
 	assert.Equal(t, agentID, again)
 }

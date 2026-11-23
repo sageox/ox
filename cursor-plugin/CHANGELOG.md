@@ -10,7 +10,7 @@ the version only when the plugin itself changes.
   `"placement": "server"`, so Grok Bot connects through its hosted MCP path.
 - Auth uses OAuth with your SageOx account. There is no API key to configure.
 - Lists in Grok Bot only (`"cursor": "never"`).
-- Adds the `sageox` skill, which tells the AI coworker which SageOx tool to
+- Adds the `sageox` skill, which tells the AI teammate which SageOx tool to
   start with.
 - Logo: SageOx's OX mark, from `https://sageox.ai/sageox_logo_dark.png`, on a
   192×192 tile.

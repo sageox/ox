@@ -14,7 +14,7 @@ import (
 const payloadLogMaxBytes = 1 << 20
 
 // InitPayloadMode reconfigures the process logger for commands whose stdout
-// IS an AI coworker's context: `ox agent prime` and `ox agent hook`.
+// IS an AI teammate's context: `ox agent prime` and `ox agent hook`.
 //
 // Why: every hook template runs those commands with `2>&1`, so each byte on
 // stderr lands in the model's context beside the payload. The eval pilot on

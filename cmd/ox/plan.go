@@ -36,7 +36,7 @@ var planCmd = &cobra.Command{
 	Long: `Work with SageOx-enriched plans: design, GTM, rollout, engineering — any
 plan your team executes against.
 
-  enrich   compute team-context signals for a plan (JSON for AI coworkers)
+  enrich   compute team-context signals for a plan (JSON for AI teammates)
   render   render a plan to a self-contained HTML page for human review
   review   serve a plan and collect human review feedback (the review loop)
   save     save a plan/mockup/review page to the ledger and print its share link
@@ -50,7 +50,7 @@ over one event-log engine (browser Approve in 'ox plan review' and
 {"changed":bool,"status":...} and is idempotent: re-running an
 already-applied verb is a safe no-op.
 
-AI coworkers: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
+AI teammates: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
 drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
 drafted — both return JSON team context (collision / prior-art /
 expert-routing) at zero LLM/network cost. When a human is shaping a plan,
@@ -74,7 +74,7 @@ Input modes (precedence order):
   stdin                                 a plan piped from another tool
   (none of the above)                   auto-discover the newest ~/.claude/plans/*.md
 
-Output is JSON by default (the AI-coworker/plumbing path). Use --text for a human summary.`,
+Output is JSON by default (the AI-teammate/plumbing path). Use --text for a human summary.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		topic, _ := cmd.Flags().GetString("topic")
 		files, _ := cmd.Flags().GetStringSlice("files")
@@ -972,7 +972,7 @@ func planSaveFailure(gitRoot string, err error) error {
 }
 
 // writePlanSaveReport prints the save outcome. The not-shared warning goes to
-// stderr in BOTH modes so a human scanning a terminal and an AI coworker
+// stderr in BOTH modes so a human scanning a terminal and an AI teammate
 // parsing JSON each get it on the channel they read; the JSON carries it as
 // share.shared=false + reason + fix. Exit status stays 0: the plan IS durably
 // saved locally, and a non-zero exit would make agents retry the save.
@@ -1229,7 +1229,7 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string, pag
 		if pageSaved {
 			next = "The page is saved as the plan of record; present it with `ox plan render " + filepath.Base(savedDir) + " --open`."
 		}
-		fmt.Fprintf(&b, "\n%s %s Then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI coworker receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead, next)
+		fmt.Fprintf(&b, "\n%s %s Then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI teammate receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead, next)
 	}
 
 	fmt.Fprint(out, b.String())
@@ -1594,7 +1594,7 @@ func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath st
 	// Encourage the live review loop once the page is in front of a human — the
 	// slug is real only when the plan is in the ledger (capture on).
 	if savedDir != "" && !cli.IsHeadless() {
-		cli.PrintHint("Start a live review loop: `ox plan review " + filepath.Base(savedDir) + "` — mark it up in the browser; your AI coworker receives it via `ox plan review await " + filepath.Base(savedDir) + "` and addresses each item live (it blocks for feedback — the coworker should confirm before entering that wait).")
+		cli.PrintHint("Start a live review loop: `ox plan review " + filepath.Base(savedDir) + "` — mark it up in the browser; your AI teammate receives it via `ox plan review await " + filepath.Base(savedDir) + "` and addresses each item live (it blocks for feedback — the coworker should confirm before entering that wait).")
 	}
 	if savedDir != "" {
 		if _, _, isPointer, exists := plan.PlanHTMLPath(savedDir); exists && !isPointer {
@@ -1969,7 +1969,7 @@ func init() {
 	planLintCmd.Flags().String("file", "", "lint an UNSAVED authored page before the first save (authoring-time checks)")
 	planSaveCmd.Flags().String("kind", "", "what this artifact IS: plan (default) | mockup | review | evidence — a mockup, review sheet or evidence page belongs in the ledger exactly as much as a plan does")
 	planSaveCmd.Flags().String("plan", "", "legacy: plan markdown file (with --annotations; prefer --file)")
-	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)")
+	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-teammate judgment badges (required with --plan; optional with --file, which self-enriches)")
 	planSaveCmd.Flags().String("html", "", "deprecated and rejected: save authored HTML canonically with --file plan.html")
 	planSaveCmd.Flags().String("slug", "", "save as this plan slug; an existing open plan with this slug gets a new revision (overrides <meta name=\"ox-plan-slug\">)")
 	planSaveCmd.Flags().Bool("json", false, "emit {dir,slug,plan_id,url,event,revision,share:{shared,reason,fix,...}} as JSON")
@@ -2008,7 +2008,7 @@ func init() {
 }
 
 // tracePlanSurfaced records a plan an ox command put in front of the AI
-// coworker as a surfaced item in its session trace: ref = the stable pln_ id
+// teammate as a surfaced item in its session trace: ref = the stable pln_ id
 // (slug for a legacy plan), title = the plan's topic, url = its share link.
 // Best-effort and silent: no agent ID or no live recording, no trace.
 func tracePlanSurfaced(gitRoot string, info plan.PlanInfo) {

@@ -9,7 +9,7 @@ import (
 
 // OMP discovers the portable Agent Skills convention at .agents/skills.
 // Sharing this target with Codex and Gemini lets reconciliation write one
-// projection when a project enables several AI coworkers.
+// projection when a project enables several AI teammates.
 func skillsDir(root string) string { return filepath.Join(root, ".agents", "skills") }
 
 func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.InstallSkillsResponse, error) {

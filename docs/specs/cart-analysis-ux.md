@@ -1,6 +1,6 @@
 # Cart Analysis UX — Target Interaction
 
-Design goal for `ox cart-analyze`. The JSON output should enable an AI coworker
+Design goal for `ox cart-analyze`. The JSON output should enable an AI teammate
 to produce this conversation without reading the full `work_items` array until
 the user zooms in.
 
@@ -13,7 +13,7 @@ the user zooms in.
 | "what's blocking?" | `blockers` array | L8 |
 | "what did X do?" | filtered `work_items` for one person | full detail |
 
-The AI coworker should never need all 59 work items for a status question.
+The AI teammate should never need all 59 work items for a status question.
 
 ## Target interaction (digital twin, all_windows)
 
@@ -21,7 +21,7 @@ The AI coworker should never need all 59 work items for a status question.
 
 **User:** where are we?
 
-**AI coworker:**
+**AI teammate:**
 
 57/59 carts completed, 2 in progress across 6 coworkers.
 
@@ -49,7 +49,7 @@ No blockers.
 
 **User:** can I see the carts? group by work area
 
-**AI coworker:** *(scans per-cart L2 pyramids to cluster, then shows full titles)*
+**AI teammate:** *(scans per-cart L2 pyramids to cluster, then shows full titles)*
 
 **Sync pipeline** — 20 carts, March 10-12
 
@@ -68,7 +68,7 @@ No blockers.
 
 **User:** what's getting in the way?
 
-**AI coworker:**
+**AI teammate:**
 
 Nothing is blocked. Both active carts are progressing.
 
@@ -80,7 +80,7 @@ Resolved cleanly, all 20 carts closed.
 
 **User:** what have we learned?
 
-**AI coworker:**
+**AI teammate:**
 
 1. **Pipeline rewrites are team-wide events.** alice's pull.go refactor cascaded
    into API, daemon, CLI, tests, and docs by Day 3. Plan for full convergence
@@ -94,7 +94,7 @@ Resolved cleanly, all 20 carts closed.
 
 **User:** what's next?
 
-**AI coworker:**
+**AI teammate:**
 
 **Finish active:** bob's API rate limiter, carol's daemon metrics.
 
@@ -107,7 +107,7 @@ Resolved cleanly, all 20 carts closed.
 
 **User:** tell me more about alice on the sync rewrite
 
-**AI coworker:** *(now reads full work_items for alice + OxA\*)*
+**AI teammate:** *(now reads full work_items for alice + OxA\*)*
 
 4 carts across 3 days:
 
@@ -128,7 +128,7 @@ alice drove the arc: reconnaissance → proof-of-concept → execution.
 1. **Lead with status, not data.** The first answer is "57/59 done" not a table.
 2. **Cart listing on request.** Show the actual cards when asked, grouped by
    area or status — this is what the user wants to scan.
-3. **Pyramid = permission to skip.** The AI coworker doesn't read all work items
+3. **Pyramid = permission to skip.** The AI teammate doesn't read all work items
    unless the user zooms in. L2 pyramids (~2 tokens/cart) enable scanning 100+
    carts in a single pass.
 4. **Synthesis over repetition.** "What we learned" is 3 cross-cutting insights,

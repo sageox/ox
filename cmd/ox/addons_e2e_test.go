@@ -26,7 +26,7 @@ import (
 // whole path catches that class.
 
 // TestAddonsInstall_ReachesACoworkerEndToEnd is the promise: a team installs an
-// add-on once, and the skill shows up in a repository where an AI coworker will
+// add-on once, and the skill shows up in a repository where an AI teammate will
 // actually read it — with no repository-side step, because ADR-032 D1 says
 // there is none.
 //

@@ -23,7 +23,7 @@ import (
 )
 
 // This file proves that the recovery hints ox prints name commands (and flags)
-// that exist. A hint is a promise to a coworker or an AI coworker: "run this to
+// that exist. A hint is a promise to a coworker or an AI teammate: "run this to
 // get unstuck". When the command was renamed or never existed, the reader runs
 // it, gets "unknown command", and has no next step. The hint text is a plain
 // string, so nothing but a test notices the drift.
@@ -257,7 +257,7 @@ func TestPrintErrorBanner(t *testing.T) {
 }
 
 // TestPrimeText_LedgerNeededSuggestsDoctorFix covers the prime text an AI
-// coworker reads when session recording is on but the ledger has not been
+// teammate reads when session recording is on but the ledger has not been
 // provisioned yet.
 // Failure prevented: the suggestion box tells the coworker to run a repair
 // command or flag that does not exist, so recording stays silently unavailable.
@@ -284,7 +284,7 @@ func TestPrimeText_LedgerNeededSuggestsDoctorFix(t *testing.T) {
 
 // TestSessionStopRetry_NamesLoggingCommandsThatExist covers `session stop` on a
 // generic-adapter recording whose drop file captured nothing.
-// Failure prevented: the retry guidance tells an AI coworker to feed entries
+// Failure prevented: the retry guidance tells an AI teammate to feed entries
 // through `session log --role ... --content ...` or `session record`, but those
 // flags are rejected as unknown (the guidance was once wrong in exactly this
 // way), so the coworker can never produce a non-empty session to stop.

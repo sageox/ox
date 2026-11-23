@@ -23,7 +23,7 @@ import (
 // network edge blocks, and only that one.
 //
 // Failure prevented: the notice was read only for a single recording, so
-// starting a second AI coworker hid an existing block warning.
+// starting a second AI teammate hid an existing block warning.
 func TestRunSessionStatus_EdgeBlockedNoticePerRecording(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts two real recordings: over 500 ms")

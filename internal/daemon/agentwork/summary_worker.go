@@ -13,7 +13,7 @@ import (
 
 // summaryWorkerIsolation picks how strictly a summary or judge run isolates.
 // A personal login keeps the fallback for a CLI too old to isolate. A team
-// token, which an AI coworker runs under, never takes it: the run fails
+// token, which an AI teammate runs under, never takes it: the run fails
 // instead of reaching the coworker's credentials with tools on.
 func summaryWorkerIsolation(projectRoot string) (isolated, ifSupported bool) {
 	if teamTokenActive(projectRoot) {

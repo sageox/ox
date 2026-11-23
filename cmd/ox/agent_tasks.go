@@ -13,7 +13,7 @@ import (
 )
 
 // Agent task scheduling: the daemon and other internal producers enqueue work
-// for the next available AI coworker to execute — ideally dispatched to a
+// for the next available AI teammate to execute — ideally dispatched to a
 // fresh-context subagent. See docs/specs/agent-task-scheduling.md.
 //
 // Two entry points share the core handlers:
@@ -322,7 +322,7 @@ var agentTasksCmd = &cobra.Command{
 
 var agentTasksAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Enqueue a task for the next available AI coworker",
+	Short: "Enqueue a task for the next available AI teammate",
 	RunE:  runTasksAdd,
 }
 

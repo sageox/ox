@@ -161,7 +161,7 @@ func RequestClose(dir string) error {
 // that stream and prepare its own, so a stream started since the caller read
 // the folder is never closed in its place: that returns ErrNotStreaming. A lock
 // still busy after wait (a drain in flight) is returned as is, and the request
-// waits for the AI coworker's next start.
+// waits for the AI teammate's next start.
 func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Duration) error {
 	return withLock(ctx, dir, wait, func() error {
 		st, err := ReadState(dir)
@@ -176,7 +176,7 @@ func RequestCloseOf(ctx context.Context, dir, sessionID string, wait time.Durati
 }
 
 // RequestCloseOfEnded is RequestClose for the stream of the recording
-// sessionID, which ended with no stop to close it: an AI coworker that crashed,
+// sessionID, which ended with no stop to close it: an AI teammate that crashed,
 // recovered from its cache or finalized by the daemon. Left open, that stream
 // read as live on SageOx until the server's 72 h auto-finish. The daemon's
 // sweep finishes the close, summary included, as for a hook-ended recording.

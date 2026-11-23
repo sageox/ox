@@ -17,11 +17,11 @@ import (
 )
 
 // sessionHeld is the outcome teamconverge produces for a skill a live AI
-// coworker session is holding stable.
+// teammate session is holding stable.
 func sessionHeld(name string) teamconverge.Outcome {
 	return teamconverge.Outcome{
 		Kind: teamconverge.KindSkill, Name: name, State: teamconverge.StatePending,
-		Detail:   "active AI coworker session keeps the current skill snapshot stable",
+		Detail:   "active AI teammate session keeps the current skill snapshot stable",
 		Deferral: teamconverge.DeferralActiveSession,
 	}
 }

@@ -1,6 +1,6 @@
 # Business Action: Explore Code Before Planning
 
-**Actor:** An AI coworker (e.g., Avery)
+**Actor:** An AI teammate (e.g., Avery)
 **Goal:** Plan against the live shape of the codebase, not a stale mental model
 **Preconditions:**
 - In a session in the repo

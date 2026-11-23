@@ -112,7 +112,7 @@ func testStatuslineOptions() statuslineOptions {
 	}
 }
 
-// startRecording starts a live recording for the fixture's AI coworker, with
+// startRecording starts a live recording for the fixture's AI teammate, with
 // the user cache (where recording state lives) isolated to this test.
 func (f *statuslineFixture) startRecording(t *testing.T) {
 	t.Helper()

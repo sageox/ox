@@ -86,7 +86,7 @@ func AssumeYes() bool {
 
 // IsInteractive returns true if interactive mode is enabled.
 // Interactive mode is disabled by --no-input, --no-interactive, CI=true,
-// or stdin not being a terminal (e.g., running inside an AI coworker).
+// or stdin not being a terminal (e.g., running inside an AI teammate).
 func IsInteractive() bool {
 	if noInteractive || noInput {
 		return false

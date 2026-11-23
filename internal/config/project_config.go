@@ -113,8 +113,8 @@ type ProjectConfig struct {
 	SessionPublishing string `json:"session_publishing,omitempty"`
 
 	// Murmuring controls automatic work-in-progress signals to teammates.
-	// When set to "auto", ox periodically nudges AI coworkers to share what
-	// they're working on, so teammates and other AI coworkers on the same repo
+	// When set to "auto", ox periodically nudges AI teammates to share what
+	// they're working on, so teammates and other AI teammates on the same repo
 	// (or team) hear about in-flight work before PRs or commits appear.
 	// Signals propagate via the ledger and are delivered as whispers to active
 	// coworkers.

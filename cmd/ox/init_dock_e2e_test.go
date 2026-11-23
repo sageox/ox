@@ -18,7 +18,7 @@ import (
 // TestRunInit_EndsOnTheDockingBox drives `ox init` to its last screen against a
 // stub SageOx and snapshots the part a person reads: the dock, the plan prompt,
 // then the steps. Stdout is a pipe here, so this is the unframed, art-free form
-// that CI, scripts and AI coworkers get.
+// that CI, scripts and AI teammates get.
 // Failure prevented: init ending on bold text between separators and saying
 // nothing about who can read the sessions it is about to record; a team named
 // that registration did not confirm; and the plan prompt drifting from the one

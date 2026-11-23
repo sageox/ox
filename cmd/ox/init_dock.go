@@ -70,7 +70,7 @@ func pendingInitOffers(oxy pet.Installer, pane claudemod.Installer, paneSettingO
 // initOfferAudience is who is reading init's output.
 type initOfferAudience struct {
 	Terminal bool // stdout is a terminal
-	Agent    bool // an AI coworker is running ox
+	Agent    bool // an AI teammate is running ox
 	Quiet    bool
 	JSON     bool
 }
@@ -83,7 +83,7 @@ func (a initOfferAudience) isPerson() bool {
 }
 
 // offerInitAddons offers the optional add-ons to a person finishing `ox init`.
-// For anyone else (a pipe, CI, an AI coworker running init for someone) it
+// For anyone else (a pipe, CI, an AI teammate running init for someone) it
 // prints nothing and spends nothing.
 func offerInitAddons(w io.Writer) {
 	audience := initOfferAudience{Terminal: isTerminalWriter(w), Agent: agentx.IsAgentContext()}

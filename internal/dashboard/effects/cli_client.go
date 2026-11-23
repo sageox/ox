@@ -179,7 +179,7 @@ func (c *cliClient) ListTeamDiscussions() ([]domain.TeamDiscussion, error) {
 	return discussions, nil
 }
 
-// ListInstances fetches active AI coworker instances from the daemon.
+// ListInstances fetches active AI teammate instances from the daemon.
 // Returns nil, nil when the daemon is offline.
 func (c *cliClient) ListInstances() ([]daemon.InstanceInfo, error) {
 	cl := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)

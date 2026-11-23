@@ -7,7 +7,7 @@ import (
 )
 
 // Suggestion is an actionable, deterministic catalog match. It is intentionally
-// small because AI coworkers consume it directly from `ox viz suggest --json`.
+// small because AI teammates consume it directly from `ox viz suggest --json`.
 type Suggestion struct {
 	ID        string `json:"id"`
 	Category  string `json:"category"`
@@ -26,7 +26,7 @@ type scoredSuggestion struct {
 }
 
 // Suggest ranks reviewed catalog tags against an intent. It never calls a model
-// or the network: ox supplies a precise visual vocabulary; the AI coworker still
+// or the network: ox supplies a precise visual vocabulary; the AI teammate still
 // decides what the artifact should say.
 func Suggest(intent string, limit int) []Suggestion {
 	if limit <= 0 {

@@ -112,7 +112,7 @@ var gateInvocations = []struct {
 // TestConversationGate_RefusesBeforeAnyRead: each refusal verdict maps to its
 // code for every invocation, the reader is never opened, and a share link is
 // never looked up. Failure prevented: a leaked id or link giving an AI
-// coworker team content without authentication or membership.
+// teammate team content without authentication or membership.
 func TestConversationGate_RefusesBeforeAnyRead(t *testing.T) {
 	verdicts := []struct {
 		status    teamaccess.Status

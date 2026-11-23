@@ -44,7 +44,7 @@
       "path": "internal/daemon/agentwork/",
       "recursive": false,
       "minimum": 72.0,
-      "reason": "External AI coworker process, timeout, and output boundary"
+      "reason": "External AI teammate process, timeout, and output boundary"
     },
     {
       "path": "internal/session/pipeline/",

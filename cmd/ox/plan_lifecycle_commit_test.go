@@ -439,7 +439,7 @@ func TestPlanCommits_NeverResolveAConflictTheyDidNotMake(t *testing.T) {
 // TestAwaitSnapshot_ReadsTheEventLogStatus: a plan its event log says is
 // approved ends the wait even where meta.json, a snapshot two clones can
 // leave disagreeing with the log, still says draft. Failure prevented: an AI
-// coworker keeps waiting on a plan its reviewer already approved.
+// teammate keeps waiting on a plan its reviewer already approved.
 func TestAwaitSnapshot_ReadsTheEventLogStatus(t *testing.T) {
 	dir := seedPlanEvents(t)
 	if err := plan.AppendEvent(context.Background(), dir, plan.Event{PlanID: "pln_cmdtest0000000000001", Kind: plan.EventApproved, Status: plan.PlanStatusApproved}); err != nil {

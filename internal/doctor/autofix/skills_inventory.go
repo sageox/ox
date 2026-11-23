@@ -34,7 +34,7 @@ import (
 // Three boundaries make this safe to run unattended:
 //
 //   - It never installs. A project with no recorded targets has never selected an
-//     AI coworker with native skills; `ox init` owns that decision, and the daemon
+//     AI teammate with native skills; `ox init` owns that decision, and the daemon
 //     must not make it on the user's behalf.
 //   - It never runs under a live session. Swapping a skill file mid-turn changes
 //     the instructions an agent is already working from.

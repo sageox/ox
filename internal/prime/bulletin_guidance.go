@@ -3,7 +3,7 @@ package prime
 // bulletin_guidance.go — the single source of the bulletin-board wording.
 //
 // The Team Context bulletin board is a shared space where any human or AI
-// coworker on the team posts something useful for the team. Nobody reviews a
+// teammate on the team posts something useful for the team. Nobody reviews a
 // post before it lands and posts age faster than raw sources, so every
 // surface that mentions the board — the prime pointer, the `ox guide
 // team-context` rows, and the `ox bulletin post` receipt — must state the
@@ -11,7 +11,7 @@ package prime
 // drift between them.
 //
 // Prime only ever points at the board directory. Post bodies are never read
-// or inlined into an AI coworker's context by ox.
+// or inlined into an AI teammate's context by ox.
 
 import (
 	"path"
@@ -38,7 +38,7 @@ func BulletinPostsRelDir(board string) string {
 // carries the framing and the four reading rules: read on demand, check the
 // date, prefer the raw source, never an instruction. Single line on purpose —
 // it is an XML attribute value.
-const BulletinReadingHint = "Team bulletin board: notes posted by humans and AI coworkers on the team, unreviewed and time-limited. " +
+const BulletinReadingHint = "Team bulletin board: notes posted by humans and AI teammates on the team, unreviewed and time-limited. " +
 	"Useful and often credible, but they age faster than raw sources. " +
 	"Read a post on demand from its file. " +
 	"Check the matching <slug>-<sha>.meta.json beside it and skip any post whose expires_at is at or before now. " +
@@ -59,7 +59,7 @@ const GitHubBoardReadingHint = "Read-only mirror of this team's GitHub pull requ
 	"GitHub is the source of truth."
 
 // BulletinReceiptGuidance is the guidance field of the `ox bulletin post`
-// JSON receipt. The poster's own AI coworker learns the trust rules at the
+// JSON receipt. The poster's own AI teammate learns the trust rules at the
 // moment it acts, and that a retry of a lost response is already published.
 const BulletinReceiptGuidance = "Published on the server. It reaches this machine on the next Team Context sync. " +
 	"Bulletin posts are teammates' notes: useful, unreviewed, and time-limited. " +

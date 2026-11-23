@@ -33,7 +33,7 @@ import (
 //
 // These drive runBulletinPost through the real API client to a throwaway
 // HTTP server that records every request byte-for-byte and answers from a
-// script. Each test asserts what a coworker (or their AI coworker, via
+// script. Each test asserts what a coworker (or their AI teammate, via
 // --json) observes: exit status, the JSON code, what crossed the wire, and
 // what did not.
 
@@ -471,7 +471,7 @@ func TestBulletinPost_NoFileArgumentIsAnError(t *testing.T) {
 // TestBulletinPost_PublishedReceipt is the happy path end to end in --json.
 //
 // Failure prevented: a successful publish exiting 1, a receipt missing the
-// path or local_path an AI coworker needs, or guidance drifting from the
+// path or local_path an AI teammate needs, or guidance drifting from the
 // shared copy prime and the guide use.
 func TestBulletinPost_PublishedReceipt(t *testing.T) {
 	h := newBulletinCommandHarness(t, []bulletinReply{{status: http.StatusCreated, body: bulletinCreatedBody}})
@@ -784,7 +784,7 @@ func TestBulletinPost_WrongHashFromTheServerIsAHardError(t *testing.T) {
 // TestBulletinPost_YesAndJSONNeverPrompt proves --yes and --json each publish
 // without a prompt in a non-interactive run.
 //
-// Failure prevented: an AI coworker's --json run blocking on a confirmation
+// Failure prevented: an AI teammate's --json run blocking on a confirmation
 // nobody can answer, or --yes still asking.
 func TestBulletinPost_YesAndJSONNeverPrompt(t *testing.T) {
 	tests := []struct {
@@ -964,7 +964,7 @@ func TestBulletinPost_HumanReceipt(t *testing.T) {
 	assert.Contains(t, out, prime.BulletinTrustNote)
 	assert.NotContains(t, out, bulletinPostMarker, "the receipt must never echo the post")
 	assert.NotContains(t, out, "{")
-	assert.NotContains(t, out, "agent", "user-facing copy says AI coworker, never agent")
+	assert.NotContains(t, out, "agent", "user-facing copy says AI teammate, never agent")
 }
 
 // TestBulletinPost_HumanFailureShowsHints pins the human rendering of a

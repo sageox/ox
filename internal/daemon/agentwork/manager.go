@@ -310,7 +310,7 @@ func (m *Manager) Start(ctx context.Context) {
 			// Hand work to live agents first. This runs independent of
 			// agent_worker.enabled: even when the daemon cannot (or should
 			// not) fork its own LLM worker, it can still schedule tasks for
-			// the next interactive AI coworker to execute.
+			// the next interactive AI teammate to execute.
 			//
 			// ONE config snapshot for the whole tick: the fallback-task
 			// producer and the local-worker fork must agree on whether a

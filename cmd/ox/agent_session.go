@@ -144,11 +144,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	if agentType == string(agentx.AgentTypeCursor) {
 		// Cursor does not expose its native conversation ID through environment
-		// variables. Resolve only the marker belonging to this exact AI coworker;
+		// variables. Resolve only the marker belonging to this exact AI teammate;
 		// never infer a chat from Cursor's shared desktop PID.
 		marker := FindUnambiguousSessionMarkerByAgentID(inst.AgentID)
 		if marker == nil || marker.AgentSessionID == "" {
-			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
+			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI teammate")
 		}
 		if marker.CursorSourceBoundary == nil {
 			return session.ErrCursorBoundaryUnavailable
@@ -2756,7 +2756,7 @@ func readEntriesFromFile(filePath string) ([]session.Entry, error) {
 
 // sessionTermsNotice is the one-time transparency notice about session recording.
 const sessionTermsNotice = "When you record a session, the full conversation between you and " +
-	"your AI coworker is saved to your team's ledger and processed by " +
+	"your AI teammate is saved to your team's ledger and processed by " +
 	"SageOx. This helps your team learn from each other's work.\n\n" +
 	"Avoid sharing credentials, API keys, or secrets during recorded " +
 	"sessions \u2014 the full conversation content is stored."

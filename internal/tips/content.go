@@ -87,7 +87,7 @@ var primeUserTips = []string{
 	"Sessions are auto-recorded and shared with your team. To disable: `ox config set session_recording disabled`",
 	"View your team's knowledge base in the browser with `ox team open`",
 	"SageOx team context updates automatically — decisions from one session inform every future session",
-	"Record team discussions at sageox.ai to give all AI coworkers shared context",
+	"Record team discussions at sageox.ai to give all AI teammates shared context",
 	`Launch %s and ask: "Based on the SageOx team context, what would be the next task that would bring all the recent work of the team into better alignment?"`,
 }
 
@@ -121,7 +121,7 @@ func friendlyAgentName(agentType string) string {
 	if agentType != "" {
 		return strings.ToUpper(agentType[:1]) + agentType[1:]
 	}
-	return "your AI coworker"
+	return "your AI teammate"
 }
 
 // GetPrimeUserTip returns a random product tip for the user, with agent name substituted.
