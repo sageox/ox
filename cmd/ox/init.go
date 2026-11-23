@@ -1001,14 +1001,7 @@ func runInit() error {
 	if err != nil {
 		// API registration failed - rollback all tracked files
 		tracker.rollback(initQuiet)
-		if len(unresolvedTeamCandidates) > 0 {
-			return fmt.Errorf("failed to register with SageOx API: %w\n\n--team %q matched none of your teams: %s",
-				err, strings.TrimSpace(initTeamFlag), formatTeamCandidates(unresolvedTeamCandidates))
-		}
-		if errors.Is(err, api.ErrForbidden) {
-			return notTeamMemberInitError(err, regClient.Endpoint(), cfg.TeamID)
-		}
-		return fmt.Errorf("failed to register with SageOx API: %w", err)
+		return registrationFailureError(err, regClient.Endpoint(), cfg.TeamID, initTeamFlag, unresolvedTeamCandidates)
 	} else if resp == nil {
 		// 404 - endpoint not yet deployed
 		if !initQuiet {
