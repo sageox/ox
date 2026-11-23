@@ -115,8 +115,9 @@ make lint
 make test-release  # full + ratchet + slow + acceptance + digital twins
 ```
 
-**A tag is single-use.** Release tags are immutable, so a failed release run burns the version.
-PR CI does not run the slow tier; run `make test-slow` on the exact commit before tagging.
+**A tag names one commit.** Release tags are immutable, so a fix that changes the tagged commit
+needs a new version; failed stages can be retried against the unchanged commit. PR CI does not
+run the slow tier, so run `make test-slow` on the exact commit before tagging.
 
 The external `sageox/ox-test-harness` supplies compatibility evidence, but is
 not an enforceable gate until it attests current-source binary provenance
