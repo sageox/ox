@@ -60,7 +60,7 @@ or architecture docs, not here.
 the customer gets, in their words, not the feature, command or component. Commands, settings
 and mechanism come after the dash.
 
-- ✅ **See what team knowledge your AI coworker used, as it works** — in Claude Code's terminal
+- ✅ **See what team knowledge your AI teammate used, as it works** — in Claude Code's terminal
   and Codex, each ox call shows a one-line lane of what moved.
 - ❌ **Flow lanes in Claude Code's terminal and Codex** — each ox call that moves team data
   gets a one-line lane.

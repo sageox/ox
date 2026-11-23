@@ -5,7 +5,7 @@
     "email": "hi@sageox.ai"
   },
   "metadata": {
-    "description": "SageOx AI coworker tools for team context, session recording, and collaborative development"
+    "description": "SageOx AI teammate tools for team context, session recording, and collaborative development"
   },
   "plugins": [
     {
