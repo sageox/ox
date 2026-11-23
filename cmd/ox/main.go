@@ -99,6 +99,12 @@ func utf8ByteLen(b byte) int {
 	return -1
 }
 
+// binaryStdout is the process's real stdout, never the ANSI-stripping pipe
+// below. Binary output (ox fetch --stdout) must go here: the stripper parses
+// its input as terminal text, so a stray ESC or C1 byte in a file would be
+// read as the start of an escape sequence and the bytes after it dropped.
+var binaryStdout io.Writer = os.Stdout
+
 // stdoutDone reports the copy result so main can fail if output was lost.
 var stdoutDone chan error
 
@@ -139,6 +145,7 @@ func init() {
 		pr, pw, err := os.Pipe()
 		if err == nil {
 			realStdout := os.Stdout
+			binaryStdout = realStdout
 			os.Stdout = pw
 
 			stdoutDone = make(chan error, 1)
