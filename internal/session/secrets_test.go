@@ -426,6 +426,30 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: false,
 		},
 		{
+			name:     "mongodb+srv without password keeps later JSON fields",
+			input:    `{"content":"mongodb+srv://db.internal.example.com/app","tool_output":"Contact: dev@example.com"}`,
+			expected: `{"content":"mongodb+srv://db.internal.example.com/app","tool_output":"Contact: dev@example.com"}`,
+			wantFind: false,
+		},
+		{
+			name:     "mongodb+srv without password keeps a query with colon and at sign",
+			input:    "mongodb+srv://db.internal.example.com/?appName=ops:alice@example.com",
+			expected: "mongodb+srv://db.internal.example.com/?appName=ops:alice@example.com",
+			wantFind: false,
+		},
+		{
+			name:     "password with raw slash, question mark and hash still redacted",
+			input:    "DATABASE_URL=postgres://app:Xy/9?k#2@db.example.com/prod",
+			expected: "DATABASE_URL=[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "host and port without password keep a later email",
+			input:    `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
+			expected: `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
+			wantFind: false,
+		},
+		{
 			name:     "url without password not redacted",
 			input:    "https://example.com/api",
 			expected: "https://example.com/api",
