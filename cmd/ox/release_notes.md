@@ -7,32 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.0] - 2026-11-23
+## [0.27.1] - 2026-11-23
 
-See team context reach your AI coworker in Claude Code's terminal, Codex and Conductor, and use SageOx in open-source projects you contribute to. Sessions reach the Ledger more reliably.
+Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Every session now reaches your team, and ox never gets in the way of a commit.
+
+*0.27.1 is 0.27.0 re-released: 0.27.0 was published without downloadable binaries.*
 
 ### New
 
-- **Flow lanes in Claude Code's terminal and Codex** — each ox call that moves team data gets a one-line lane showing what moved. A failed call turns red. `ox config set flow_lanes off` hides them.
-- **ox's status line in any terminal pane** — `ox statusline --watch` draws it in a split, and `ox statusline --wrap -- codex` pins it to Codex's bottom row.
-- **See what SageOx gave a session in Conductor** — a notice after each turn that used new team context, plus an ox line in the Run pane that `ox init` sets up.
-- **SageOx in open-source projects** — in your clone or fork, `ox init` pre-selects the project's public team. Contributors who haven't joined get its public context.
+- **See what team knowledge your AI coworker used, as it works** — in Claude Code's terminal and Codex, each ox call shows a one-line lane of what moved. Failed calls turn red. `ox config set flow_lanes off` hides them.
+- **Keep SageOx in view in any terminal** — `ox statusline --watch` runs it in a split pane, and `ox statusline --wrap -- codex` pins it to Codex's bottom row.
+- **Know when SageOx helped in Conductor** — a notice after each turn that used new team context, plus an ox line in the Run pane that `ox init` sets up.
+- **Bring team context to open-source work** — in your clone or fork, `ox init` picks the project's public SageOx team so your sessions count toward it.
 
 ### Improved
 
-- **`ox brief` is gone** — use `ox session report`, which takes the same flags.
-- **`ox init` and `ox doctor` no longer claim other coding agents are untested.**
+- **Contributors get the project's context without joining** — outside contributors' AI coworkers receive the project's public team context.
+- **`ox session report` replaces `ox brief`** — same flags; the old alias is gone.
+- **Setup no longer warns that your coding agent is untested.**
 
 ### Fixed
 
-- **The ox daemon no longer blocks your git commits** with `index.lock: File exists`.
-- **Sessions reach the Ledger whole** — after `/exit`, from Git worktrees, and with Claude's last answer. Long imports succeed and recordings are never overwritten.
-- **AI coworkers launched from a recorded session get their own recording** and stay paused while it is paused, even through `/clear`.
-- **Codex, Goose and OpenCode record correctly** — each ChatGPT desktop chat is its own session, and Goose and OpenCode hooks run.
-- **The status line's "used" count updates every turn** and matches `/ox-session-report`.
-- **Team Context and Ledger sync more reliably** — `ox addons` and `ox memory put` changes reach the team, and AI coworker commits stay credited despite a global `author.email`.
-- **`ox doctor` is sharper and less intrusive** — it catches a daemon missing your `SAGEOX_TOKEN` and no longer rewrites your README by default.
-- **A just-saved plan's link opens on the first click**, and review comments no longer cover plan text.
+- **Commit without interruptions** — git no longer fails with `index.lock: File exists` while ox runs.
+- **Every session reaches your team** — after `/exit`, from Git worktrees, and with the final answer intact. Long imports succeed, and recordings are never overwritten.
+- **Paused means paused** — AI coworkers launched from a paused session stay paused, even through `/clear`.
+- **Codex, Goose and OpenCode sessions record correctly** — each ChatGPT desktop chat is its own session.
+- **Trust the "used" count** — the status line updates every turn and matches `/ox-session-report`.
+- **Team changes reach your team** — `ox addons` and `ox memory put` changes sync, and commits stay credited to the AI coworker.
+- **`ox doctor` fixes more, touches less** — it catches a daemon missing your `SAGEOX_TOKEN` and leaves your README alone.
+- **Plan links open on the first click**, and review comments no longer cover plan text.
+
+## [0.27.0] - 2026-11-23
+
+Published without binaries. Its changes ship in 0.27.1.
 
 ## [0.26.0] - 2026-11-17
 
