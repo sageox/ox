@@ -408,6 +408,24 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "mongodb+srv connection string on a non-Atlas host",
+			input:    "MONGO_URI=mongodb+srv://admin:secretpass@db.internal.example.com/production",
+			expected: "MONGO_URI=[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "uppercase mongodb+srv connection string",
+			input:    "MONGODB+SRV://admin:secretpass@cluster0.example.mongodb.net/production",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "mongodb+srv without password not redacted",
+			input:    "mongodb+srv://cluster0.example.mongodb.net/production",
+			expected: "mongodb+srv://cluster0.example.mongodb.net/production",
+			wantFind: false,
+		},
+		{
 			name:     "url without password not redacted",
 			input:    "https://example.com/api",
 			expected: "https://example.com/api",
