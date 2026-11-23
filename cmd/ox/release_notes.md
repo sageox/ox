@@ -15,7 +15,7 @@ Know what your team's knowledge is doing for your AI coworker, in Claude Code's 
 
 ### New
 
-- **See what team knowledge your AI coworker used, as it works** — in Claude Code's terminal and Codex, each ox call shows a one-line lane of what moved. Failed calls turn red. `ox config set flow_lanes off` hides them.
+- **See what team knowledge your AI coworker used, as it works** — in Claude Code's terminal and Codex, each ox call shows a one-line lane of what moved, red if it failed. `/ox-session-report flow off` hides them in Claude Code.
 - **Keep SageOx in view in any terminal** — `ox statusline --watch` runs it in a split pane, and `ox statusline --wrap -- codex` pins it to Codex's bottom row.
 - **Know when SageOx helped in Conductor** — a notice after each turn that used new team context, plus an ox line in the Run pane that `ox init` sets up.
 - **Bring team context to open-source work** — in your clone or fork, `ox init` picks the project's public SageOx team so your sessions count toward it.
