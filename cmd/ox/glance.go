@@ -38,9 +38,7 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	sinceFlag, _ := cmd.Flags().GetString("since")
 	untilFlag, _ := cmd.Flags().GetString("until")
 
-	// Resolve --until first: it bounds the window in both modes and neither
-	// needs a ledger to parse it. Default to now so JSON serializes a real
-	// timestamp.
+	// Default --until to now so JSON serializes a real timestamp.
 	until := time.Now()
 	if untilFlag != "" {
 		parsed, err := glance.ParseTimeFlag(untilFlag)
@@ -86,8 +84,7 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 
 // glanceActivity harvests the murmurs and sessions recorded in [since, until]
 // under ledgerPath and folds them into the rendered activity view. repo labels
-// the output; it is the checkout's directory name for a project read and the
-// canonical repo ID for a hosted one.
+// the output.
 func glanceActivity(ledgerPath, repo string, since, until time.Time) (glance.ActivityData, error) {
 	result, err := glance.HarvestMurmurs(ledgerPath, since, until)
 	if err != nil {
