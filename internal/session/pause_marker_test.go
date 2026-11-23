@@ -18,7 +18,7 @@ func newPauseMarkerProject(t *testing.T) string {
 func TestMarkAndPeekExplicitPause(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 42))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 42, PauseAnchor{}))
 
 	seq, at, found := PeekExplicitPause(projectRoot, "Oxa7b3")
 	require.True(t, found)
@@ -36,7 +36,7 @@ func TestPeekExplicitPause_NotFound(t *testing.T) {
 func TestPeekExplicitPause_DoesNotConsume(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 7))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 7, PauseAnchor{}))
 
 	for i := 0; i < 3; i++ {
 		_, _, found := PeekExplicitPause(projectRoot, "Oxa7b3")
@@ -47,7 +47,7 @@ func TestPeekExplicitPause_DoesNotConsume(t *testing.T) {
 func TestConsumeExplicitPause_RemovesMarker(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 7))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 7, PauseAnchor{}))
 	seq, found := ConsumeExplicitPause(projectRoot, "Oxa7b3")
 	assert.True(t, found)
 	assert.Equal(t, 7, seq)
@@ -60,7 +60,7 @@ func TestConsumeExplicitPause_RemovesMarker(t *testing.T) {
 func TestClearExplicitPause(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 9))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa7b3", 9, PauseAnchor{}))
 	assert.True(t, ClearExplicitPause(projectRoot, "Oxa7b3"))
 	assert.False(t, ClearExplicitPause(projectRoot, "Oxa7b3"), "second clear is a no-op")
 }
@@ -68,8 +68,8 @@ func TestClearExplicitPause(t *testing.T) {
 func TestMarkExplicitPause_PerAgentIsolation(t *testing.T) {
 	projectRoot := newPauseMarkerProject(t)
 
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa", 1))
-	require.NoError(t, MarkExplicitPause(projectRoot, "Oxb", 2))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxa", 1, PauseAnchor{}))
+	require.NoError(t, MarkExplicitPause(projectRoot, "Oxb", 2, PauseAnchor{}))
 
 	_, _, foundA := PeekExplicitPause(projectRoot, "Oxa")
 	_, _, foundB := PeekExplicitPause(projectRoot, "Oxb")
@@ -83,6 +83,6 @@ func TestMarkExplicitPause_PerAgentIsolation(t *testing.T) {
 }
 
 func TestMarkExplicitPause_EmptyArgs(t *testing.T) {
-	assert.Error(t, MarkExplicitPause("", "Oxa", 1))
-	assert.Error(t, MarkExplicitPause("/tmp", "", 1))
+	assert.Error(t, MarkExplicitPause("", "Oxa", 1, PauseAnchor{}))
+	assert.Error(t, MarkExplicitPause("/tmp", "", 1, PauseAnchor{}))
 }

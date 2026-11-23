@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -38,6 +39,21 @@ type OpenParams struct {
 	// Agent names the coding agent, such as "claude-code".
 	Agent     string
 	StartedAt time.Time
+	// ParentSessionID is the ses_ id of the session whose shell launched this
+	// one's agent; ContinuedFromSessionID the earlier recording this one
+	// continues. Both optional: empty sends neither.
+	ParentSessionID        string
+	ContinuedFromSessionID string
+}
+
+// newState is the stream state of a session this machine has not streamed yet.
+func newState(cfg Config, cnv string, status Status, p OpenParams) State {
+	return State{
+		ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
+		Endpoint: cfg.Endpoint, Status: status,
+		SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
+		ParentSessionID: p.ParentSessionID, ContinuedFromSessionID: p.ContinuedFromSessionID,
+	}
 }
 
 // Open registers the endpoint's signing key, opens the stream on a new layer and
@@ -45,7 +61,9 @@ type OpenParams struct {
 // open session re-registers and re-opens on the same layer (both idempotent),
 // keeping the acknowledged offset. A key conflict writes status disabled and returns
 // ErrKeyConflict; an open answered "deleted" or "closed" records that final
-// status; any other failure leaves the state as it was (a fresh session then
+// status, one refused as session_name_taken records disabled, and one refused
+// as feature_off is settled by what earlier opens left (featureOff); any other
+// failure leaves the state as it was (a fresh session then
 // has none and simply does not stream).
 func Open(ctx context.Context, cfg Config, dir string, p OpenParams) (State, error) {
 	cfg, err := cfg.withDefaults()
@@ -85,11 +103,7 @@ func Prepare(ctx context.Context, cfg Config, dir string, p OpenParams) (State, 
 		} else if !errors.Is(err, ErrNotStreaming) {
 			return err
 		}
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusPending,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusPending, p)
 		// registered first, bound to this folder: a stream state whose id is
 		// not bound to its folder is refused everywhere (see authorize)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
@@ -106,10 +120,22 @@ const openLockWait = 5 * time.Second
 
 func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) (State, error) {
 	st, err := ReadState(dir)
+	if err == nil && st.Status == StatusPending && st.AwaitReopen != nil {
+		// resolved before anything else, even with no prompt spooled yet: the
+		// wait's deadline runs from the start, not from the first prompt
+		if st, err = settleAwait(ctx, cfg, dir, st, false); err != nil {
+			return State{}, err
+		}
+		if st.AwaitReopen != nil {
+			// opening now would mint the conversation the wait may yet replace
+			cfg.Logger.DebugContext(ctx, "live_session_open_deferred", "session_id", st.SessionID, "conversation_id", st.ConversationID, "reason", "awaiting_reopen")
+			return st, nil
+		}
+	}
 	onDisk := err == nil
 	pending := err == nil && st.Status == StatusPending
 	switch {
-	case pending && !st.OpenSent && !mayHoldPrompt(dir):
+	case pending && !st.OpenSent && !mayHoldPromptFrom(dir, st.SeedBytes):
 		// local only: an open already sent may have created the conversation,
 		// so only a stream the server has never heard of waits
 		return st, ErrAwaitingPrompt
@@ -118,11 +144,7 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		return st, nil // deleted, closed or disabled stay that way
 	case err == nil: // resume on the same layer, keeping acked
 	case errors.Is(err, ErrNotStreaming):
-		st = State{
-			ConversationID: cnv, LayerID: "clyr_" + uuid.Must(uuid.NewV7()).String(),
-			Endpoint: cfg.Endpoint, Status: StatusStreaming,
-			SessionID: p.SessionID, SessionName: p.SessionName, RepoID: p.RepoID, Agent: p.Agent, StartedAt: p.StartedAt,
-		}
+		st = newState(cfg, cnv, StatusStreaming, p)
 		if err := recordMinted(ctx, cfg, cnv, dir); err != nil {
 			return State{}, err
 		}
@@ -149,6 +171,15 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 		}
 		return disableOnKeyConflict(dir, cfg.Endpoint, st, err)
 	}
+	// read before this open is recorded below: what earlier opens of this layer
+	// left the server holding
+	prior := neverAdmitted
+	switch {
+	case onDisk && !pending:
+		prior = admitted
+	case pending && st.OpenSent:
+		prior = maybeAdmitted
+	}
 	if pending && !st.OpenSent {
 		// the server may create the conversation even if its reply is lost;
 		// abort deletes only what it knows may exist (C2)
@@ -165,27 +196,46 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 	}
 	// st's id, the one authorize checked; cnv (from the caller's ses_ id) is the
 	// same for every stream ox prepared
-	_, err = c.Open(ctx, st.ConversationID, openRequest(st))
+	req := openRequest(cfg, st)
+	_, err = c.Open(ctx, st.ConversationID, req)
 	if deleteRequested(dir) {
 		return abortedWhileOpening(ctx, cfg, st)
+	}
+	if err != nil && st.Reopen {
+		nst, fell, ferr := fallBackFromRefusedReopen(ctx, cfg, dir, st, err)
+		if ferr != nil {
+			return State{}, ferr
+		}
+		if fell {
+			st = nst
+			prior = neverAdmitted // a new layer no earlier open has reached
+			req = openRequest(cfg, st)
+			_, err = c.Open(ctx, st.ConversationID, req)
+			if deleteRequested(dir) {
+				return abortedWhileOpening(ctx, cfg, st)
+			}
+		}
 	}
 	if err != nil {
 		var eerr error
 		if st, eerr = openAnswered(ctx, cfg, dir, st, onDisk, err, "open"); eerr != nil {
 			return State{}, eerr
 		}
-		return openRefused(ctx, cfg, dir, st, err)
+		return openRefused(ctx, cfg, dir, st, prior, err)
 	}
 	if pending {
 		st.Status = StatusStreaming
 	}
+	// the server took the reopen: the new layer is live, and any later open of
+	// it (a retry, a new_layer restart) is an ordinary one
+	st.Reopen = false
 	s := &session{cfg: cfg, dir: dir, st: st}
 	s.edgeCleared(ctx)
 	st = s.st
 	if err := writeState(dir, st); err != nil {
 		return State{}, err
 	}
-	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked)
+	cfg.Logger.InfoContext(ctx, "live_session_open", "session_id", st.SessionID, "conversation_id", st.ConversationID, "layer_id", st.LayerID, "acked", st.Acked, "accepts_notes", req.AcceptsNotes == nil)
 	return st, nil
 }
 
@@ -195,7 +245,13 @@ func openLocked(ctx context.Context, cfg Config, dir, cnv string, p OpenParams) 
 // unreadable spool proves nothing. Either way the stream opens, so a prompt the
 // spool could not carry is declared on the stream, never hidden as an empty
 // session.
-func mayHoldPrompt(dir string) bool {
+func mayHoldPrompt(dir string) bool { return mayHoldPromptFrom(dir, 0) }
+
+// mayHoldPromptFrom is mayHoldPrompt for the spool bytes at and after from. A
+// reopened stream's spool starts with the stopped session's own lines (State
+// SeedBytes), which hold prompts that were already published; only what the
+// person types after the resume may open it.
+func mayHoldPromptFrom(dir string, from int64) bool {
 	if lost := readLost(dir); lost.pending || lost.recorded > 0 {
 		return true
 	}
@@ -207,6 +263,11 @@ func mayHoldPrompt(dir string) bool {
 		return true
 	}
 	defer func() { _ = f.Close() }() // read-only: nothing to flush
+	if from > 0 {
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			return true // cannot prove the tail is promptless
+		}
+	}
 	// Bounded per line: this runs before authorize, on a spool in a checkout a
 	// Ledger contributor can write to, so a planted newline-free spool must not
 	// make the probe allocate it whole. The spool never holds a line longer
@@ -265,11 +326,26 @@ func openAnswered(ctx context.Context, cfg Config, dir string, st State, onDisk 
 	return s.st, eerr
 }
 
+// priorOpen is what earlier opens of a stream's layer left the server holding.
+type priorOpen int
+
+const (
+	// neverAdmitted: no earlier open of this layer was sent.
+	neverAdmitted priorOpen = iota
+	// maybeAdmitted: one was sent and never answered 200 here (its reply was
+	// lost, or the state write after it failed): the layer may exist.
+	maybeAdmitted
+	// admitted: one was answered 200, so the layer exists.
+	admitted
+)
+
 // openRefused records an open answered "deleted" or "closed" exactly as the
 // same answer to an append is recorded, so a session someone deleted while its
-// open reply was lost is held, not published. Any other failure leaves the
-// state as it was for a later attempt.
-func openRefused(ctx context.Context, cfg Config, dir string, st State, err error) (State, error) {
+// open reply was lost is held, not published. An open refused as
+// session_name_taken disables the stream; one refused as feature_off is
+// settled by prior (featureOff). Any other failure leaves the state as it was
+// for a later attempt.
+func openRefused(ctx context.Context, cfg Config, dir string, st State, prior priorOpen, err error) (State, error) {
 	var api *sessionstream.APIError
 	if errors.As(err, &api) {
 		s := &session{cfg: cfg, dir: dir, st: st}
@@ -280,8 +356,50 @@ func openRefused(ctx context.Context, cfg Config, dir string, st State, err erro
 		if done {
 			return s.st, nil
 		}
+		switch api.Body.Reason {
+		case sessionstream.ReasonSessionNameTaken:
+			// another person owns this session name in this repo; no retry can
+			// change that, so the stream ends here instead of looping every tick
+			s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
+			return s.st, nil
+		case sessionstream.ReasonFeatureOff:
+			// matched on the reason, not on action stop: other stop refusals
+			// keep the retry
+			return s.featureOff(ctx, api, prior, err)
+		}
 	}
 	return State{}, fmt.Errorf("open live session: %w", err)
+}
+
+// featureOff settles an open refused feature_off: the rollout flag is off for
+// this person though the client's settings cache (up to 2 h old) said on.
+// api-go checks the flag on every open and never on an append or close, so
+// what to do depends on whether the layer may already exist (prior). Retrying
+// the open would loop every tick, rerunning the summary model before each
+// try once the session stopped. raw.jsonl and the v1 upload are untouched.
+//
+//   - neverAdmitted: nothing exists on the server; the stream is disabled, and
+//     the next session asks again.
+//   - maybeAdmitted: the stream is promoted to streaming on its layer, and its
+//     next append settles it: it lands (the lost open was admitted) and the
+//     stream closes as usual, or it is refused not_found (action stop) and the
+//     drain disables it. Disabled outright, an admitted layer read as live on
+//     SageOx until the auto-finish.
+//   - admitted: left as it is, the refusal returned. The SessionEnd hook's probe
+//     open is the one that meets this; the hook then requests the close and the
+//     daemon sends it.
+func (s *session) featureOff(ctx context.Context, api *sessionstream.APIError, prior priorOpen, err error) (State, error) {
+	switch prior {
+	case admitted:
+		return State{}, fmt.Errorf("open live session: %w", err)
+	case maybeAdmitted:
+		s.log().InfoContext(ctx, "live_session_open_refused_after_lost_reply", "reason", api.Body.Reason, "status", api.Status,
+			"impact", "streams on the layer; the next append settles whether it exists")
+		s.setStatus(ctx, StatusStreaming)
+		return s.st, nil
+	}
+	s.disable(ctx, api.Body.Reason, "action", string(api.Body.Action), "status", api.Status)
+	return s.st, nil
 }
 
 // disableOnKeyConflict records a disabled session for a 409 on key registration.
@@ -299,11 +417,28 @@ func disableOnKeyConflict(dir, ep string, st State, err error) (State, error) {
 	return st, ErrKeyConflict
 }
 
-func openRequest(st State) sessionstream.OpenSessionRequest {
-	return sessionstream.OpenSessionRequest{
-		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: st.SessionID,
-		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
+// openRequest is the open body for st. accepts_notes is sent only to say no:
+// absent means yes, so a machine that takes notes sends what every older
+// client sent.
+func openRequest(cfg Config, st State) sessionstream.OpenSessionRequest {
+	// The server requires session_id to be the ses_ twin of the conversation id
+	// in the path. A reopened conversation belongs to the first recording of the
+	// session, so the twin comes from the conversation, not from the recording
+	// that streams it now (identical for every stream that never reopened).
+	sessionID := st.SessionID
+	if twin, ok := sessionTwin(st.ConversationID); ok {
+		sessionID = twin
 	}
+	req := sessionstream.OpenSessionRequest{
+		LayerID: st.LayerID, RepoID: st.RepoID, SessionID: sessionID, Reopen: st.Reopen,
+		SessionName: st.SessionName, Agent: st.Agent, StartedAt: st.StartedAt,
+		ParentSessionID: st.ParentSessionID, ContinuedFromSessionID: st.ContinuedFromSessionID,
+	}
+	if !cfg.acceptsNotes() {
+		refused := false
+		req.AcceptsNotes = &refused
+	}
+	return req
 }
 
 func keyLabel() string {

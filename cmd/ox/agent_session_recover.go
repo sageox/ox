@@ -461,6 +461,10 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	if err != nil {
 		return err
 	}
+	// The recording is cleared and no stop will close its live stream: left
+	// open, SageOx showed it live until the server's 72 h auto-finish.
+	// Requested after the clear, so a hook still capturing cannot spool behind it.
+	liveSessionCloseEnded(state)
 	return outputRecoverJSON(output)
 }
 

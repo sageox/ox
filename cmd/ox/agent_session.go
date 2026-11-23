@@ -1008,6 +1008,7 @@ func sessionStopLocation(projectRoot string, state *session.RecordingState) sess
 // outputSessionStopJSON renders JSON output for session stop.
 // discoveryErr is why the native session file was not found, when it was not.
 func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, discoveryErr error, timing map[string]int64) error {
+	confirmMediaNotice := func() {}
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
@@ -1062,6 +1063,7 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 			output.Guidance = deletedOnServerGuidance
 		}
 		addLiveSecretWithheldNotice(&output, processResult)
+		confirmMediaNotice = addLiveMediaNotice(&output)
 	} else {
 		// nothing was saved or uploaded, and the recording is kept for a retry:
 		// report failure so no caller reads this as a saved session
@@ -1077,7 +1079,11 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		return fmt.Errorf("format stop JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	return cli.WriteJSONBytes(os.Stdout, jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
+		return err
+	}
+	confirmMediaNotice() // delivered: only now is it given
+	return nil
 }
 
 // sessionStopOutput aliases pipeline.StopOutput for backward compat within package main.

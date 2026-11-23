@@ -112,7 +112,7 @@ func withLiveUses(projectRoot string, state *session.RecordingState, events []co
 	}
 	for _, ev := range fresh {
 		if s, ok := surfacedFor(surfaced, ev); ok {
-			recordStatuslineUse(projectRoot, state, ev.RefType, ev.Ref, s.Aliases...)
+			recordStatuslineUse(projectRoot, state.AgentID, state, ev.RefType, ev.Ref, s.Aliases...)
 		}
 	}
 	if len(added) == 0 {

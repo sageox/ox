@@ -23,7 +23,8 @@
 //	stream-state.json    stream state: ids, endpoint, acked offset, status
 //	live.lock            advisory lock taken by whoever appends to or drains the spool
 //	close-requested      stop asked for the close; kept until the stream ends, so
-//	                     a close that could not take live.lock is never lost
+//	                     a close that could not take live.lock is never lost.
+//	                     Empty, or naming the one recording it is for
 //	delete-requested     abort recorded (or completed) the server-side delete;
 //	                     while it exists the session reads as deleted
 //	spool-lost           one line per batch Spool could not write; append-only,
@@ -33,7 +34,12 @@
 //	withheld-notice-owed the person may still be owed the notice that the stream
 //	                     withheld a secret; the next session start or stop says it
 //
-// None of them may be copied into the Ledger (IsLocalFile). Abort's
+// None of them may be copied into the Ledger (IsLocalFile). Teammate-note
+// receipts (which notes the agent was shown, which receipts are settled or owed
+// again) are NOT kept in the session folder: it is part of a pulled Ledger
+// checkout, where anyone who can write the Ledger could plant a log and forge a
+// delivery. They live under the data dir keyed by conversation id (ReceiptsDir);
+// receipt files found in the folder are ignored. Abort's
 // pending-deletes queue lives outside the session folder, in the data dir, so
 // removing the folder never loses a delete. So does live-secret-rules.toml, the
 // last upstream secret catalog the daemon's refresh validated.

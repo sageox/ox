@@ -120,7 +120,7 @@ func TestPrimeStartsAFreshRecordingBesideAQuarantinedOne(t *testing.T) {
 	oxConfigSetRepo(t, "session_recording", "auto")
 
 	const agentID = "OxPrimeHeld"
-	first := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", "")
+	first := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", "")
 	require.NotNil(t, first)
 	require.True(t, first.Recording)
 	require.NotContains(t, first.UserNotification, "held back")
@@ -130,7 +130,7 @@ func TestPrimeStartsAFreshRecordingBesideAQuarantinedOne(t *testing.T) {
 	require.NoError(t, session.MarkSourceRejected(f.projectRoot, agentID))
 	moved := moveToEarlierMinute(t, held)
 
-	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "", "")
+	status := startSessionRecording(f.projectRoot, agentID, "claude-code", inheritedParent{}, "", "")
 	require.NotNil(t, status)
 	assert.True(t, status.Recording, "prime must report the new recording")
 	assert.True(t, status.AutoStarted, "a quarantined recording must not make prime think it is already recording")

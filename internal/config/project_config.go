@@ -130,6 +130,11 @@ type ProjectConfig struct {
 	MurmurReceive     string `json:"murmur_receive,omitempty"`
 	RecordingReminder string `json:"recording_reminder,omitempty"`
 
+	// SessionTeammateNotes turns teammate notes off for this repo: "off", or
+	// "on"/empty. Off at any layer wins (see ResolveTeammateNotes), so a value
+	// committed here can opt a repo out but never opt a person back in.
+	SessionTeammateNotes string `json:"session_teammate_notes,omitempty"`
+
 	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
 	// Values: "enabled" (default), "disabled"
 	GitHubSync string `json:"github_sync,omitempty"`

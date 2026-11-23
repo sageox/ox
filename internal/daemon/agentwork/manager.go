@@ -27,6 +27,13 @@ const (
 	// detectCooldown is the minimum interval between detection scans for a handler.
 	// Prevents expensive ledger scans from running on every sync signal.
 	detectCooldown = 5 * time.Minute
+	// orphanedUploadProbeInterval is how often the manager looks for a session
+	// upload whose stop died before publishing (a push killed when the coding
+	// agent exited, sageox/ox#1936). The look is a directory listing and a stat
+	// per cached session, so 10 s costs nothing next to the full repair scan
+	// it triggers only when one is found, and it brings the retry from that
+	// scan's minutes down to seconds.
+	orphanedUploadProbeInterval = 10 * time.Second
 
 	// parkBackoffBase is how long an item that exhausted maxRetries (or a work
 	// type paused by an unresolved ledger) stays out of detection. It doubles
@@ -273,6 +280,8 @@ func (m *Manager) Enqueue(item *WorkItem) bool {
 func (m *Manager) Start(ctx context.Context) {
 	doctorTicker := time.NewTicker(doctorInterval)
 	defer doctorTicker.Stop()
+	uploadProbeTicker := time.NewTicker(orphanedUploadProbeInterval)
+	defer uploadProbeTicker.Stop()
 	defer m.releaseLedgerAntiEntropy()
 	// Runs before the lease is released (defers are LIFO): an item still
 	// finishing its git work must not have lost the claim on the ledger.
@@ -294,6 +303,8 @@ func (m *Manager) Start(ctx context.Context) {
 			m.processQueue(ctx)
 		case <-m.processSignal:
 			m.processQueue(ctx)
+		case <-uploadProbeTicker.C:
+			m.retryOrphanedUploads(ctx)
 		case <-doctorTicker.C:
 			m.logger.Debug("doctor timer fired, running detection")
 			// Hand work to live agents first. This runs independent of
@@ -422,40 +433,83 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 			)
 			continue
 		}
+		m.detectHandler(h, now)
+	}
+}
 
-		items, err := h.Detect(m.ledgerPath)
-		if err != nil {
-			m.logger.Warn("handler detect failed", "type", h.Type(), "error", err)
+// detectHandler runs one handler's Detect and enqueues what it finds, leaving
+// parked and paused items out. It does not consult the cooldown.
+func (m *Manager) detectHandler(h WorkHandler, now time.Time) {
+	items, err := h.Detect(m.ledgerPath)
+	if err != nil {
+		m.logger.Warn("handler detect failed", "type", h.Type(), "error", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.lastDetect[h.Type()] = now
+	m.mu.Unlock()
+
+	suppressed := 0
+	for _, item := range items {
+		if m.isSuppressed(item, now) {
+			suppressed++
 			continue
 		}
-
-		m.mu.Lock()
-		m.lastDetect[h.Type()] = now
-		m.mu.Unlock()
-
-		suppressed := 0
-		for _, item := range items {
-			if m.isSuppressed(item, now) {
-				suppressed++
-				continue
-			}
-			if m.queue.Enqueue(item) {
-				m.logger.Info("detected agent work", "type", item.Type, "dedup_key", item.DedupKey)
-			}
+		if m.queue.Enqueue(item) {
+			m.logger.Info("detected agent work", "type", item.Type, "dedup_key", item.DedupKey)
 		}
-		if suppressed > 0 {
-			m.logger.Debug("detected work suppressed (parked or paused)", "type", h.Type(), "suppressed", suppressed)
-		}
+	}
+	if suppressed > 0 {
+		m.logger.Debug("detected work suppressed (parked or paused)", "type", h.Type(), "suppressed", suppressed)
+	}
 
-		// one line per cycle, not one per rejected item
-		if rejected := m.queue.TakeRejected(); rejected > 0 {
-			m.logger.Info("detect backlog exceeds queue capacity",
-				"type", h.Type(),
-				"detected", len(items),
-				"rejected", rejected,
-				"max_depth", maxQueueDepth,
-			)
+	// one line per cycle, not one per rejected item
+	if rejected := m.queue.TakeRejected(); rejected > 0 {
+		m.logger.Info("detect backlog exceeds queue capacity",
+			"type", h.Type(),
+			"detected", len(items),
+			"rejected", rejected,
+			"max_depth", maxQueueDepth,
+		)
+	}
+}
+
+// orphanedUploadProber is a handler that can tell, cheaply, that a session
+// upload was left unfinished since it last looked (SessionFinalizeHandler).
+type orphanedUploadProber interface {
+	HasNewOrphanedUpload(ledgerPath string) bool
+}
+
+// retryOrphanedUploads runs detection at once, past the cooldown, for a
+// handler that reports an orphaned session upload, so a push killed when the
+// coding agent exited is retried within seconds rather than at the next
+// repair scan. Same gates as a scan: the worker enabled and the ledger's
+// anti-entropy lease held.
+func (m *Manager) retryOrphanedUploads(ctx context.Context) {
+	cfg := m.loadConfig()
+	if cfg == nil || !isEffectivelyEnabled(cfg) || !m.ownsLedgerAntiEntropy() {
+		return
+	}
+	m.mu.Lock()
+	handlers := make([]WorkHandler, 0, len(m.handlers))
+	for _, h := range m.handlers {
+		handlers = append(handlers, h)
+	}
+	m.mu.Unlock()
+
+	detected := false
+	for _, h := range handlers {
+		p, ok := h.(orphanedUploadProber)
+		if !ok || !isHandlerEnabled(cfg, h.Type()) || !p.HasNewOrphanedUpload(m.ledgerPath) {
+			continue
 		}
+		m.logger.Info("orphaned session upload, detecting now", "type", h.Type(), "ledger", m.ledgerPath)
+		m.detectHandler(h, m.now())
+		detected = true
+	}
+	if detected {
+		m.processQueue(ctx)
 	}
 }
 

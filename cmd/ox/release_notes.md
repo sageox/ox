@@ -7,33 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### New
-
-- **Flow lanes in Claude Code's terminal** — the lane that shows team context reaching your AI coworker now draws in the terminal too, as one row of text under each ox call that moves team data, such as `SAGEOX ●━━━━━━•━•━•━━━━━● SESSION  searched team memory · ~3k from 5 discussions · 0.8s`. Folded groups of tool calls stay folded, with the lane shown beneath the group. `/ox-session-report flow still` stops the motion and `/ox-session-report flow off` hides the lanes.
-- **Flow lanes for Codex, and live in a terminal pane** — in Codex CLI and the ChatGPT desktop app, each ox call that moves team data gets its lane right under it, as a still line. `ox statusline --watch` in a terminal split draws the same lanes live under ox's status line, and `ox statusline --wrap -- codex` keeps ox's line and the latest lane on the bottom row of Codex's own terminal. `ox config set flow_lanes off` hides them.
-- **A flow lane shows which way a running call moves data, and when it failed** — while an ox call runs, its dots march the way the data is going: left to right for a pull from SageOx, right to left for a push such as a murmur or a saved plan. A call that failed leaves a red lane, not a grey one. Lanes now appear only under ox calls: a prompt no longer gets one for the Team Context, murmurs or ledger matches that ox's hooks send along with it, in the terminal or the desktop app.
-- **See what SageOx gave a session in Conductor** — Conductor's chat has no status bar, so ox's line now shows there two ways: as a notice at the end of a Claude Code turn that used new team context, and live in Conductor's Run pane, where `ox init` and `ox doctor --fix` add an "ox" run script (`ox statusline --watch`) to your machine-local `.conductor/settings.local.toml`. A repository with run scripts of its own is left alone, and `ox doctor` shows the lines to add. `ox config set statusline off` turns both off.
-- **`ox init` offers an open-source project's team in your own clone** — when you're a member of a project's public SageOx team (a claimed seat counts) and run `ox init` in your clone of it, the team picker pre-selects that team, marked "(this project's team)". Picking it joins the repo the project already registered, so your work there counts as the project's. Fork clones are covered through the `upstream` remote. `--team` and a team already in `.sageox/config.json` still win. A shallow clone gets `git fetch --unshallow` advice instead, because its hashes can't match.
-
 ### Changed
 
-- **`ox init` and `ox doctor` no longer say other coding agents are untested** — both ended with a line that SageOx "is designed initially for Claude Code" and that other agents were not yet tested, which contradicted the docs. The line is gone; `ox login` dropped it earlier.
 - **`ox sync --read-only` is gone** — it let a process holding only a team token read one Ledger without the daemon, from before team tokens could get Git credentials. AI coworkers on a team token now run the daemon like everyone else, so `ox sync --read-only`, `ox session list --repo repo_<uuid>`, `ox glance --repo` and the read flags of the hidden `ox git-credential-helper` are removed. `ox session list --repo <path>` still lists another checkout's sessions.
-- **`ox brief` is gone; use `ox session report`** — the alias kept for one release after the rename is removed. `ox session report` takes the same flags, and the `brief_pane` setting still works as the old name of `session_report_pane`.
+
+## [0.27.2] - 2026-11-23
+
+Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Sessions reach your team more reliably, and ox no longer blocks your commits.
+
+*Same changes as 0.27.0, which was published without downloadable binaries.*
+
+### New
+
+- **See what team knowledge your AI coworker used, as it works** — in Claude Code's terminal and Codex, each ox call shows a one-line lane of what moved, red if it failed. `/ox-session-report flow off` hides them in Claude Code.
+- **Keep SageOx in view in any terminal** — `ox statusline --watch` runs it in a split pane, and `ox statusline --wrap -- codex` pins it to Codex's bottom row.
+- **Know when SageOx helped in Conductor** — a notice after each turn that used new team context, plus an ox line in the Run pane that `ox init` sets up.
+- **Bring team context to open-source work** — in your clone or fork, `ox init` picks the project's public SageOx team so your sessions count toward it.
+
+### Improved
+
+- **Contributors get the project's context without joining** — outside contributors' AI coworkers receive the project's public team context.
+- **`ox session report` replaces `ox brief`** — same flags; the old alias is gone.
+- **Setup no longer warns that your coding agent is untested.**
 
 ### Fixed
 
-- **`ox status` and `ox doctor` catch a daemon without your `SAGEOX_TOKEN`** — a running daemon keeps the environment it started with, so one started before `SAGEOX_TOKEN` was set or changed (an AI coworker's first turns can come before its token) cloned and synced the Ledger without it: git asked for a username for git.sageox.ai while `ox status` showed the token as valid. Both now name the mismatch and say to run `ox daemon restart` from the shell that has the token. A daemon holding a token your shell lacks only gets a warning.
-- **Sessions in a Git worktree beside the repo are saved** — a Claude Code session run in a worktree outside the main checkout is now found and uploaded at stop. When nothing is found, `session stop` reports failure, says why, and gives the exact `recover` or `ox session import` command instead of claiming success; `session recover` does the same.
-- **Long sessions import** — `ox agent <id> session import` reads entries up to 10 MiB; one over 1 MiB (a screenshot, long tool output) no longer fails the import, and one too large to save names its line. Its help and output now say it adds planning history, and point to `ox session import` for the full conversation.
-- **Add-ons and team memory reach the team** — `ox addons` changes and `ox memory put` push to Team Context and report when a change is still local. The daemon retries on the next sync.
-- **`ox session list` no longer reports an uncloned Ledger as available** — the Ledger folder can exist before its first clone lands, and `ledger_available` read it as ready. An AI coworker runner then recorded work that could never upload. It now reports `false` until the Ledger is a checkout.
-- **Each Codex desktop chat gets its own AI coworker** — every chat in the ChatGPT desktop app runs under one Codex process, so a new chat reused the first chat's AI coworker and the two sessions were recorded as one, losing a chat's history. A chat with its own session ID now always gets its own AI coworker.
-- **`ox doctor` no longer rewrites or stages the README by default** — Init writes the same README that doctor expects. README repairs and staging missing SageOx files require an explicit fix; doctor no longer reports unstaged changes as staged.
-- **`ox doctor --fix` removes team names from old repo markers** — `.sageox/.repo_*` markers written by earlier `ox init` runs listed every team the person belonged to under `team_urls`. Doctor now flags it, and `--fix` removes the key; commit `.sageox/` afterwards.
-- **Ledger commits stay credited to the AI coworker on machines with a global `author.email`** — git ranks `author.*` and `committer.*` above `user.email` in every scope, so a global `author.email` or `committer.email` put that address on an AI coworker's Ledger commits. ox now writes those keys next to the identity it stamps in its clones, and removes them with it.
-- **The status line's "used" count no longer waits for the session report** — the AI coworker's reply is scanned for used team context at the end of every turn, so `N used` moves in the status bar, the desktop band and the Codex notice without opening `/ox-session-report`.
-- **The status line counts the current recording, like the session report** — one Claude Code session can span several ox recordings (a resume, a pause, an idle finalize). The status line used to keep adding across all of them, so it could say `4 discussions · 5 used` while `/ox-session-report` said `used 3 of 13`. It now starts over with each recording and the two agree.
+- **Commit without interruptions** — git no longer fails with `index.lock: File exists` while ox runs.
+- **Fewer sessions get stuck on your machine** — they upload after `/exit` and from Git worktrees, with the final answer intact. Long imports succeed, and existing recordings are protected.
+- **Paused means paused** — AI coworkers launched from a paused session stay paused, even through `/clear`.
+- **Codex, Goose and OpenCode sessions record correctly** — each ChatGPT desktop chat is its own session.
+- **Trust the "used" count** — the status line updates every turn and matches `/ox-session-report`.
+- **Team changes reach your team** — `ox addons` and `ox memory put` changes sync, and commits stay credited to the AI coworker.
+- **`ox doctor` fixes more, touches less** — it catches a daemon missing your `SAGEOX_TOKEN` and leaves your README alone.
+- **Plan links open on the first click**, and review comments no longer cover plan text.
+
+## [0.27.1] - 2026-11-23
+
+Not published. Its changes ship in 0.27.2.
+
+## [0.27.0] - 2026-11-23
+
+Published without binaries. Its changes ship in 0.27.2.
 
 ## [0.26.0] - 2026-11-17
 

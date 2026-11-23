@@ -417,3 +417,14 @@ func TestMockService_MultiMethodConsumer(t *testing.T) {
 	}
 	svc.MarkErrors(ids) // assertion inside the func
 }
+
+// The mock holds no teammate-notes knob: it must answer both phases with an
+// empty, successful result so a daemon-shaped caller treats it as "no notes".
+func TestMockServiceTeammateCommentsAnswerEmptyAndSucceed(t *testing.T) {
+	m := NewMockService()
+	resp, err := m.TeammateCommentsTake(daemon.TeammateCommentsTakePayload{AgentID: "a"})
+	require.NoError(t, err)
+	require.Empty(t, resp.Entries)
+	require.Empty(t, resp.LeaseID)
+	require.NoError(t, m.TeammateCommentsConfirm(daemon.TeammateCommentsConfirmPayload{AgentID: "a"}))
+}

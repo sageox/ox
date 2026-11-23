@@ -220,6 +220,9 @@ type SessionFinalizeHandler struct {
 	// warnedOnce remembers which "<site>|<session>" conditions already logged a
 	// Warn, for conditions that persist across detect scans (see warnOnce).
 	warnedOnce sync.Map
+	// uploadProbed maps each .upload-retry-pending marker HasNewOrphanedUpload
+	// has settled to the marker's mod time, so a marker is reported once.
+	uploadProbed sync.Map
 	// afterStageTestHook is called right after `git add` stages the session
 	// path, before the commit. Nil in production; tests use it to perturb the
 	// worktree between staging and commit and confirm the commit still
@@ -596,6 +599,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 		)
 		if hasRecordingMarker {
 			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+			// The ghost grace period guards against a dead transient shell PID
+			// in a young recording whose agent lives on. An orphaned upload is
+			// proof the other way: a stop ended this capture, and it died
+			// before publishing (sageox/ox#1936). Waiting out the grace would
+			// leave the session off the Ledger for up to ten minutes. Only in
+			// a cache dir, the only place recordings and markers live.
+			if repair && recMethod == stalenessPIDDeadGrace && sessionsDir != filepath.Join(ledgerPath, "sessions") &&
+				uploadOrphaned(sessionDir, ledgerPath) {
+				recStale, recMethod = true, stalenessUploadOrphaned
+			}
 		}
 		if !repair && hasRecordingMarker && !recStale {
 			// A failed stop can leave the owner alive after capture has stopped.
@@ -619,7 +632,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 		// The time threshold remains acceptable for the NON-draft recovery
 		// further below, where it has always been the fallback and no
 		// still-live claim is being overridden.
-		abandoned := hasRecordingMarker && recMethod == stalenessPIDDead
+		abandoned := hasRecordingMarker && (recMethod == stalenessPIDDead || recMethod == stalenessUploadOrphaned)
 
 		_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
 
@@ -743,6 +756,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
 				// A busy capture writer can be retried on the next detect pass.
 				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
+					// decided before this lock: if a hook appended since, the
+					// marker no longer matches and the grace period applies again
+					if recMethod == stalenessUploadOrphaned && session.PendingUploadID(sessionDir) == "" {
+						return errors.New("pending upload no longer matches the recording")
+					}
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath, h.projectRoot)
 					if err != nil {
@@ -755,7 +773,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string, rep
 					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
-					return os.Remove(recPath)
+					return h.clearStaleRecording(sessionDir, recPath, ledgerPath, manual)
 				})
 				if recoverErr != nil {
 					h.logStaleRecoveryDeferred(name, recoverErr)
@@ -1216,7 +1234,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err := holdIfRecordedManual(sessionDir); err != nil {
 						return err
 					}
-					return os.Remove(recPath)
+					return h.clearStaleRecording(sessionDir, recPath, ledgerPath, manual)
 				})
 				if recoverErr != nil {
 					h.warnOnce("orphan-recovery-deferred", name,
@@ -4309,6 +4327,39 @@ func holdIfRecordedManual(sessionDir string) error {
 	}
 	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
 		return fmt.Errorf("hold recovered manual-mode session: %w", err)
+	}
+	return nil
+}
+
+// clearStaleRecording removes the .recording.json of a recording whose process
+// is gone, then requests the close of the live stream it leaves open: no stop
+// will close it, and an open stream reads as live on SageOx until the server's
+// 72 h auto-finish. The live sweep finishes the close on its next tick.
+//
+// None is requested for a session the v1 finalize would keep local: held in
+// any of the Ledger's cache locations (as the finalize decides it, by name), or
+// while the project publishes manually (manual), since this pass may still hold
+// it. A held stream is deleted by the sweep's stopHeld, never closed with a
+// summary. The caller holds the raw.jsonl lock; the request takes none
+// (livesession.RequestCloseOfEnded). A failed request is logged, never a
+// failed recovery: the v1 finalize must not wait on the live stream.
+func (h *SessionFinalizeHandler) clearStaleRecording(sessionDir, recPath, ledgerPath string, manual bool) error {
+	// read before the remove: the marker names the recording the stream must belong to
+	rec, _ := session.ReadRecordingStateFile(sessionDir)
+	if err := os.Remove(recPath); err != nil {
+		return err
+	}
+	if rec == nil || manual || session.IsHeldInLedger(ledgerPath, filepath.Base(sessionDir)) {
+		return nil
+	}
+	requested, err := livesession.RequestCloseOfEnded(sessionDir, rec.SessionID)
+	switch {
+	case err != nil:
+		h.logger.Warn("live stream close not requested for an ended recording",
+			"session", filepath.Base(sessionDir), "session_id", rec.SessionID, "impact", "reads live on SageOx until the server finishes it", "err", err)
+	case requested:
+		h.logger.Info("live stream close requested for an ended recording",
+			"session", filepath.Base(sessionDir), "session_id", rec.SessionID)
 	}
 	return nil
 }

@@ -43,6 +43,12 @@ func runConversationShow(cmd *cobra.Command, args []string) error {
 			"show takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
 	}
 
+	// a live coding session is not a recording: hand ses_ ids and /c/ses_ links
+	// to the server-rendered session view
+	if ref, ok := parseLiveViewRef(args[0]); ok && strings.HasPrefix(ref.ID, "ses_") {
+		return runLiveConversationShow(cmd, ref, format)
+	}
+
 	reader, openErr := openConversationReader()
 	if openErr != nil {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(openErr), nil)

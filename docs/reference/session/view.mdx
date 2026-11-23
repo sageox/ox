@@ -24,20 +24,34 @@ Examples:
   ox session view --context --json            # context trace as structured JSON
   ox session view --input /path/to/raw.jsonl
 
+Live sessions (ses_/cnv_ ids or a pasted sageox.ai /c/ses_… link) are rendered
+by the server as agent-readable markdown, starting with a Status: line that says
+whether the session is still live:
+  ox session view ses_\<id>                 # markdown, with live/finished status
+  ox session view https://sageox.ai/c/ses_\<id>
+  ox session view ses_\<id> --since \<cursor> --budget 20000
+  ox session view ses_\<id> --layer clyr_\<id>
+  ox session view ses_\<id> --follow        # print new turns until it finishes
+  ox session view ses_\<id> --json
+
 ```
-ox session view [session-name] [flags]
+ox session view [session-name | ses_… | cnv_… | https://sageox.ai/c/ses_…] [flags]
 ```
 
 ### Options
 
 ```
+      --budget int     live session: approximate token budget (server default 12000, max 60000)
       --context        show context trace (what context was available and influenced decisions)
+      --follow         live session: keep reading new turns every 15s until it is no longer live
   -h, --help           help for view
   -i, --input string   input JSONL file path
       --json           view local session as structured JSON
       --latest         show most recent session
+      --layer string   live session: read one layer by clyr_ id
       --limit int      limit number of entries shown (0 = all)
       --metadata       show only metadata (no entries)
+      --since string   live session: only turns after this cursor (next_since from a previous view)
       --text           view local session in terminal (markdown)
 ```
 

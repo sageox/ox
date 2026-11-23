@@ -96,11 +96,11 @@ func OxCapabilities() []Capability {
 			ConsultRoutes: []ConsultRoute{
 				{
 					Cue:     `Recency / "I just did X"`,
-					Command: "`ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). A specific recent session is the likeliest source; semantic search can rank it below older fuzzy matches and miss it.",
+					Command: "`ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). Read one: `ox session view <name>`. Team `ox query` does not search coding sessions.",
 				},
 				{
 					Cue:     `Conceptual / "did we decide or discuss X?"`,
-					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.",
+					Command: "`ox query \"<question>\"` (semantic; default `--source=team`: discussions and docs). Add `--source=all` to include code.",
 				},
 				{
 					Cue:     `Who/when in a recorded conversation`,
@@ -113,6 +113,10 @@ func OxCapabilities() []Capability {
 				{
 					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
 					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
+				},
+				{
+					Cue:     `A pasted session link (…/c/ses_…)`,
+					Command: "`ox session view <link or ses_id>` — never web-fetch it. First line says if live.",
 				},
 				{
 					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,

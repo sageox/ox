@@ -19,6 +19,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -42,8 +43,8 @@ var (
 	errSessionStopFailed = errors.New("session stop failed")
 
 	// errSessionStopStillRunning: the stop outlived sessionEndStopWait. It
-	// keeps uploading in its own process session; handleEnd must not touch
-	// the recording underneath it.
+	// keeps uploading outside the hook's process tree; handleEnd must not
+	// touch the recording underneath it.
 	errSessionStopStillRunning = errors.New("session stop still running")
 
 	// errSessionUploadFailed: the stop finished but the upload did not. The
@@ -87,10 +88,15 @@ func stopLeftRecordingUntouched(err error, projectRoot, agentID string) bool {
 // stop recording, so a later prime for this agent records again. The stop
 // clears it itself because it may outlive the hook that started it.
 func runAgentSessionStopCommand(cmd *cobra.Command, inst *agentinstance.Instance) error {
+	agentEnded, _ := cmd.Flags().GetBool("agent-ended")
+	if !agentEnded {
+		// the person ended this session themselves: final, never reopened
+		markManualLiveStop(inst.AgentID)
+	}
 	if err := runAgentSessionStop(inst); err != nil {
 		return err
 	}
-	if agentEnded, _ := cmd.Flags().GetBool("agent-ended"); agentEnded {
+	if agentEnded {
 		if projectRoot, err := findProjectRoot(); err == nil {
 			session.ConsumeExplicitStop(projectRoot, inst.AgentID)
 		}
@@ -112,22 +118,29 @@ func runSessionStopProcess(projectRoot, agentID string) error {
 
 // runSessionStopWith runs the stop with the given ox executable.
 func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration) error {
-	// files, not pipes: the child may keep writing after this hook exits
-	out, err := os.CreateTemp("", "ox-session-stop-*.json")
+	sweepAbandonedStopDirs(time.Now())
+	// files, not pipes: the stop keeps writing after this hook is killed or
+	// returns. One directory holds them and the stop's exit status.
+	dir, err := os.MkdirTemp("", stopDirPattern)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
-	defer removeTemp(out)
-	diag, err := os.CreateTemp("", "ox-session-stop-*.log")
+	defer os.RemoveAll(dir)
+	out, err := os.Create(filepath.Join(dir, "result.json"))
 	if err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
-	defer removeTemp(diag)
+	defer out.Close()
+	diag, err := os.Create(filepath.Join(dir, "stderr.log"))
+	if err != nil {
+		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
+	}
+	defer diag.Close()
 
 	cmd := sessionStopCommand(oxPath, projectRoot, agentID)
 	cmd.Stdout = out
 	cmd.Stderr = diag
-	if err := waitForSessionStop(cmd, wait); err != nil {
+	if err := waitForSessionStop(cmd, filepath.Join(dir, "exit-status"), wait); err != nil {
 		// the exit status alone does not say why the stop failed
 		if errors.Is(err, errSessionStopFailed) {
 			if said, readErr := os.ReadFile(diag.Name()); readErr == nil {
@@ -154,6 +167,25 @@ func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration)
 		}
 	}
 	return outcome
+}
+
+// stopDirPattern names the folder each SessionEnd hook keeps its stop's
+// output and exit status in.
+const stopDirPattern = "ox-session-stop-*"
+
+// sweepAbandonedStopDirs removes stop folders that killed hooks left behind.
+// Claude Code kills the hook about 1.5 s in (sageox/ox#1936), so the hook's
+// deferred cleanup never runs, and the stop's output can carry the session's
+// summary. A live hook's folder is never older than sessionEndStopWait, so
+// twice that is safely abandoned. Lstat: a symlink is never followed.
+func sweepAbandonedStopDirs(now time.Time) {
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), stopDirPattern))
+	for _, dir := range matches {
+		info, err := os.Lstat(dir)
+		if err == nil && info.IsDir() && now.Sub(info.ModTime()) > 2*sessionEndStopWait {
+			_ = os.RemoveAll(dir)
+		}
+	}
 }
 
 // sessionUploadRetryWaits are the pauses between attempts when a session's
@@ -200,11 +232,6 @@ func retryableSessionUploadError(err error) bool {
 	return !errors.Is(err, api.ErrReadOnly) && !errors.Is(err, errSessionDeletedOnServer) && !pipeline.IsAuthRelatedError(err.Error())
 }
 
-func removeTemp(f *os.File) {
-	_ = f.Close()
-	_ = os.Remove(f.Name())
-}
-
 // stopDiagnosticsMax bounds how much of the stop's stderr a hook log line carries.
 const stopDiagnosticsMax = 400
 
@@ -220,22 +247,36 @@ func stopDiagnosticsTail(said []byte) string {
 // ansiEscape matches the SGR color sequences a terminal-bound writer emits.
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// waitForSessionStop starts the stop child and waits up to wait for it. On
-// timeout the child keeps running: it is detached, and owns the recording.
-func waitForSessionStop(cmd *exec.Cmd, wait time.Duration) error {
-	if err := cmd.Start(); err != nil {
+// sessionStopPoll is how often the hook checks whether the stop has ended. The
+// stop is not this hook's child, so there is no Wait to block on. 50 ms keeps
+// the hook's return within a blink of the stop's, and the checks cost nothing
+// next to an upload that takes seconds.
+const sessionStopPoll = 50 * time.Millisecond
+
+// waitForSessionStop starts the stop outside this hook's process tree and
+// waits up to wait for it. On timeout the stop keeps running: it owns the
+// recording. The hook waits rather than returning at once because a host that
+// ends with the agent (an Amp orb) pauses when the hook returns, and the
+// upload must finish before that.
+func waitForSessionStop(cmd *exec.Cmd, statusPath string, wait time.Duration) error {
+	if err := proc.StartOrphaned(cmd, statusPath); err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
+	deadline := time.Now().Add(wait)
+	for {
+		code, done, err := proc.OrphanedExitStatus(statusPath)
+		switch {
+		case err != nil:
+			// it ran, so it may have marked the recording
 			return fmt.Errorf("%w: %w", errSessionStopFailed, err)
+		case done && code != 0:
+			return fmt.Errorf("%w: exit status %d", errSessionStopFailed, code)
+		case done:
+			return nil
+		case time.Now().After(deadline):
+			return errSessionStopStillRunning
 		}
-		return nil
-	case <-time.After(wait):
-		return errSessionStopStillRunning
+		time.Sleep(sessionStopPoll)
 	}
 }
 
@@ -268,18 +309,18 @@ func sessionStopOutcome(printed []byte) error {
 	return nil
 }
 
-// sessionStopCommand builds the stop child. It runs in its own process
-// session, so an agent that kills this hook at its own timeout (Claude Code,
-// Codex) does not kill the upload with it. It is told the agent ended, so
-// it does not suppress the agent's next recording. It inherits the venue
-// (AMP_ORB, ...) with color forced off, because its output is parsed:
-// OX_COLOR_PROFILE outranks CLICOLOR_FORCE and NO_COLOR, and NO_COLOR covers
-// anything that reads only that.
+// sessionStopCommand builds the stop. waitForSessionStop starts it outside
+// this hook's process tree, so an agent that kills the hook's tree at its own
+// timeout (Claude Code's SessionEnd hook, sageox/ox#1936) does not kill the
+// upload with it. It is told the agent ended, so it does not suppress the
+// agent's next recording. It inherits the venue (AMP_ORB, ...) with color
+// forced off, because its output is parsed: OX_COLOR_PROFILE outranks
+// CLICOLOR_FORCE and NO_COLOR, and NO_COLOR covers anything that reads only
+// that.
 func sessionStopCommand(oxPath, projectRoot, agentID string) *exec.Cmd {
 	cmd := exec.Command(oxPath, "agent", agentID, "session", "stop", "--agent-ended")
 	cmd.Dir = projectRoot
 	cmd.Env = append(os.Environ(), "OX_COLOR_PROFILE=ascii", "NO_COLOR=1")
-	proc.Detach(cmd)
 	return cmd
 }
 

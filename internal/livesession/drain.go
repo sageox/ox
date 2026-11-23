@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/secretguard"
 	// aliased: this package's own session type would shadow it
 	oxsession "github.com/sageox/ox/internal/session"
@@ -42,6 +44,49 @@ type DrainResult struct {
 	// RetryAfter is the server's requested backoff after a refusal that asked
 	// for a retry (rate limit, unproven stored end); zero otherwise.
 	RetryAfter time.Duration
+	// TeammateCommentsListed: an append answer carried teammate_comments_listed,
+	// so TeammateComments (empty or not) is the server's complete pending list
+	// for this conversation. False: the server did not say; keep what is held.
+	TeammateCommentsListed bool
+	// TeammateComments are the notes teammates sent to the agent that the
+	// server listed in the latest append of this drain: untrusted text, minus any
+	// already shown. The server re-sends every undelivered one on each append,
+	// so a caller that cannot place them loses nothing.
+	TeammateComments []sessionstream.TeammateComment
+}
+
+// setTeammateComments records the latest append answer as the server's whole
+// pending list: it REPLACES what an earlier append of this drain returned, so a
+// note the owner opted out of, the author deleted, or another delivery settled
+// drops out. One already shown (its delivery is in the ack log) is never
+// returned: the server lists it because its ack never landed, so the ack goes
+// out again.
+func (r *DrainResult) setTeammateComments(s *session, in []sessionstream.TeammateComment) {
+	rdir, err := s.receipts()
+	var shown map[string]sessionstream.TeammateCommentAck
+	if err == nil {
+		shown, err = shownTeammateAcks(rdir)
+	}
+	if err != nil {
+		// an unreadable or oversized log cannot say what was shown; the daemon's
+		// stored-once mark still stops a second display
+		s.log().Warn("live_teammate_acks_unreadable", "error", err)
+	}
+	r.TeammateCommentsListed = true
+	r.TeammateComments = nil
+	for _, c := range in {
+		if a, ok := shown[c.ID]; ok {
+			// persisted: the obligation outlives this call and this process
+			if err := addTeammateResend(rdir, a.ID, time.Now()); err != nil {
+				s.log().Warn("live_teammate_resend_not_recorded", "comment_id", a.ID, "error", err)
+			}
+			continue
+		}
+		if c.ID == "" || slices.ContainsFunc(r.TeammateComments, func(h sessionstream.TeammateComment) bool { return h.ID == c.ID }) {
+			continue
+		}
+		r.TeammateComments = append(r.TeammateComments, c)
+	}
 }
 
 // verdict is what one append or close answer means for the loop above it.
@@ -54,6 +99,9 @@ const (
 	// vWithhold: the publication scan refused the batch at acked; the drain
 	// replaces it in the spool with one gap line (withhold).
 	vWithhold
+	// vRespool: media lines at acked became gap lines in the spool; the next
+	// pump reads the rewritten one.
+	vRespool
 )
 
 // session is one locked view of a session dir during a call.
@@ -68,6 +116,9 @@ type session struct {
 	// rules is the persisted secret-rules delta, loaded on the first scan.
 	rules       *secretguard.RuleSet
 	rulesLoaded bool
+	// mediaStored holds the digests this call already stored, so a batch resent
+	// after a stalled append does not declare its images again.
+	mediaStored map[string]bool
 }
 
 func (s *session) spoolPath() string { return filepath.Join(s.dir, spoolFileName) }
@@ -121,10 +172,11 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 	if err != nil {
 		return DrainResult{}, err
 	}
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	var res DrainResult
-	err = withLock(ctx, dir, budget, func() error {
+	err = withLockWithin(ctx, parent, dir, budget, func() error {
 		s, err := loadSession(cfg, dir)
 		if err != nil {
 			return err
@@ -134,12 +186,33 @@ func Drain(ctx context.Context, cfg Config, dir string, budget time.Duration) (D
 		}
 		if s.st.active() {
 			err = s.drain(ctx, &res)
+			// best effort and after the bytes: an ack never blocks or fails the drain
+			s.sendTeammateAcks(ctx)
 		}
 		res.Acked, res.Status = s.st.Acked, s.st.Status
 		res.Done = err == nil && (!s.st.active() || s.caughtUp())
 		return err
 	})
 	return res, err
+}
+
+// withLockWithin runs fn holding dir's live.lock, waiting at most budget, where
+// ctx is parent bounded by that same budget (a Drain's or a Close's). The lock
+// wait and the budget then run out together, and which one the wait notices
+// first is chance (a loaded machine decides it). A budget spent waiting for
+// the lock before fn ran is therefore always the lock timeout it is, never a
+// bare deadline, so a wedged lock holder reads the same every time. A caller's
+// own cancellation (parent done) is returned as is.
+func withLockWithin(ctx, parent context.Context, dir string, budget time.Duration, fn func() error) error {
+	ran := false
+	err := withLock(ctx, dir, budget, func() error {
+		ran = true
+		return fn()
+	})
+	if !ran && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return &fileutil.ErrLockTimeout{Path: fileutil.LockPath(LockTarget(dir)), Timeout: budget}
+	}
+	return err
 }
 
 func (s *session) caughtUp() bool {
@@ -167,6 +240,8 @@ func (s *session) drain(ctx context.Context, res *DrainResult) error {
 			if err := s.withhold(ctx); err != nil {
 				return err
 			}
+		case vRespool:
+			// pump has closed the spool and sendBatch rewrote it
 		case vNewLayer:
 			if restarts >= maxRestarts {
 				return errors.New("live stream refused after restarting on a new layer")
@@ -239,6 +314,19 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 		return vWithhold, nil
 	}
 	batch := capLines(window, s.batchLimit())
+	sendable, respool, err := s.prepareMedia(ctx, batch)
+	if errors.Is(err, errStreamEnded) {
+		return vStop, nil
+	}
+	if err != nil {
+		return vStop, fmt.Errorf("media at offset %d: %w", s.st.Acked, err)
+	}
+	if respool {
+		if err := replaceSpoolRange(ctx, s.dir, s.st.Acked, int64(len(batch)), sendable); err != nil {
+			return vStop, fmt.Errorf("declare media gap at offset %d: %w", s.st.Acked, err)
+		}
+		return vRespool, nil
+	}
 	resp, err := s.c.AppendRaw(ctx, s.st.ConversationID, s.st.LayerID, s.st.Acked, h.Sum(), batch)
 	if err != nil {
 		return s.onRefusal(ctx, err, f, h, window, len(batch), end, res)
@@ -248,6 +336,9 @@ func (s *session) sendBatch(ctx context.Context, f *os.File, h *sessionstream.St
 
 // onStored frees bytes only when the server's stream hash matches ours.
 func (s *session) onStored(ctx context.Context, f *os.File, h *sessionstream.StreamHash, batch []byte, resp sessionstream.AppendResponse, end int64, res *DrainResult) (verdict, error) {
+	if resp.TeammateCommentsListed { // an unlisted answer says nothing: keep what is held
+		res.setTeammateComments(s, resp.TeammateComments)
+	}
 	stored := resp.StoredThrough
 	if stored <= s.st.Acked || stored > end {
 		return vNewLayer, nil
@@ -408,10 +499,16 @@ func (s *session) deletedByServer(ctx context.Context) error {
 		return nil
 	}
 	s.log().InfoContext(ctx, "live_session_deleted_by_server")
+	// deleted or wiped on SageOx: no reopen copy of it may outlive that
+	if err := removeStash(s.cfg, s.st.ConversationID); err != nil {
+		s.log().WarnContext(ctx, "live_session_reopen_stash_remove_failed", "error", err)
+	}
 	s.st.Status, s.st.DeletedOnServer = StatusDeleted, true
 	// the hold names this stream's recording: the folder may pass to a new
-	// recording restarted within the minute, and it must not be held by this one
-	holdErr := oxsession.WriteHoldMarkerFor(s.dir, oxsession.HoldDeletedOnServer, "live_stream", s.st.SessionID)
+	// recording restarted within the minute, and it must not be held by this one.
+	// Every drain, open and close that hears a 410 holds live.lock, and the
+	// unlocked writer would wait on it (flock is per open file): the locked one.
+	holdErr := oxsession.WriteHoldMarkerForLocked(s.dir, oxsession.HoldDeletedOnServer, "live_stream", s.st.SessionID)
 	stateErr := s.persist()
 	if holdErr != nil && stateErr != nil {
 		err := errors.Join(holdErr, stateErr)
@@ -464,7 +561,9 @@ func (s *session) restartLayer(ctx context.Context) error {
 	next := s.st
 	next.LayerID = "clyr_" + uuid.Must(uuid.NewV7()).String()
 	next.Acked = 0
-	if _, err := s.c.Open(ctx, next.ConversationID, openRequest(next)); err != nil {
+	next.Reopen = false // a replacement layer is never a reopen
+	req := openRequest(s.cfg, next)
+	if _, err := s.c.Open(ctx, next.ConversationID, req); err != nil {
 		var api *sessionstream.APIError
 		if errors.As(err, &api) {
 			if done, terr := s.terminal(ctx, api); done || terr != nil {
@@ -473,7 +572,7 @@ func (s *session) restartLayer(ctx context.Context) error {
 		}
 		return fmt.Errorf("open replacement live layer: %w", err)
 	}
-	s.log().InfoContext(ctx, "live_session_new_layer", "new_layer_id", next.LayerID)
+	s.log().InfoContext(ctx, "live_session_new_layer", "new_layer_id", next.LayerID, "accepts_notes", req.AcceptsNotes == nil)
 	s.st = next
 	return s.persist()
 }

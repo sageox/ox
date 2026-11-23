@@ -18,7 +18,7 @@ import (
 )
 
 var sessionViewCmd = &cobra.Command{
-	Use:   "view [session-name]",
+	Use:   "view [session-name | ses_… | cnv_… | https://sageox.ai/c/ses_…]",
 	Short: "View a session",
 	Long: `View a session in your preferred format.
 
@@ -32,7 +32,17 @@ Examples:
   ox session view --json                  # view local session as structured JSON
   ox session view --context                  # show what context the AI coworker had
   ox session view --context --json            # context trace as structured JSON
-  ox session view --input /path/to/raw.jsonl`,
+  ox session view --input /path/to/raw.jsonl
+
+Live sessions (ses_/cnv_ ids or a pasted sageox.ai /c/ses_… link) are rendered
+by the server as agent-readable markdown, starting with a Status: line that says
+whether the session is still live:
+  ox session view ses_<id>                 # markdown, with live/finished status
+  ox session view https://sageox.ai/c/ses_<id>
+  ox session view ses_<id> --since <cursor> --budget 20000
+  ox session view ses_<id> --layer clyr_<id>
+  ox session view ses_<id> --follow        # print new turns until it finishes
+  ox session view ses_<id> --json`,
 	RunE: runSessionView,
 }
 
@@ -45,9 +55,21 @@ func init() {
 	sessionViewCmd.Flags().Bool("context", false, "show context trace (what context was available and influenced decisions)")
 	sessionViewCmd.Flags().Bool("metadata", false, "show only metadata (no entries)")
 	sessionViewCmd.Flags().Int("limit", 0, "limit number of entries shown (0 = all)")
+	sessionViewCmd.Flags().String("since", "", "live session: only turns after this cursor (next_since from a previous view)")
+	sessionViewCmd.Flags().Int("budget", 0, "live session: approximate token budget (server default 12000, max 60000)")
+	sessionViewCmd.Flags().String("layer", "", "live session: read one layer by clyr_ id")
+	sessionViewCmd.Flags().Bool("follow", false, "live session: keep reading new turns every 15s until it is no longer live")
 }
 
 func runSessionView(cmd *cobra.Command, args []string) error {
+	// live (v3) sessions: ses_/cnv_ ids and /c/ links go to the server render
+	if len(args) > 0 && looksLikeLiveViewArg(args[0]) {
+		ref, ok := parseLiveViewRef(args[0])
+		if !ok {
+			return fmt.Errorf("%q is not a valid live session id or link; expected ses_<id>, cnv_<id>, or https://sageox.ai/c/ses_<id>", truncateShareArg(args[0]))
+		}
+		return runLiveSessionView(cmd, ref)
+	}
 	textFlag, _ := cmd.Flags().GetBool("text")
 	jsonFlag, _ := cmd.Flags().GetBool("json")
 	contextFlag, _ := cmd.Flags().GetBool("context")
