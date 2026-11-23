@@ -456,6 +456,45 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "username with at sign (user@server) still redacted",
+			input:    "postgres://myadmin@mydemoserver:S3cret!@mydemoserver.postgres.database.azure.com:5432/db",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "email address as username still redacted",
+			input:    "mysql://dev@example.com:S3cret@db.example.com/app",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "JSON-escaped quote in password still redacted",
+			input:    `{"url":"postgres://user:pa\"ss@db.example.com/app"}`,
+			expected: `{"url":"[REDACTED_CONNECTION_STRING]"}`,
+			wantFind: true,
+		},
+		{
+			name:     "shell-escaped space does not carry the match to a later email",
+			input:    `postgres://localhost:5432\ ops@example.com`,
+			expected: `postgres://localhost:5432\ ops@example.com`,
+			wantFind: false,
+		},
+		{
+			// Raw spaces and double quotes are not valid in URI userinfo (RFC 3986);
+			// they must be percent-encoded. Matching them is what let a password-free
+			// URI swallow later JSON fields, so they end the match by design.
+			name:     "raw space in password is not a credential (must be %20)",
+			input:    "postgres://user:my pass@db.example.com/app",
+			expected: "postgres://user:my pass@db.example.com/app",
+			wantFind: false,
+		},
+		{
+			name:     "percent-encoded space in password still redacted",
+			input:    "postgres://user:my%20pass@db.example.com/app",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
 			name:     "host and port without password keep a later email",
 			input:    `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
 			expected: `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
