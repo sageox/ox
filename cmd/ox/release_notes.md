@@ -11,7 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Sessions reach your team more reliably, and ox no longer blocks your commits.
 
-*Same changes as 0.27.0, which was published without downloadable binaries.*
+### Since 0.27.0
+
+- **Nothing changes in ox itself.** 0.27.0 was published without downloadable binaries and 0.27.1 was never published, so 0.27.2 is the first version you can install.
+
+Everything below is new since 0.26.0.
 
 ### New
 
