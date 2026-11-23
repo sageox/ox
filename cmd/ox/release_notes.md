@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.1] - 2026-11-23
+## [0.27.2] - 2026-11-23
 
 Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Sessions reach your team more reliably, and ox no longer blocks your commits.
 
-*0.27.1 is 0.27.0 re-released: 0.27.0 was published without downloadable binaries.*
+*Same changes as 0.27.0, which was published without downloadable binaries.*
 
 ### New
 
@@ -37,9 +37,13 @@ Know what your team's knowledge is doing for your AI coworker, in Claude Code's 
 - **`ox doctor` fixes more, touches less** — it catches a daemon missing your `SAGEOX_TOKEN` and leaves your README alone.
 - **Plan links open on the first click**, and review comments no longer cover plan text.
 
+## [0.27.1] - 2026-11-23
+
+Not published. Its changes ship in 0.27.2.
+
 ## [0.27.0] - 2026-11-23
 
-Published without binaries. Its changes ship in 0.27.1.
+Published without binaries. Its changes ship in 0.27.2.
 
 ## [0.26.0] - 2026-11-17
 
