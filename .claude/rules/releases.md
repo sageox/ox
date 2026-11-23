@@ -67,6 +67,10 @@ and mechanism come after the dash.
 - ✅ **Commit without interruptions** — git no longer fails with `index.lock: File exists`
   while ox runs.
 
+**Point releases state the delta first.** A `0.X.Y` release opens with a `### Since 0.X.(Y-1)`
+section saying what changed from the previous version, even when the answer is "nothing in
+ox itself". Then say what everything below is new since.
+
 **Collapse related work into themes — ruthlessly.** Ten engineering fixes are often one
 user-visible improvement. Don't write "fixed sync / fixed retries / fixed divergence / fixed
 GPG / fixed daemon startup." Write **"Sync is significantly more reliable, including recovery
@@ -110,6 +114,10 @@ ALL test tiers must pass before release:
 make lint
 make test-release  # full + ratchet + slow + acceptance + digital twins
 ```
+
+**A tag names one commit.** Release tags are immutable, so a fix that changes the tagged commit
+needs a new version; failed stages can be retried against the unchanged commit. PR CI does not
+run the slow tier, so run `make test-slow` on the exact commit before tagging.
 
 The external `sageox/ox-test-harness` supplies compatibility evidence, but is
 not an enforceable gate until it attests current-source binary provenance
