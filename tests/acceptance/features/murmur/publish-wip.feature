@@ -1,6 +1,6 @@
 Feature: Murmuring Work-in-Progress to Teammates
   Avery publishes a murmur — a short coordination signal — so other AI
-  coworkers on the same repo or team stay in sync about what she's building and
+  teammates on the same repo or team stay in sync about what she's building and
   which files she's touching. Murmurs carry a topic and an importance, are
   short by design, expire after a day, and are never lost: if the background
   daemon is unavailable, the murmur is queued durably and delivered when sync

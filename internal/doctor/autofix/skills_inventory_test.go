@@ -79,7 +79,7 @@ func TestSkillsInventoryDrift_CleanInventoryIsClean(t *testing.T) {
 
 // TestSkillsInventoryDrift_NeverInstallsIntoAnUnselectedRepo guards the boundary
 // that keeps the daemon from making a decision the user never made. Selecting an
-// AI coworker is `ox init`'s job; a background process must not decide that a
+// AI teammate is `ox init`'s job; a background process must not decide that a
 // repository should suddenly acquire a skills directory.
 func TestSkillsInventoryDrift_NeverInstallsIntoAnUnselectedRepo(t *testing.T) {
 	repoRoot := t.TempDir()

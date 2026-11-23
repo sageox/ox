@@ -138,7 +138,7 @@ type abortRecordKeys struct {
 }
 
 // updateAbortRecord rewrites one record under a file lock, so two AI
-// coworkers aborting at once cannot drop each other's entry. A record it
+// teammates aborting at once cannot drop each other's entry. A record it
 // cannot read is left alone rather than replaced.
 func updateAbortRecord(path string, change func(*abortedSessions)) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

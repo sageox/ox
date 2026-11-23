@@ -13,11 +13,11 @@ disable-model-invocation: true
 
 <!-- Thin by design. The whole contract — how to present the report, what
      counts as used, and when to self-report use — lives in the `guidance` field of
-     `ox session report --json` (Layer 1), which reaches every AI coworker whether or
+     `ox session report --json` (Layer 1), which reaches every AI teammate whether or
      not it has this native surface. This skill only maps the argument and
      relays the command. Do not grow this body. -->
 
-Show what SageOx gave this AI coworker: the ox calls it made, the estimated
+Show what SageOx gave this AI teammate: the ox calls it made, the estimated
 context tokens, what it read by title, and which items were useful.
 
 Map `$ARGUMENTS` to a flag: `me` → `--me`, `team` → `--team`, anything else →

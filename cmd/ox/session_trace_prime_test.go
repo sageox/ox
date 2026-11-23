@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A pause marker survives an AI coworker restart. Auto-start must persist its
+// A pause marker survives an AI teammate restart. Auto-start must persist its
 // trace pause before writing the raw header, so a recovered recording cannot
 // expose exports produced while the inherited pause remains in effect.
 func TestTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T) {

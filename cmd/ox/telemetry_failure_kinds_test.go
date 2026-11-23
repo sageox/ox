@@ -16,14 +16,14 @@ import (
 )
 
 // TestSetupFailures_CarryAKindAndDetail drives each setup failure ox hits
-// before a repository, Ledger, login, or AI coworker session is ready.
+// before a repository, Ledger, login, or AI teammate session is ready.
 //
 // Failure prevented: these failures reaching usage telemetry as
 // error_kind=other with an empty error_detail, so the dashboard cannot tell a
 // missing setup step from an ox bug.
 func TestSetupFailures_CarryAKindAndDetail(t *testing.T) {
 	// Every variable agentx v0.1.14 reads to detect a coding agent, plus ox's
-	// own: run from inside any AI coworker, the dispatcher would otherwise find
+	// own: run from inside any AI teammate, the dispatcher would otherwise find
 	// that session and take a different branch.
 	for _, v := range []string{"SAGEOX_AGENT_ID", "AGENT_ENV", "_",
 		"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
@@ -65,7 +65,7 @@ func TestSetupFailures_CarryAKindAndDetail(t *testing.T) {
 		assertFailureKind(t, err, errkind.NotInitialized, "ledger not found at %s — run 'ox doctor --fix'")
 	})
 
-	t.Run("session score outside an AI coworker session", func(t *testing.T) {
+	t.Run("session score outside an AI teammate session", func(t *testing.T) {
 		err := runSessionScore(sessionScoreCmd, nil)
 		assertFailureKind(t, err, errkind.Other, "SAGEOX_AGENT_ID not set -- run 'ox agent prime' first")
 	})

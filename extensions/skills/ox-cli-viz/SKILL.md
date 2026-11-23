@@ -10,7 +10,7 @@ description: >-
 
 <!-- Thin by design. The portable behavior lives in the visualization-guidance
      floor of `ox agent prime` and the live `ox viz pr` output, which reach every
-     AI coworker. This skill adds only native activation ergonomics. Do not grow
+     AI teammate. This skill adds only native activation ergonomics. Do not grow
      this body into a second catalog or authoring guide. -->
 
 For PR work, run `ox viz pr` before drafting. For a reviewer question, run

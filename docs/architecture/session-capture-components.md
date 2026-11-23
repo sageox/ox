@@ -339,7 +339,7 @@ newest-first scan. 500-instance hard cap.
    (`SAGEOX_AGENT_ID`) or CLI arg. There is no global "who am I" state.
 2. **Per-user slug in path** lets multi-user machines coexist without locking.
 3. **Hard cap with eviction** prevents runaway growth if sessions aren't reaped.
-4. **One store for every worktree of a repository.** An AI coworker's commands
+4. **One store for every worktree of a repository.** An AI teammate's commands
    do not all run in the checkout that primed it: the Claude desktop app runs
    hooks (and so `ox agent prime`) in the main checkout while the coworker works
    in a linked worktree under `.claude/worktrees/`. A store per checkout made

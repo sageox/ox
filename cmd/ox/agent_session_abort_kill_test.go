@@ -238,7 +238,7 @@ func TestAbort_PartialNameNeverKillsTeammateFinalizedSession(t *testing.T) {
 
 // TestAbortAndDelete_RefuseADotDotSessionName: under sessions/, ".." names the
 // Ledger root, which both commands accepted as a finalized session. With
-// --force, the only gate a non-interactive AI coworker meets, they ran
+// --force, the only gate a non-interactive AI teammate meets, they ran
 // `git rm -r --force .` over the whole Ledger and pushed it to the team.
 //
 // Red-first check: drop the ValidateDraftSessionName call from either command

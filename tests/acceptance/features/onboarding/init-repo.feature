@@ -1,7 +1,7 @@
 Feature: Initializing a Repository for SageOx
   Devon runs `ox init` to bring a repository onto SageOx: it wires the repo to
   the team's endpoint, sets up the Ledger and Team Context, installs the agent
-  hooks, and injects the prime marker so any AI coworker knows to prime at
+  hooks, and injects the prime marker so any AI teammate knows to prime at
   session start. Devon then commits the `.sageox/` directory so the whole team
   shares the same setup.
 
@@ -22,7 +22,7 @@ Feature: Initializing a Repository for SageOx
     Scenario: Init injects the prime marker into the agent instructions
       Given Devon has just initialized the repository
       When he opens the repo's agent instructions
-      Then they contain a marker telling an AI coworker to run `ox agent prime` at session start
+      Then they contain a marker telling an AI teammate to run `ox agent prime` at session start
 
   Rule: Re-initializing an already-initialized repo is safe
 
@@ -64,4 +64,4 @@ Feature: Initializing a Repository for SageOx
       Given Devon has initialized the repository
       When he commits the `.sageox/` directory and pushes
       Then Devon's teammates get the same SageOx setup when they pull
-      And a teammate's AI coworker is told to prime from the shared marker
+      And a coworker's AI teammate is told to prime from the shared marker

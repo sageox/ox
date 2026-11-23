@@ -19,7 +19,7 @@ export type UsageContextSource = {
   count?: number
 }
 
-/** Evidence that the AI coworker used a surfaced item. */
+/** Evidence that the AI teammate used a surfaced item. */
 export type UsageUseEvidence = {
   evidence: string
   seq?: number
@@ -67,7 +67,7 @@ export type UsageEvidenceCounts = {
   judged: number
 }
 
-/** One surfaced item the AI coworker used, strongest evidence per ref, in seq order. */
+/** One surfaced item the AI teammate used, strongest evidence per ref, in seq order. */
 export type UsageUsedItem = {
   ref: string
   ref_type?: string
@@ -83,7 +83,7 @@ export type UsageUsedItem = {
   seq?: number
   /** Short sha of the commit that cited the item (detail cited_commit). */
   commit?: string
-  /** The AI coworker's reason (evidence reported). */
+  /** The AI teammate's reason (evidence reported). */
   why?: string
 }
 
@@ -92,7 +92,7 @@ export type UsageRelevant = {
   surfaced_count: number
   by_evidence?: UsageEvidenceCounts
   items?: UsageUsedItem[]
-  /** The AI coworker reported it used nothing. */
+  /** The AI teammate reported it used nothing. */
   reported_none?: boolean
   derived?: { category: string; reason?: string }
 }

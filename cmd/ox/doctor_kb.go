@@ -445,7 +445,7 @@ func checkKBOrphans(fix bool) checkResult {
 // lifecycle_state="provision-failed". This is a server-side condition;
 // the doctor cannot repair it from the client. The check marks itself
 // as RequiresAgent so the priority-summary view routes it to the
-// "Requires AI Coworker" / human-action bucket.
+// "Requires AI Teammate" / human-action bucket.
 //
 // Skips when the kb API is unavailable — same posture as the orphan check.
 func checkKBFailedProvision(_ bool) checkResult {

@@ -28,7 +28,7 @@ func (f *liveFixture) recoverAfterCrash() sessionRecoverOutput {
 	return got
 }
 
-// Failure prevented: an AI coworker crashed and cache-only recovery published
+// Failure prevented: an AI teammate crashed and cache-only recovery published
 // its recording, but nothing closed its live stream, so SageOx showed the
 // session live until the server's 72 h auto-finish.
 func TestLiveRecoverFromCacheClosesTheStream(t *testing.T) {

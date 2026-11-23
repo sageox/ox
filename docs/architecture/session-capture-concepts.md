@@ -9,7 +9,7 @@
 
 ## 1. What problem is being solved?
 
-An **AI coworker** (e.g. Claude Code, Cursor, Codex, Aider) drives a terminal session: it
+An **AI teammate** (e.g. Claude Code, Cursor, Codex, Aider) drives a terminal session: it
 reads files, runs tools, and iterates with a human. That process produces a rich,
 short-lived artifact — the *conversation* — which today is trapped inside the agent's
 local memory and then discarded when context resets. Teammates cannot see it; the same

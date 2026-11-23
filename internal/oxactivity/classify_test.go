@@ -16,7 +16,7 @@ func bashInput(cmd string) json.RawMessage {
 
 // --- A. ox CLI through shell tools ---
 // Failure prevented: the activity line names the wrong action (or none) for
-// the ox commands AI coworkers actually run, in the shapes they actually type.
+// the ox commands AI teammates actually run, in the shapes they actually type.
 func TestClassify_OxCommands(t *testing.T) {
 	t.Parallel()
 
@@ -69,7 +69,7 @@ func TestClassify_OxCommands(t *testing.T) {
 }
 
 // --- B. Shell prefixes and tails ---
-// Failure prevented: an AI coworker's habitual `cd x &&`, env prefix, or
+// Failure prevented: an AI teammate's habitual `cd x &&`, env prefix, or
 // `2>&1 | head` hides ox work from the line — or a pipe into ox is credited.
 func TestClassify_ShellPrefixesAndTails(t *testing.T) {
 	t.Parallel()

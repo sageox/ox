@@ -6,7 +6,7 @@ import (
 )
 
 // catalog.go exposes the artifact-neutral visualization catalog used by every
-// AI coworker. Plans are one consumer; documentation, PRs, reports, and design
+// AI teammate. Plans are one consumer; documentation, PRs, reports, and design
 // notes can use the same vocabulary and portable snippets.
 //
 // Why this exists: rendering is deterministic, so the lever on whether an

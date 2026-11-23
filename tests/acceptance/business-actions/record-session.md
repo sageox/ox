@@ -1,6 +1,6 @@
 # Business Action: Record a Session
 
-**Actor:** An AI coworker (e.g., Avery)
+**Actor:** An AI teammate (e.g., Avery)
 **Goal:** Capture the session so future coworkers can recall what happened and why
 **Preconditions:**
 - Primed at session start

@@ -18,7 +18,7 @@ Bubbles are **read-only**: the Curator writes, you consult. Nothing you do in a 
 |---|---|---|
 | Knowledge bubble | Curator synthesis of team conversations, by area | `ox kb list` |
 | Team context | The team's own authored rules, docs, and memory | `ox agent team-ctx` |
-| Ledger | This repo's prior AI coworker coding sessions | `ox session list` |
+| Ledger | This repo's prior AI teammate coding sessions | `ox session list` |
 
 A bubble is *synthesized*; team context is *authored*. When they disagree, team context is the team's stated intent and the bubble is a report of what was said — prefer the former and tell the user about the conflict.
 

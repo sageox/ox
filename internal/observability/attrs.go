@@ -50,10 +50,10 @@ const (
 	// individual commands via SetResultCount; not every command has one.
 	AttrResultCount = "result.count"
 
-	// AttrAgentEnv identifies the AI coworker that invoked ox, sourced
+	// AttrAgentEnv identifies the AI teammate that invoked ox, sourced
 	// from the AGENT_ENV environment variable that adapter hooks set
 	// (claude-code, aider, gemini, codex, ...). Only present when the
-	// command is being driven by an AI coworker — human-driven
+	// command is being driven by an AI teammate — human-driven
 	// invocations leave this attribute off the span entirely so a
 	// `ox.agent.env exists` query in the trace backend cleanly isolates
 	// agent traffic from human traffic.

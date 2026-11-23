@@ -26,12 +26,12 @@ Feature: Holding Sessions on This Machine Until Publishing Them
       Then the held session is still on Devon's machine, unchanged
       And it has not been shared with the team
 
-  Rule: Closing the AI coworker never publishes a held session
+  Rule: Closing the AI teammate never publishes a held session
 
-    Scenario: Devon closes the AI coworker without stopping the session
+    Scenario: Devon closes the AI teammate without stopping the session
       Given Devon publishes sessions manually
       And Devon is recording a session
-      When Devon closes the AI coworker
+      When Devon closes the AI teammate
       Then the session is held on Devon's machine
       And it is not shared with the team
 
@@ -43,9 +43,9 @@ Feature: Holding Sessions on This Machine Until Publishing Them
 
   Rule: A held session that was cut off is recovered locally, not published
 
-    Scenario: Devon's AI coworker crashes mid-session
+    Scenario: Devon's AI teammate crashes mid-session
       Given Devon publishes sessions manually
-      And Devon's AI coworker crashed while recording
+      And Devon's AI teammate crashed while recording
       When ox recovers the interrupted session
       Then the recovered session is held on Devon's machine
       And it is not shared with the team

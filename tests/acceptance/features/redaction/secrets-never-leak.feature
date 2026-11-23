@@ -1,5 +1,5 @@
 Feature: Credentials in a session never reach the shared Ledger
-  Devon records or imports an AI coworker session without publishing credentials
+  Devon records or imports an AI teammate session without publishing credentials
   quoted in the conversation, passed to a tool, or printed by a tool. ox applies
   the same mandatory redaction to every supported recording and import path.
   Teammates receive useful session context and redaction markers instead of keys.

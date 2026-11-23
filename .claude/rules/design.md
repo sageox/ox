@@ -80,7 +80,7 @@ New semantic concept (e.g., "timeline-now", "public-visibility")? Propose a toke
 
 ### 10. `ox dev catalog` is hidden — do not surface it in `--help`
 
-Keep `Hidden: true` on both `cmd/ox/dev.go` and `cmd/ox/dev_catalog.go`. The catalog is a maintainer tool. End users and AI coworkers learn about it from `DESIGN.md` and `.claude/rules/design.md`; everyone else reaches it via the portal at [sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/](https://sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/).
+Keep `Hidden: true` on both `cmd/ox/dev.go` and `cmd/ox/dev_catalog.go`. The catalog is a maintainer tool. End users and AI teammates learn about it from `DESIGN.md` and `.claude/rules/design.md`; everyone else reaches it via the portal at [sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/](https://sageox-design.netlify.app/2026-05-17-ox-cli-component-catalog/).
 
 ### 11. Tufte minimum
 

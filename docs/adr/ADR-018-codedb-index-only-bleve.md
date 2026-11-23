@@ -26,7 +26,7 @@ in addition to living in git (code), SQLite (`comments.text`), or being
 regenerable (diffs). The stored copy exists for exactly one purpose: producing
 the ANSI **highlight fragment** that becomes a search result's snippet.
 
-**But CodeDB's consumers are AI coworkers, not humans.** The agent-facing search
+**But CodeDB's consumers are AI teammates, not humans.** The agent-facing search
 path already throws the highlighting away:
 
 ```go

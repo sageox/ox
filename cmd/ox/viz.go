@@ -54,7 +54,7 @@ func newVizRenderCommand() *cobra.Command {
 		Use:   "render <id>",
 		Short: "Render a parameterized visualization from JSON data",
 		Long: `Render a parameterized catalog pattern from JSON into an HTML/SVG
-fragment. ox computes geometry; the AI coworker supplies only data. Inspect the
+fragment. ox computes geometry; the AI teammate supplies only data. Inspect the
 required shape with 'ox viz <id>'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

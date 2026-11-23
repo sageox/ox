@@ -158,7 +158,7 @@ func TestSelectTeam_CurrentTeamBeatsTheSuggestion(t *testing.T) {
 }
 
 // TestSelectTeam_NoInputNamesTheProjectsTeam — Failure prevented: an AI
-// coworker running ox init without a terminal binds nothing silently, and is
+// teammate running ox init without a terminal binds nothing silently, and is
 // told the exact --team that links the clone.
 func TestSelectTeam_NoInputNamesTheProjectsTeam(t *testing.T) {
 	var err error

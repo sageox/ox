@@ -45,7 +45,7 @@ Error: authentication failed: authorization was denied
 - **Browser-first.** `cli.OpenInBrowser` opens the URL (headless-safe). The spinner only polls; it has no UI to redirect to.
 - **Ctrl+C means cancel, not "kill ox".** The model exits cleanly and the person can retry.
 - **A different account is a new person.** Same machine, same endpoint, different user: "Welcome", not "Welcome back".
-- **No Oxy in** a pipe, CI, an AI coworker's run, `--quiet`, `--json`, `--no-input`, `--no-interactive`, or under `NO_COLOR`. The art is one half-block confetti still from `internal/pet`.
+- **No Oxy in** a pipe, CI, an AI teammate's run, `--quiet`, `--json`, `--no-input`, `--no-interactive`, or under `NO_COLOR`. The art is one half-block confetti still from `internal/pet`.
 
 </details>
 

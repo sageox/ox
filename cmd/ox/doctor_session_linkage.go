@@ -32,7 +32,7 @@ import (
 //  3. checkPRAttributionCoverage catches a miss on the one linkage hop that
 //     has no automated enforcement at all: commit-level SageOx attribution
 //     is written by a deterministic git hook (hooks_commit_msg.go), but
-//     PR-body attribution exists only as guidance an AI coworker is
+//     PR-body attribution exists only as guidance an AI teammate is
 //     expected to remember and apply on every `gh pr create`/`gh pr edit`
 //     (internal/prime/attribution.go). A long session with context
 //     compaction can lose track of that instruction; this check is the

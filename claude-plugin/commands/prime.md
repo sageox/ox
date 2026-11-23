@@ -1,4 +1,4 @@
-Load SageOx team context for this AI coworker session.
+Load SageOx team context for this AI teammate session.
 
 Use when:
 - Starting a new coding session in a repo with shared team context

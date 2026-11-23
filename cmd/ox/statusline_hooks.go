@@ -9,7 +9,7 @@ import (
 )
 
 // Hook-side writers for the ox status line. Hooks count the team context an
-// AI coworker pulled into the per-session state; `ox statusline` only reads
+// AI teammate pulled into the per-session state; `ox statusline` only reads
 // it. Writers are best-effort: a failure is logged and never reaches the
 // hook's output.
 
@@ -63,9 +63,9 @@ func recordStatuslineRetrieval(projectRoot, agentID, harnessSessionID string, ac
 	}
 }
 
-// recordStatuslineUse counts one surfaced item the AI coworker used — reported
+// recordStatuslineUse counts one surfaced item the AI teammate used — reported
 // with `ox agent <id> context used` or cited in a commit message — on the
-// status line of the harness session the AI coworker runs in.
+// status line of the harness session the AI teammate runs in.
 //
 // The harness session comes from the live recording when there is one, and
 // the counts are bound to that recording. A recording not yet bound to a

@@ -304,7 +304,7 @@ func TestPostHog_ReleaseBuildReportsCommandsUnderOneInstallID(t *testing.T) {
 // Failure prevented: typos and bad flags that never reach PostHog, because
 // cobra rejects them before ox builds its command context; and every person
 // working in a repository that holds a .codex/ directory (ox writes
-// .codex/hooks.json there) counted as an AI coworker.
+// .codex/hooks.json there) counted as an AI teammate.
 func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: builds and runs a real ox binary")
@@ -315,7 +315,7 @@ func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 	output, code, _ := testguard.RunOx(t, e.bin, e.workDir, e.env, "version")
 	require.Equal(t, 0, code, output)
 	props := e.props(t)
-	assert.Equal(t, "person", props["actor"], "a person in a repo with .codex/ is not an AI coworker")
+	assert.Equal(t, "person", props["actor"], "a person in a repo with .codex/ is not an AI teammate")
 	assert.Equal(t, "", props["agent_type"])
 
 	mistakes := []struct {
@@ -376,7 +376,7 @@ func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
 		{repo, []string{"session", "score", "0.5"}, "session score", "other", "SAGEOX_AGENT_ID not set -- run 'ox agent prime' first"},
 		{repo, []string{"agent", "OxAbcd", "session", "start"}, "agent session start", "other", "instance not found: %s"},
 		{repo, []string{"sync"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
-		// How AI coworkers run it: the failure is printed as JSON, not as an error.
+		// How AI teammates run it: the failure is printed as JSON, not as an error.
 		{repo, []string{"sync", "--json"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
 		{e.workDir, []string{"team", "invite", "a@example.com"}, "team invite", "not_logged_in", "unauthenticated"},
 		{repo, []string{"session", "import"}, "session import", "not_initialized", "not_initialized"},

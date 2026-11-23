@@ -63,7 +63,7 @@ type BubbleWarningJSON struct {
 	Error string `json:"error"`
 }
 
-// AICoworkerJSON represents an AI coworker in JSON output.
+// AICoworkerJSON represents an AI teammate in JSON output.
 //
 // ContextTokens is the rolled-up total. ContextTokensBySource splits it
 // by content source — SageOx tool overhead, team-authored content,

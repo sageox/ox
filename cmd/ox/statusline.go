@@ -70,7 +70,7 @@ var statuslineCmd = &cobra.Command{
 		}
 		return cobra.NoArgs(cmd, args)
 	},
-	Long: `Print how much team context influenced this AI coworker session, for the
+	Long: `Print how much team context influenced this AI teammate session, for the
 Claude Code status bar.
 
 Claude Code runs this command on every status-line refresh, piping its
@@ -80,9 +80,9 @@ status-line JSON (session_id, cwd, workspace) on stdin. ox prints one line:
 
 Each count is the number of distinct discussions, plans, docs, sessions and
 murmurs that shaped this session; "used" is how many of the items the AI
-coworker reported using or cited in a commit. Nothing yet reads "● ox".
-Items the AI coworker reads or reports using are counted whether or not the
-session is being recorded. Uses ox finds by reading the AI coworker's reply
+teammate reported using or cited in a commit. Nothing yet reads "● ox".
+Items the AI teammate reads or reports using are counted whether or not the
+session is being recorded. Uses ox finds by reading the AI teammate's reply
 or a commit message are counted only while it is recording. A new recording
 after an earlier one starts the counts over.
 "● rec" shows while the session is recording and is hidden while it is paused. When the bar is narrow, the

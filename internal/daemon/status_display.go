@@ -328,7 +328,7 @@ func FormatNotRunning(inProject bool) string {
 	out.WriteString("\n\n")
 
 	if inProject {
-		out.WriteString(styleMuted.Render("  No active AI coworker session detected."))
+		out.WriteString(styleMuted.Render("  No active AI teammate session detected."))
 		out.WriteString("\n")
 		out.WriteString(styleMuted.Render("  The daemon auto-starts when a coding agent begins working."))
 		out.WriteString("\n\n")

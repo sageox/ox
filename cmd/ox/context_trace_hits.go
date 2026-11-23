@@ -15,14 +15,14 @@ import (
 )
 
 // Surfaced-item trace: every ox command that puts a specific team item in
-// front of the AI coworker (a query hit, a conversation, a plan, a session)
+// front of the AI teammate (a query hit, a conversation, a plan, a session)
 // records one `provided` event per item, so the item becomes something the
 // coworker can later cite and report using. The event carries the item's
 // ref, type, title and link — never its content (ADR-027 rule 4).
 
 // maxProvidedHitsPerCall bounds how many items one command call surfaces into
 // the trace. Search-shaped commands return more; the top few are what an AI
-// coworker plausibly acts on, and the trace must stay small.
+// teammate plausibly acts on, and the trace must stay small.
 const maxProvidedHitsPerCall = 5
 
 // maxProvidedTitleRunes caps a surfaced item's title. A title is a display
@@ -38,7 +38,7 @@ type providedHit struct {
 	Score float64
 }
 
-// traceProvidedHits appends one `provided` event per hit to the AI coworker's
+// traceProvidedHits appends one `provided` event per hit to the AI teammate's
 // live session trace. It is a no-op without an agent ID or a live recording
 // (a surfaced item only matters inside a session it could be used in), and
 // fail-open: nothing here may break the command that surfaced the items.
@@ -129,7 +129,7 @@ func hitAliases(ref string, names ...string) []string {
 	return out
 }
 
-// traceAgentIDFromEnv returns the AI coworker's agent ID for commands invoked
+// traceAgentIDFromEnv returns the AI teammate's agent ID for commands invoked
 // directly (not via `ox agent <id> …`): SAGEOX_AGENT_ID when it is a real one.
 func traceAgentIDFromEnv() string {
 	if id := os.Getenv("SAGEOX_AGENT_ID"); agentinstance.IsValidAgentID(id) {

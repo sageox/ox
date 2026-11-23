@@ -157,7 +157,7 @@ func executeSyncConvergence(
 }
 
 // convergeAfterSessionBoundary consumes pending Team Context work as soon as
-// the last live AI coworker releases the repository. It is best effort:
+// the last live AI teammate releases the repository. It is best effort:
 // session completion must never fail because local projection is contended or
 // broken, and its result is discarded (persist=false) rather than saved —
 // this runs on ordinary session-stop churn in ModeAutomatic with a 250ms lock

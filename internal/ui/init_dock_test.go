@@ -10,7 +10,7 @@ import (
 )
 
 // TestInitDock_Golden is the snapshot of the box `ox init` ends on, framed (an
-// interactive terminal) and unframed (a pipe, CI, an AI coworker).
+// interactive terminal) and unframed (a pipe, CI, an AI teammate).
 // Failure prevented: init finishing without telling anyone that sessions are
 // recorded or that teammates can read them (the old output was bold text between
 // separators; the fact lived only in .sageox/README.md), and the dock claiming

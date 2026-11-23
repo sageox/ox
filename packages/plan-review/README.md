@@ -194,7 +194,7 @@ the controls. Comments left from an earlier visit go out on mount. The bar
 says when comments will post, and Submit becomes Post now, shown only while
 comments wait. A send as the tab closes may not finish; the round is stored
 first, so it goes out on the next mount. It needs a transport and a reviewer. ox's local review page
-leaves it off, because the AI coworker waiting on `ox plan review await` acts
+leaves it off, because the AI teammate waiting on `ox plan review await` acts
 on each round it gets.
 
 ### Drawings

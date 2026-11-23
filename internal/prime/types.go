@@ -50,7 +50,7 @@ type KBInfo struct {
 	Path        string   `json:"path,omitempty"`        // local mount path (canonical XDG dir) when cloned
 	ViewerRole  string   `json:"viewer_role,omitempty"` // "admin", "member", "viewer"
 	Tokens      int      `json:"tokens,omitempty"`      // estimated/observed tokens contributed by this bubble
-	Hint        string   `json:"hint,omitempty"`        // short, type-specific guidance for the AI coworker
+	Hint        string   `json:"hint,omitempty"`        // short, type-specific guidance for the AI teammate
 }
 
 // CapturePriorGuidance provides instructions for capturing prior history
@@ -111,7 +111,7 @@ type TeamContextInfo struct {
 	// Content is NOT inlined — agents read on demand via file path.
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 
-	// Team rules — modular AI-coworker rules under agents/rules/**/*.md
+	// Team rules — modular AI-teammate rules under agents/rules/**/*.md
 	// (with coworkers/rules/ as legacy fallback). The team-scope cousin of
 	// Claude's .claude/rules/<topic>.md. Filtered by repos:, audience:, and
 	// status: at discovery time. visibility: always rules carry their body
@@ -520,7 +520,7 @@ type Output struct {
 	// This is local-only context (not persisted to ledger), so full name is safe here.
 	CurrentUserName    string   `json:"current_user_name,omitempty"`    // privacy-safe display name (e.g., "Ryan S.")
 	CurrentUserAliases []string `json:"current_user_aliases,omitempty"` // all name forms the agent might encounter
-	CurrentUserKind    string   `json:"current_user_kind,omitempty"`    // "ai" when the current user is the AI coworker a team token acts as; empty for a person
+	CurrentUserKind    string   `json:"current_user_kind,omitempty"`    // "ai" when the current user is the AI teammate a team token acts as; empty for a person
 
 	// Code search availability
 	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk

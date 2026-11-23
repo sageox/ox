@@ -119,7 +119,7 @@ func relevantDetails(r usage.Report) map[string]string {
 
 // TestBrief_LiveUses_AshbyShape is the customer claim of the live rule in
 // tests/acceptance/features/brief/relevant-context.feature: Ashby's AI
-// coworker searched discussions, re-opened the first by its sageox.ai
+// teammate searched discussions, re-opened the first by its sageox.ai
 // recording link, and wrote its reply naming the second by title. While the
 // session is still recording, with no self-report, `ox session report` lists both as
 // used — one re-opened, one cited — each with its /c/ link. Failure
@@ -153,11 +153,11 @@ func TestBrief_LiveUses_AshbyShape(t *testing.T) {
 }
 
 // TestBrief_LiveUses_FieldTeamShape: prime surfaced 4 docs, 11 murmurs and 5
-// plans; `ox conversation list` surfaced two discussions; the AI coworker ran
+// plans; `ox conversation list` surfaced two discussions; the AI teammate ran
 // `ox conversation show` on each and named both in its reply. The brief counts
 // exactly those two as used out of 22 surfaced. A plan id that appears only
 // in thinking, a tool call, tool output and the user's own message is never
-// counted: only the AI coworker's own reply text is a citation.
+// counted: only the AI teammate's own reply text is a citation.
 func TestBrief_LiveUses_FieldTeamShape(t *testing.T) {
 	_, state := liveBriefEnv(t)
 	w := contexttrace.NewWriter(state.SessionPath)

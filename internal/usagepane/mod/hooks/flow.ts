@@ -18,7 +18,7 @@ export type FlowStart = {
   label: string
   step: string
   command: string
-  /** For an `out` call: tokens of the payload the AI coworker sent, measured when it starts. */
+  /** For an `out` call: tokens of the payload the AI teammate sent, measured when it starts. */
   sent?: number
 }
 
@@ -351,7 +351,7 @@ const RULES: Rule[] = [
   rule('recap', 'ledger', 'in', 'read recap', 'reading recap'),
 ]
 
-// Top-level commands an AI coworker may address as `ox agent <id> <cmd>`.
+// Top-level commands an AI teammate may address as `ox agent <id> <cmd>`.
 const TOP_LEVEL_UNDER_AGENT = new Set(['murmur', 'query', 'plan', 'code', 'conversation', 'decision', 'kb', 'recap'])
 const AGENT_ID = /^Ox[A-Za-z0-9]{4}$/
 const MURMUR_SUBCOMMANDS = new Set(['list', 'status', 'delete', 'pause', 'resume', 'help'])
@@ -364,7 +364,7 @@ function classifyOxArgs(args: string[]): FlowStart | null {
   }
   if (words[0] === 'agent') {
     let rest = words.slice(1)
-    // `ox agent <id> <cmd>` addresses one AI coworker; classify <cmd>.
+    // `ox agent <id> <cmd>` addresses one AI teammate; classify <cmd>.
     if (rest.length > 0 && AGENT_ID.test(rest[0])) {
       rest = rest.slice(1)
     }

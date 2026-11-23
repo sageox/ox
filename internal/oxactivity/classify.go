@@ -1,4 +1,4 @@
-// Package oxactivity classifies an AI coworker's tool calls and keeps the
+// Package oxactivity classifies an AI teammate's tool calls and keeps the
 // per-session counts the ox status line shows.
 //
 //   - Classify maps one harness tool call (a shell command or a SageOx MCP
@@ -30,19 +30,19 @@ import (
 type Kind string
 
 const (
-	// KindRetrieval pulls team knowledge into the AI coworker's context:
+	// KindRetrieval pulls team knowledge into the AI teammate's context:
 	// ox query, code search, reading sessions/plans/murmurs/discussions.
 	KindRetrieval Kind = "retrieval"
 	// KindWrite records something: posting a murmur, saving a plan,
 	// reporting context use, scoring a session.
 	KindWrite Kind = "write"
-	// KindLifecycle starts, stops, or primes the AI coworker's session.
+	// KindLifecycle starts, stops, or primes the AI teammate's session.
 	KindLifecycle Kind = "lifecycle"
 	// KindOther is any other ox call (doctor, status, ...).
 	KindOther Kind = "other"
 )
 
-// Activity is one coworker-visible thing ox did for an AI coworker.
+// Activity is one coworker-visible thing ox did for an AI teammate.
 type Activity struct {
 	// Label is the user-facing wording, lower case, past tense:
 	// "loaded team context", "posted murmur", "ran ox doctor".
@@ -412,14 +412,14 @@ func classifyOxArgs(args []string) (Activity, bool) {
 
 	if words[0] == "agent" {
 		rest := words[1:]
-		// `ox agent <id> <cmd>` addresses one AI coworker; classify <cmd>.
+		// `ox agent <id> <cmd>` addresses one AI teammate; classify <cmd>.
 		if len(rest) > 0 && agentinstance.IsValidAgentID(rest[0]) {
 			rest = rest[1:]
 		}
 		if len(rest) > 0 && (rest[0] == "heartbeat" || rest[0] == "hook") {
 			return Activity{}, false
 		}
-		// AI coworkers often address a top-level command through their agent
+		// AI teammates often address a top-level command through their agent
 		// ID (`ox agent <id> murmur list`, `ox agent <id> query "x"`); credit
 		// the command they meant.
 		if len(rest) > 0 && topLevelUnderAgent[rest[0]] {
@@ -430,7 +430,7 @@ func classifyOxArgs(args []string) (Activity, bool) {
 	return classifyWords(words, args)
 }
 
-// topLevelUnderAgent are top-level ox commands an AI coworker may run as
+// topLevelUnderAgent are top-level ox commands an AI teammate may run as
 // `ox agent <id> <cmd>`. Agent-scoped commands (session, prime, team-ctx,
 // whisper, ...) are not here: they keep their `agent` rules.
 var topLevelUnderAgent = map[string]bool{

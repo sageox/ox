@@ -387,7 +387,7 @@ readers that predate regions, and the record rides in `region`:
   second reviewer's mark, an edit of the note and a reopen all keep what was
   drawn, and two drawings around one paragraph stay two items (`region-items`,
   `TestBrowser_DrawingsStayIndependentThroughEditAndReopen`).
-- **What an AI coworker gets:** a drawing's anchor, section, label, status
+- **What an AI teammate gets:** a drawing's anchor, section, label, status
   and note, like any comment. `ox plan feedback show --json` also carries the
   record; `ox plan review await` leaves it out, since its stroke and boxes are
   kilobytes a coworker cannot act on.

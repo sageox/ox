@@ -159,7 +159,7 @@ func TestImportE2E_FromTestDataReadsOnlyThatDirectory(t *testing.T) {
 // running it as printed uploads the sessions the preview showed.
 //
 // Failure prevented: the printed command reading this machine's stores, so an
-// AI coworker running it finds none of the previewed sessions.
+// AI teammate running it finds none of the previewed sessions.
 func TestImportE2E_FromTestDataSurvivesThePrintedCommand(t *testing.T) {
 	f := newImportFixture(t)
 	testData := t.TempDir()

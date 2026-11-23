@@ -11,7 +11,7 @@ The SageOx palette and type are the brief: keep them. Layout, spacing and compon
 
 # ox · Design
 
-> Calm, precise terminal output for humans and AI coworkers.
+> Calm, precise terminal output for humans and AI teammates.
 
 ox's visual language inherits from the SageOx design system: an all-sage brand hierarchy, warning-only gold, low-noise semantic accents, and Tufte minimums. Components are reusable, theme-aware, and adapt to the terminal in front of them (light/dark, `NO_COLOR`, TTY vs piped, headless SSH).
 
@@ -38,7 +38,7 @@ The expanded version with worked rationale lives in [`.claude/rules/design.md`](
 | Theming + upstream sync | [`docs/design/theming.md`](docs/design/theming.md) |
 | Semantic tokens | [`docs/design/tokens.md`](docs/design/tokens.md) |
 | Deep reference (CLI design system) | [`docs/specs/cli-design-system.md`](docs/specs/cli-design-system.md) |
-| Agent UX (orthogonal — how output serves AI coworkers) | [`docs/specs/agent-ux-principles.md`](docs/specs/agent-ux-principles.md) |
+| Agent UX (orthogonal — how output serves AI teammates) | [`docs/specs/agent-ux-principles.md`](docs/specs/agent-ux-principles.md) |
 | Generated theme code (do not edit) | `internal/theme/generated.go` |
 | Component implementations | `internal/ui/`, `internal/tui/`, `internal/cli/` |
 | Catalog registry | `internal/uicatalog/` |

@@ -191,7 +191,7 @@ func (tx *Transaction) Exec(ctx context.Context, _ string, query string, args ..
 }
 
 // commitAuthor is the --author for DOLT_COMMIT. Dolt refuses an author with no
-// email, so a committer without one (an AI coworker, or a git config with no
+// email, so a committer without one (an AI teammate, or a git config with no
 // user.email) commits as the carts default.
 func (s *Store) commitAuthor() string {
 	if s.committerName == "" || s.committerEmail == "" {

@@ -30,5 +30,5 @@ const (
 
 // DefaultVisibility is the visibility applied when frontmatter omits the field.
 // Docs in team context docs/ are visible by default — the whole point of the
-// directory is sharing knowledge with the team, including AI coworkers.
+// directory is sharing knowledge with the team, including AI teammates.
 const DefaultVisibility = VisibilityIndexed

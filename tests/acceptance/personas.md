@@ -5,7 +5,7 @@ details relevant to the business rule being tested. When a persona appears in a
 scenario, all attributes below are assumed unless explicitly overridden.
 
 These personas are CLI- and session-flavored — anchored in how a developer or
-an AI coworker interacts with `ox` at the terminal and inside a coding session,
+an AI teammate interacts with `ox` at the terminal and inside a coding session,
 not a web-app role.
 
 ---
@@ -30,7 +30,7 @@ default "someone installed ox and ran a command" actor for setup flows.
 
 ---
 
-## Avery the AI Coworker
+## Avery the AI Teammate
 
 **Role:** An AI coding agent running inside a session in Devon's repo. The
 default "the agent is mid-session" actor. Avery primes at session start, drafts

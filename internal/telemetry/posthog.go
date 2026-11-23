@@ -45,7 +45,7 @@ const postHogSendTimeout = 10 * time.Second
 
 // postHogSenderSlots caps how many senders run at once. On a network that
 // drops packets to PostHog each sender waits out postHogSendTimeout, and an AI
-// coworker or a script can run commands faster than that.
+// teammate or a script can run commands faster than that.
 const postHogSenderSlots = 4
 
 // postHogExecutable is the binary started as the sender. Tests replace it,

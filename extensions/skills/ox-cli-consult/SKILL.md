@@ -18,7 +18,7 @@ description: >-
 <!-- Thin by design. The authoritative consult-first reflex — the cues, the
      "confident-wrong is worse than slow" reasoning, and the routing rationale —
      lives in the <consult-first> block of `ox agent prime` (Layer-1 floor), which
-     reaches every primed AI coworker. This native skill adds discovery and
+     reaches every primed AI teammate. This native skill adds discovery and
      activation ergonomics; it duplicates no reasoning. Every command it
      names is already reachable from the floor, so removing this skill loses
      ergonomics but never the floor. Do not grow this body. -->

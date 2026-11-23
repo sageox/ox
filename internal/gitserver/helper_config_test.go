@@ -223,7 +223,7 @@ func setLocalIdentity(t *testing.T, dir string, before [2]string, stamp string) 
 // stampOf is the stamp ox leaves for the identity id.
 func stampOf(id [2]string) string { return stampValue(id[0], id[1]) }
 
-// Failure prevented: an AI coworker's git address changes shape, so ox no
+// Failure prevented: an AI teammate's git address changes shape, so ox no
 // longer recognizes the stamps it wrote and never removes them.
 func TestCoworkerEmail_EndsInTheStampDomain(t *testing.T) {
 	assert.Equal(t, "agt_rip@ai-coworker.invalid", CoworkerEmail("agt_rip"))
@@ -282,7 +282,7 @@ func TestMigrateLedgerCredentials_StampsTheLedgerAuthor(t *testing.T) {
 	}
 }
 
-// Failure prevented: an AI coworker's commits in a person's repository fail on
+// Failure prevented: an AI teammate's commits in a person's repository fail on
 // a machine without a git identity or carry the machine's identity; or ox
 // overwrites or deletes an identity the person set in their own repository,
 // including one they set over an identity ox stamped.

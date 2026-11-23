@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Failure prevented: an AI coworker died mid-recording, and the daemon's stale
+// Failure prevented: an AI teammate died mid-recording, and the daemon's stale
 // or agent-exit finalize published the recording to the Ledger but never
 // closed its live stream, so SageOx showed the session live for 72 h. A
 // session the finalize keeps local (held in any cache location, or manual

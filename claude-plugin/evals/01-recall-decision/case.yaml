@@ -2,7 +2,7 @@ schema_version: "1.0"
 name: 01-recall-decision
 description: >
   The team already decided how artifact-store clients retry (ADR-007, inlined
-  into prime as an always-visible team rule). An AI coworker asked to "add
+  into prime as an always-visible team rule). An AI teammate asked to "add
   retry" should honor that decision, not invent its own policy.
 tags: [uptake, inline-rule, no-bash]
 expected_outcome: >

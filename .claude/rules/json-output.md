@@ -17,7 +17,7 @@ return enc.Encode(payload)
 |---|---|
 | `cli.PrintJSON(v)` | stdout, where the caller cannot return an error. Returns nothing — a broken stdout is not actionable. |
 | `cli.PrintJSONTo(w, v) error` | the normal case: `return cli.PrintJSONTo(cmd.OutOrStdout(), payload)` |
-| `cli.MarshalJSONIndent(v) ([]byte, error)` | you need the bytes — to measure the payload an AI coworker consumes, embed it in a markdown fence, or hash it. Always plain. |
+| `cli.MarshalJSONIndent(v) ([]byte, error)` | you need the bytes — to measure the payload an AI teammate consumes, embed it in a markdown fence, or hash it. Always plain. |
 | `cli.WriteJSONBytes(w, b) error` | you encoded it yourself: `SetEscapeHTML(false)`, or a `--pretty` flag picking compact. Keeps your encoding, still themed. |
 
 `MarshalJSONIndent` + `WriteJSONBytes` is the pair for measure-then-print:
@@ -47,7 +47,7 @@ A `--json` payload has two audiences with opposite needs:
 | Audience | Wants | Gets |
 |---|---|---|
 | Human at a terminal reading `ox addons list --json` | structure they can scan | syntax color: keys bold, strings, numbers, `true/false/null`, dim punctuation |
-| AI coworker, `jq`, a test, a redirect | byte-exact parseable JSON | plain bytes, no escape sequence |
+| AI teammate, `jq`, a test, a redirect | byte-exact parseable JSON | plain bytes, no escape sequence |
 
 **Nobody has to declare which they are.** An agent's stdout is a pipe, not a
 TTY, and `theme.Profile` already resolves a pipe to a no-color profile. So the

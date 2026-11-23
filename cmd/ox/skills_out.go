@@ -24,7 +24,7 @@ func skillsPrintf(w io.Writer) func(format string, args ...any) {
 // `ox addons` command. It delegates to cli.PrintJSONTo so these payloads get
 // the same treatment as the rest of ox: two-space indent, one trailing
 // newline, and syntax color when a human is reading at a terminal — never when
-// the output is piped, redirected, or captured by an AI coworker.
+// the output is piped, redirected, or captured by an AI teammate.
 func encodeSkillsJSON(w io.Writer, payload any) error {
 	return cli.PrintJSONTo(w, payload)
 }

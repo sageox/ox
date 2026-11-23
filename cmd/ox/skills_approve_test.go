@@ -142,7 +142,7 @@ func resetApproveFlags(t *testing.T, cmd *cobra.Command) {
 // Decoding into skillsApproveOutput — which is what the first version did —
 // asserts nothing about the wire contract: the same struct produced the bytes,
 // so every field round-trips through any tag rename, including one that drops a
-// key an AI coworker depends on.
+// key an AI teammate depends on.
 func approveJSON(t *testing.T, args ...string) map[string]any {
 	t.Helper()
 	out, err := runApprove(t, append([]string{"--json"}, args...)...)

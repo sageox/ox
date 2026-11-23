@@ -43,7 +43,7 @@ var (
 var murmurListCmd = &cobra.Command{
 	Use:   "list [topic]",
 	Short: "List recent murmurs from coworkers",
-	Long: `List murmurs published by AI coworkers and teammates on this repo.
+	Long: `List murmurs published by coworkers and their AI teammates on this repo.
 
 Shows timestamp, coworker, topic, and content for each murmur.
 Useful for seeing what your team is working on right now.
@@ -291,7 +291,7 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 		if hideFileChanges && hiddenFileChanges > 0 {
 			cli.PrintHint(fmt.Sprintf("%d file-change murmur(s) hidden — show with: ox murmur list --show-file-changes", hiddenFileChanges))
 		}
-		cli.PrintHint("Murmurs are short-lived coordination signals from AI coworkers.")
+		cli.PrintHint("Murmurs are short-lived coordination signals from AI teammates.")
 		cli.PrintHint("Publish one with: ox murmur --topic=wip \"what you're doing\"")
 		return nil
 	}
@@ -392,7 +392,7 @@ func printMurmurRow(m ledger.MurmurFile) {
 
 // shouldHideFileChanges decides whether file-change murmurs should be hidden
 // from the human-rendered list. Daemon-published file-changes are noise for
-// humans but still useful to AI coworkers reading JSON.
+// humans but still useful to AI teammates reading JSON.
 func shouldHideFileChanges(showFileChanges bool, topicFilter string) bool {
 	return !showFileChanges && topicFilter != "file-changes"
 }

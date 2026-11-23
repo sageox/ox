@@ -905,7 +905,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		integrationChecks = append(integrationChecks, conductorCheck)
 	}
 	// Skill target selection is project state, not a consequence of which AI
-	// coworker happens to be detected during this Doctor run.
+	// teammate happens to be detected during this Doctor run.
 	// Capture migration cleanliness BEFORE reconciliation can update the tracked
 	// lockfile or scoped ignore files. Those Doctor-authored changes belong in the
 	// migration commit; treating them as pre-existing user work defers forever.
@@ -1731,7 +1731,7 @@ func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool
 	}
 	if len(agentRequired) > 0 {
 		nodes = append(nodes, ui.TimelineNode{
-			Title: "Requires AI Coworker",
+			Title: "Requires AI Teammate",
 			Style: ui.WarnStyle,
 			Box:   renderAgentRequiredBoxContent(agentRequired),
 		})

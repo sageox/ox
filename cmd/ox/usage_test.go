@@ -37,7 +37,7 @@ func resetUsageFlags(t *testing.T) {
 }
 
 // runOxUsageJSON runs the REAL `ox session report --json` through the root command as
-// the calling AI coworker and decodes the report.
+// the calling AI teammate and decodes the report.
 func runOxUsageJSON(t *testing.T, args ...string) usage.Report {
 	t.Helper()
 	resetUsageFlags(t)
@@ -53,7 +53,7 @@ func runOxUsageJSON(t *testing.T, args ...string) usage.Report {
 // --- A. The customer claim ---
 
 // TestUsage_ListsOxCallAfterHookRecordsIt is the customer claim: after an AI
-// coworker runs `ox murmur list`, `ox session report` lists it with what it returned.
+// teammate runs `ox murmur list`, `ox session report` lists it with what it returned.
 // It drives the REAL PostToolUse hook and the REAL `ox session report --json` command.
 // Failure prevented: a coworker asks "what did ox do?" and the report shows
 // nothing for calls that ran, or the wrong volume.
@@ -88,7 +88,7 @@ func TestUsage_ListsOxCallAfterHookRecordsIt(t *testing.T) {
 	assert.Equal(t, "ox agent OxAb12 session context-trace", r.Used.SelfReport.BatchCommand)
 }
 
-// TestUsage_NotRecordingReadsAgentCache: an AI coworker that is not recording
+// TestUsage_NotRecordingReadsAgentCache: an AI teammate that is not recording
 // still sees its ox calls, from the per-agent cache. Failure prevented: the
 // report says "no usage trace" for calls the hook did record.
 func TestUsage_NotRecordingReadsAgentCache(t *testing.T) {
@@ -106,7 +106,7 @@ func TestUsage_NotRecordingReadsAgentCache(t *testing.T) {
 	assert.Nil(t, r.Used.SelfReport)
 }
 
-// TestBrief_EndpointFromProject: a discussion the AI coworker re-opened is linked
+// TestBrief_EndpointFromProject: a discussion the AI teammate re-opened is linked
 // on the project's own SageOx endpoint, through the real `ox session report --json`.
 // Failure prevented: the brief shows a discussion with no link, or a link on
 // the wrong environment's host.
@@ -143,13 +143,13 @@ func TestBrief_EndpointFromProject(t *testing.T) {
 
 // TestBrief_UsedItemsLinkedAvailableFolded is the customer claim of
 // tests/acceptance/features/brief/relevant-context.feature rules 1 and 2:
-// Devon's AI coworker was handed a discussion and a plan, cited the
+// Devon's AI teammate was handed a discussion and a plan, cited the
 // discussion in a commit, and never touched the plan. Through the REAL
 // `ox session report`, the discussion is listed as used with its sageox.ai link and
 // the commit that cited it, SageOx would be credited as co-author, and the
 // plan appears only as a count under "available" with no link. Failure
 // prevented: the brief credits everything it surfaced, or nothing it used,
-// or links pages the AI coworker never opened.
+// or links pages the AI teammate never opened.
 func TestBrief_UsedItemsLinkedAvailableFolded(t *testing.T) {
 	root := usageTraceEnv(t, nil)
 	t.Setenv("SAGEOX_ENDPOINT", "")
@@ -184,7 +184,7 @@ func TestBrief_UsedItemsLinkedAvailableFolded(t *testing.T) {
 	assert.True(t, r.Attribution.WouldAttribute, "a commit-cited discussion clears the default threshold")
 
 	// --json=false: the coworker's own terminal view, even when this test
-	// itself runs inside an AI coworker's shell (which defaults to JSON)
+	// itself runs inside an AI teammate's shell (which defaults to JSON)
 	resetUsageFlags(t)
 	human, err := executeRootCLI(t, "session", "report", "--json=false")
 	require.NoError(t, err)
@@ -294,7 +294,7 @@ func influencedEvents(t *testing.T, path string) []contexttrace.Event {
 	return out
 }
 
-// TestContextTrace_JSONLSelfReport: the AI coworker reports every item it
+// TestContextTrace_JSONLSelfReport: the AI teammate reports every item it
 // used in ONE call, as ox session report's guidance tells it to. Failure prevented: a
 // batch lands half-written, or the single-object form existing callers use
 // stops working.

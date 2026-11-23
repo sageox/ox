@@ -148,7 +148,7 @@ func TestFileOverlap(t *testing.T) {
 }
 
 // TestMurmurContextItems_SkipsOutsideNews keeps a PR title out of the context
-// bundle an AI coworker reasons over when it writes judgment badges.
+// bundle an AI teammate reasons over when it writes judgment badges.
 // Failure prevented: stranger text enters the bundle as a teammate's murmur.
 func TestMurmurContextItems_SkipsOutsideNews(t *testing.T) {
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)

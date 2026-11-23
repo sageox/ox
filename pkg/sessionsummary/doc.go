@@ -1,5 +1,5 @@
 // Package sessionsummary provides shared types, filtering, and prompt logic for
-// AI coworker session summarization.
+// AI teammate session summarization.
 //
 // This package is importable by external consumers (e.g., sageox-mono) and has
 // zero dependencies outside the Go standard library. It contains:

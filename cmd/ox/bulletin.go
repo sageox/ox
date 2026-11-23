@@ -33,7 +33,7 @@ var bulletinCmd = &cobra.Command{
 	Short: "Post to the team bulletin board",
 	Long: `Publishes a Markdown or HTML post to your team's bulletin board through the
 SageOx server. The board is a shared space in Team Context where any human or
-AI coworker on the team posts useful, time-limited information.
+AI teammate on the team posts useful, time-limited information.
 
 Available only to people the server has enrolled in the pilot. A newly
 enrolled person sees the command after the daemon's next settings refresh,
@@ -135,7 +135,7 @@ var (
 )
 
 // Outcome codes. These strings are the --json contract (both the status and
-// the error field carry them); AI coworkers branch on them, so they are
+// the error field carry them); AI teammates branch on them, so they are
 // stable.
 const (
 	bulletinStatusPublished          = "published"
@@ -210,7 +210,7 @@ type bulletinJSONFailure struct {
 }
 
 // bulletinFailure is one rendered refusal: the code, the human headline and
-// explanation, the AI-coworker guidance, and the hints a human can act on.
+// explanation, the AI-teammate guidance, and the hints a human can act on.
 type bulletinFailure struct {
 	Code      string
 	Headline  string

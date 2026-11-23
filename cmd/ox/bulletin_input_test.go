@@ -337,7 +337,7 @@ func TestPlanBulletinPost_ContentIsBytesAsIs(t *testing.T) {
 
 // TestBulletinShouldConfirm pins the confirmation decision.
 //
-// Failure prevented: an AI coworker running with --json being blocked on a
+// Failure prevented: an AI teammate running with --json being blocked on a
 // prompt it can never answer, or --yes still asking.
 func TestBulletinShouldConfirm(t *testing.T) {
 	tests := []struct {

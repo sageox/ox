@@ -133,7 +133,7 @@ func TestSetCommandAttrs_AttachesUniversalAttrs(t *testing.T) {
 }
 
 // TestSetCommandAttrs_AttachesAgentEnv_WhenSet verifies that when the
-// AGENT_ENV environment variable is set (typical of an AI coworker
+// AGENT_ENV environment variable is set (typical of an AI teammate
 // invocation via adapter hooks), the value lands on the root span as
 // ox.agent.env.
 //

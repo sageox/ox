@@ -243,7 +243,7 @@ func renderKBDescribe(w io.Writer, bubble *api.KB, localPath, ep string) {
 		row("topics", strings.Join(bubble.Topics, ", "))
 	}
 	// The curator steering prompt — what shaped the synthesis of team
-	// conversations into this bubble. Load-bearing for an AI coworker
+	// conversations into this bubble. Load-bearing for an AI teammate
 	// deciding whether a bubble is likely to know something, so it is
 	// shown in full rather than truncated. Empty ⇒ opted out of curator
 	// routing (ADR-097 C9), and the row elides itself.

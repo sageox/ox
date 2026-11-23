@@ -34,7 +34,7 @@ const statuslineWatchInterval = 500 * time.Millisecond
 // worktree at root, for a caller that was given none. It returns "" unless
 // exactly one live session records there: a Conductor workspace can hold
 // several chats, and showing one of them on behalf of another would be wrong.
-// A recording whose AI coworker process has exited (a crashed or closed chat
+// A recording whose AI teammate process has exited (a crashed or closed chat
 // never stopped) does not count, or it would leave the pane idle for good.
 // Liveness is the recording's own PID check: local, no daemon round trip.
 func resolveStatuslineSessionForDir(root string) string {

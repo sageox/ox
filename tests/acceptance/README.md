@@ -1,7 +1,7 @@
 # Acceptance Specs
 
 BDD specifications for the `ox` CLI's developer- and coworker-facing flows.
-These are natural-language specs of *what a developer or AI coworker
+These are natural-language specs of *what a developer or AI teammate
 experiences* when they use `ox` — installing it, authenticating, onboarding a
 repo, priming a session, recording sessions, enriching plans with team context,
 murmuring to teammates, querying the Ledger, exploring code, inspecting
@@ -26,7 +26,7 @@ runner ships, follow-up issues will bind these scenarios to the real command
 surfaces (`cmd/ox/*.go`) and a SageOx API twin.
 
 A `.feature` `Rule:` describes what ox **delivers** to a coworker. Whether the AI
-coworker then **takes it up** is a different lens — the agent-behavior eval tier
+teammate then **takes it up** is a different lens — the agent-behavior eval tier
 (`docs/specs/agent-evals.md`, `claude-plugin/evals/`). A `Rule:` may name its
 eval case in a `See also:` line so the promise and its uptake proof stay linked.
 
@@ -51,7 +51,7 @@ acceptance/
     config/               # configuration precedence and settings
     decision-records/     # ox decision enrich, ADR/DDR authoring
     pr-header/            # ox pr header credit line
-    session-report/       # ox session report: what the AI coworker used vs what was available
+    session-report/       # ox session report: what the AI teammate used vs what was available
     statusline/           # the ox status line in Claude Code and the Claude desktop app band
     redaction/            # secret redaction in captured sessions
   business-actions/       # named user journeys (one-paragraph stubs in v1)
@@ -79,7 +79,7 @@ Mirrors the SageOx acceptance corpus exactly:
   `Background:`** blocks.
 - Personas are named (`Devon`, `Avery`, `Sam`, `Riley`, `Quinn`); no
   anonymous `the user`. Each scenario name begins with the actor + action.
-- Scenario language describes what the developer or AI coworker **sees and
+- Scenario language describes what the developer or AI teammate **sees and
   does** at the CLI or in-session — not ox internals. Say "the plan is
   rendered as a SageOx team-context-optimized HTML page", not the name of the
   Go function that renders it. Scenarios never reference Go function names,

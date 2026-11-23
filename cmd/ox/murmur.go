@@ -25,8 +25,8 @@ const murmurRateInterval = 5 * time.Second // max 1 murmur per agent per this wi
 
 var murmurCmd = &cobra.Command{
 	Use:   "murmur [content]",
-	Short: "Publish a coordination signal to other AI coworkers",
-	Long: `Murmur publishes a short-lived coordination signal that other AI coworkers
+	Short: "Publish a coordination signal to other AI teammates",
+	Long: `Murmur publishes a short-lived coordination signal that other AI teammates
 on the same repo (or team) will hear as a whisper.
 
 The murmur itself is written to your Ledger or Team Context checkout, which the
@@ -182,7 +182,7 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 
-	// resolve principal: the AI coworker a team token acts as, or else the
+	// resolve principal: the AI teammate a team token acts as, or else the
 	// human user the agent works for — an attribution slug, not auth-specific
 	// identity, so it works offline / without OAuth.
 	ep := endpoint.GetForProject(projectRoot)

@@ -19,7 +19,7 @@ import (
 )
 
 // Environment-selected JSON must reach local, inherited, and root flag readers.
-// Explicit flags must still override it, and AI coworker defaults must survive.
+// Explicit flags must still override it, and AI teammate defaults must survive.
 func TestJSONOutputModesCLI(t *testing.T) {
 	skipIntegration(t)
 	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
@@ -35,7 +35,7 @@ func TestJSONOutputModesCLI(t *testing.T) {
 		{"local flag", []string{"version"}, "", "version", "Built:", 0, false},
 		{"inherited flag", []string{"sync"}, "", "transport", "Transport: failed", 1, false},
 		{"root flag", []string{"session", "list"}, "", "sessions", "Not in a SageOx project", 0, false},
-		{"AI coworker default", []string{"session", "list"}, "codex", "sessions", "Not in a SageOx project", 0, true},
+		{"AI teammate default", []string{"session", "list"}, "codex", "sessions", "Not in a SageOx project", 0, true},
 	} {
 		for _, mode := range []struct {
 			name     string
@@ -74,7 +74,7 @@ func TestJSONOutputModesCLI(t *testing.T) {
 					require.NoError(t, json.Unmarshal(stdout.Bytes(), &result), "stdout must contain one JSON result: %s", stdout.String())
 					assert.Contains(t, result, command.jsonField)
 					if command.agentEnv != "" {
-						assert.Contains(t, result, "guidance", "fixture must detect the AI coworker")
+						assert.Contains(t, result, "guidance", "fixture must detect the AI teammate")
 					}
 					assert.NotContains(t, stderr.String(), "Error:")
 				} else {

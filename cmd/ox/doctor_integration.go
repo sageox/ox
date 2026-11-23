@@ -25,7 +25,7 @@ func checkAgentFileExists() checkResult {
 		}
 	}
 	return WarningCheck("Agent file", "none found",
-		"No AI coworker instruction file found.\n"+
+		"No AI teammate instruction file found.\n"+
 			"        → Run `ox init` to auto-create one, or\n"+
 			"        → Create CLAUDE.md manually in project root")
 }

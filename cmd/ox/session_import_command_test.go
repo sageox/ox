@@ -85,11 +85,11 @@ func decodeRefusal(t *testing.T, out *bytes.Buffer) map[string]any {
 }
 
 // Every refusal stops the run before a single session is read or summarized,
-// and names itself with a code an AI coworker can act on.
+// and names itself with a code an AI teammate can act on.
 //
 // Failure prevented: an import that half-runs against a Ledger it cannot
 // use, under rules it cannot apply, or for a coworker who turned recording
-// off; or a refusal an AI coworker cannot tell apart from success.
+// off; or a refusal an AI teammate cannot tell apart from success.
 func TestImportCommandRefusesBeforeReadingSessions(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -180,7 +180,7 @@ func TestImportCommandPreviews(t *testing.T) {
 		assert.Contains(t, stderr, "ox config set session_recording auto")
 		assert.Empty(t, out.String(), "stdout stays clean")
 	})
-	t.Run("an AI coworker gets JSON without asking for it", func(t *testing.T) {
+	t.Run("an AI teammate gets JSON without asking for it", func(t *testing.T) {
 		newImportCmdProject(t)
 		t.Setenv("CLAUDECODE", "1")
 		root, out := importCommand("--dry-run", "--since", "7d")

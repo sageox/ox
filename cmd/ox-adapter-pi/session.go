@@ -353,7 +353,7 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 			}
 		}
 		// The repo header proves ownership, not which concurrent Pi session
-		// belongs to this AI coworker. Wait for an exact ID or an agent-ID hit.
+		// belongs to this AI teammate. Wait for an exact ID or an agent-ID hit.
 		return "", fmt.Errorf("no pi session for agent %s in %s", agentID, repoRoot)
 	}
 

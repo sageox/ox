@@ -42,7 +42,7 @@ func themed() styler {
 }
 
 // Display renders the session report as plain text: no ANSI, at most 24
-// lines, wrapped to width (0 → 80). It is what the AI coworker prints.
+// lines, wrapped to width (0 → 80). It is what the AI teammate prints.
 func Display(r Report, width int) string {
 	return renderSession(r, width, plain)
 }
@@ -99,7 +99,7 @@ func renderSession(r Report, width int, st styler) string {
 }
 
 // usedLegend explains what earns an item a place under "used".
-const usedLegend = "used = evidence from the transcript, a commit, or the AI coworker's report"
+const usedLegend = "used = evidence from the transcript, a commit, or the AI teammate's report"
 
 // maxUsedItems caps the used section so the brief stays one screen.
 const maxUsedItems = 8
@@ -313,7 +313,7 @@ func coauthorLines(a Attribution, width int, st styler) []string {
 	lines := wrapItems(st.label("co-author"), []string{a.Category + st.dim(verdict)}, " ", width)
 	why := a.Reason
 	if a.Source == AttributionSelfReported {
-		why = "reported by the AI coworker"
+		why = "reported by the AI teammate"
 		if a.Reason != "" {
 			why += ": " + a.Reason
 		}

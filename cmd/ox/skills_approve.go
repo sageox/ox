@@ -50,7 +50,7 @@ An approval is pinned to the exact bytes you approved and is recorded in
 belongs to the project, is inherited by teammates, and is reviewable in a pull
 request. If the skill changes afterwards it returns to needing approval.
 
-Approving lets an AI coworker READ the skill. Bundled scripts are still dropped
+Approving lets an AI teammate READ the skill. Bundled scripts are still dropped
 unless you also pass --allow-scripts, which is the larger, separate decision to
 put runnable files on disk. Omitting the flag preserves an existing scripts
 grant; pass --allow-scripts=false explicitly to revoke it — the skill stays
@@ -84,7 +84,7 @@ type skillApprovalRow struct {
 	ManifestRunnable bool `json:"-"`
 }
 
-// skillsApproveOutput is the JSON shape AI coworkers parse.
+// skillsApproveOutput is the JSON shape AI teammates parse.
 //
 // Pending, Approved and Guidance are always present — arrays are `[]` when
 // empty, never absent and never null — matching the sibling
@@ -363,7 +363,7 @@ func candidateHasCapability(candidate skillmanager.TeamSkillCandidate, want team
 }
 
 // approveGuidance is the single next action, carried in the JSON so an AI
-// coworker reading this gets the same answer a human reads off the terminal.
+// teammate reading this gets the same answer a human reads off the terminal.
 //
 // Every branch has to be true of the run that produced it. "Approved. The skill
 // is installed" is the answer to exactly one thing — a new grant — and saying it
@@ -412,7 +412,7 @@ func approveGuidance(out skillsApproveOutput) string {
 	case scriptsNeeded != "":
 		return fmt.Sprintf("%q is already readable; no approval was recorded. Run `ox skills approve --allow-scripts %s` to materialize its bundled scripts.", scriptsNeeded, scriptsNeeded)
 	case sawApproved:
-		return "Approved. The skill is installed — your AI coworkers can use it now."
+		return "Approved. The skill is installed — your AI teammates can use it now."
 	case sawAlready:
 		return "Already approved at these exact bytes. Nothing changed."
 	case sawNotNeeded:

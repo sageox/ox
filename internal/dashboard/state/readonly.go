@@ -68,7 +68,7 @@ type ReadOnlyStore interface {
 	// GetDiscussions returns the stored team discussions.
 	GetDiscussions() []domain.TeamDiscussion
 
-	// GetInstances returns active AI coworker instances.
+	// GetInstances returns active AI teammate instances.
 	GetInstances() []daemon.InstanceInfo
 
 	// GetStoredErrors returns the daemon error log.

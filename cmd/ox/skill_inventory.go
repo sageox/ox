@@ -52,7 +52,7 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 		if err := skillmanager.CheckInstalledState(projectRoot); err != nil {
 			return 0, nil, fmt.Errorf("verify skill inventory state (run `ox doctor` to repair): %w", err)
 		}
-		// No targets recorded: this project has never selected an AI coworker with
+		// No targets recorded: this project has never selected an AI teammate with
 		// native skills, or has never been initialized. `ox init` owns first
 		// install; prime must not silently install into a repo that never asked.
 		return 0, nil, nil

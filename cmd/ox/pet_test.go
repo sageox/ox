@@ -263,7 +263,7 @@ func decodePetJSON(t *testing.T, out string) petJSON {
 
 // TestPet_JSONReportsTheOutcome verifies each subcommand prints one --json
 // document holding each host's result (null for a host not acted on) and
-// guidance an AI coworker can relay.
+// guidance an AI teammate can relay.
 func TestPet_JSONReportsTheOutcome(t *testing.T) {
 	env := setupPetEnv(t, true)
 	env.writeCodexConfig(t, "")

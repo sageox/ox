@@ -359,7 +359,7 @@ func GetSageOxStyle() ansi.StyleConfig {
 // subprocess test and internal/ui both died at the Go test timeout on the
 // Windows runner with a goroutine parked there, internal/uicatalog was still
 // parked in it when the job hit its own 120-minute limit, and Git Bash or an
-// AI coworker capturing output hangs the same way, which makes `ox guide` and
+// AI teammate capturing output hangs the same way, which makes `ox guide` and
 // `ox doctor` unusable on Windows.
 //
 // Only query when stdin is a console, which is exactly the condition under

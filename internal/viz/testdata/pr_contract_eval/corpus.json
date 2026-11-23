@@ -46,7 +46,7 @@
     "evidence": [
       "producers enqueue into agent_tasks.db.",
       "UPDATE with status=ready makes claim atomic; a racing claimer affects zero rows.",
-      "the live AI coworker dispatches claimed work into fresh context.",
+      "the live AI teammate dispatches claimed work into fresh context.",
       "lease-expired or dead same-host claimers are reconciled on read."
     ]
   },

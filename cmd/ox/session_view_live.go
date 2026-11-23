@@ -113,7 +113,7 @@ var (
 		}
 		return refreshed.AccessToken, nil
 	}
-	// liveViewTrace credits the reading AI coworker's session with the read.
+	// liveViewTrace credits the reading AI teammate's session with the read.
 	liveViewTrace = traceLiveSessionRead
 )
 
@@ -419,7 +419,7 @@ func streamLiveView(ctx context.Context, w io.Writer, client liveViewFetcher, op
 	}
 }
 
-// traceLiveSessionRead records the read as a surfaced item of the AI coworker's
+// traceLiveSessionRead records the read as a surfaced item of the AI teammate's
 // own session (ref and title only, never content), so `context used ses_…` can
 // attach to it. Fail-open and a no-op without an agent id or live recording.
 func traceLiveSessionRead(projectRoot string, view *api.AgentView, id, ep string) {

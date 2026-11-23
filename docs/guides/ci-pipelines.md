@@ -87,7 +87,7 @@ export OX_PROJECT_ROOT="$PROJECT_DIR"
 # record sessions automatically
 export OX_SESSION_RECORDING=auto
 
-# prime the AI coworker
+# prime the AI teammate
 ox agent prime
 ```
 
@@ -116,7 +116,7 @@ on JSON mode always exiting 0 should handle its exit status explicitly.
 
 ## Running ox under a team token
 
-A team token (`oxt_…`) belongs to one AI coworker on the team. Set it as `SAGEOX_TOKEN` and ox acts as that coworker, with no `ox login`:
+A team token (`oxt_…`) belongs to one AI teammate on the team. Set it as `SAGEOX_TOKEN` and ox acts as that coworker, with no `ox login`:
 
 ```bash
 export SAGEOX_TOKEN="$OX_TEAM_TOKEN"   # from your CI secret store
@@ -124,14 +124,14 @@ JOB_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # kept for `ox session wait` b
 ox agent prime
 ```
 
-**Who the work belongs to.** ox asks the server which AI coworker the token belongs to, then records everything as that coworker:
+**Who the work belongs to.** ox asks the server which AI teammate the token belongs to, then records everything as that coworker:
 
 - Sessions have the coworker's `agt_…` ID as `user_id`, and their origin is `agent`.
 - Murmurs carry `principal_type: "ai"`.
 - Plans are authored by the coworker.
 - Ledger commits are authored as `<Name> <agt_…@ai-coworker.invalid>`, not as the machine's git user. Git's own `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables still override this, so don't set them in the job.
 
-A team token with no AI coworker attached is refused: ox records no session and sends no murmur rather than use the machine's git identity.
+A team token with no AI teammate attached is refused: ox records no session and sends no murmur rather than use the machine's git identity.
 
 **Git credentials.** ox exchanges the token for a short-lived Git PAT, tied to that token. A Git 401 makes ox fetch a fresh PAT. If the token was revoked, nothing is minted. ox's API calls then fail with a message to rotate or re-mint the team token and update `SAGEOX_TOKEN`; Git itself reports only an authentication failure.
 

@@ -213,7 +213,7 @@ func TestInitOfferAudience(t *testing.T) {
 		mutate func(*initOfferAudience)
 	}{
 		{"stdout is a pipe or file", func(a *initOfferAudience) { a.Terminal = false }},
-		{"an AI coworker is running ox", func(a *initOfferAudience) { a.Agent = true }},
+		{"an AI teammate is running ox", func(a *initOfferAudience) { a.Agent = true }},
 		{"--quiet", func(a *initOfferAudience) { a.Quiet = true }},
 		{"--json", func(a *initOfferAudience) { a.JSON = true }},
 	}
@@ -228,7 +228,7 @@ func TestInitOfferAudience(t *testing.T) {
 
 // TestOfferInitAddons_NeverSpendsTheOfferOnAnythingButATerminal verifies a run
 // whose output no person reads prints nothing and leaves the offer unspent.
-// Failure prevented: an AI coworker or a CI job running `ox init` using up the
+// Failure prevented: an AI teammate or a CI job running `ox init` using up the
 // one time a person would have been shown Oxy, so they never learn he exists.
 func TestOfferInitAddons_NeverSpendsTheOfferOnAnythingButATerminal(t *testing.T) {
 	absent := filepath.Join(t.TempDir(), "never-written")

@@ -136,7 +136,7 @@ func TestRenderViz_UnknownPattern(t *testing.T) {
 
 // TestVizCatalog_ParamPatternsRenderable verifies every catalog entry that
 // advertises a `param:` shape is actually wired into RenderViz — the catalog and
-// the renderer cannot drift. Failure prevented: `ox viz` tells the AI coworker a
+// the renderer cannot drift. Failure prevented: `ox viz` tells the AI teammate a
 // pattern is parameterized but `render` errors.
 func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 	// minimal valid data per parameterized pattern

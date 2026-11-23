@@ -266,7 +266,7 @@ func TestBuildPR_Files(t *testing.T) {
 }
 
 // Failure prevented: a merged PR shown as merely closed (or an open PR shown
-// as merged), which changes how an AI coworker reads its relevance.
+// as merged), which changes how an AI teammate reads its relevance.
 func TestBuildPR_State(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

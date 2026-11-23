@@ -36,7 +36,7 @@ var adapterDownloadHosts = map[string]bool{
 var adapterCmd = &cobra.Command{
 	Use:   "adapter",
 	Short: "Manage external adapter binaries",
-	Long:  `Discover, install, remove, and inspect ox adapter binaries that connect AI coworkers to ox.`,
+	Long:  `Discover, install, remove, and inspect ox adapter binaries that connect AI teammates to ox.`,
 }
 
 func init() {

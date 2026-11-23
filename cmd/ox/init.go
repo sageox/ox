@@ -140,7 +140,7 @@ After setup and sync, run 'ox session import' to preview and choose
 past Claude Code or Codex sessions from this repo for your team's Ledger.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
-or 'ox guide team-rules' to learn how to share AI coworker conventions
+or 'ox guide team-rules' to learn how to share AI teammate conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		initAgentsFlagExplicit = cmd.Flags().Changed("agents")
@@ -318,7 +318,7 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 	return false, false, nil
 }
 
-// runInit configures AI coworker integrations and registers the authenticated
+// runInit configures AI teammate integrations and registers the authenticated
 // repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
 	var registeredTeamID string
@@ -753,7 +753,7 @@ func runInit() error {
 
 	if !initQuiet {
 		fmt.Println()
-		fmt.Println(ui.RenderCategory("AI Coworker Integration"))
+		fmt.Println(ui.RenderCategory("AI Teammate Integration"))
 	}
 
 	// inject ox agent prime into agent config (only if Claude Code selected)
@@ -907,9 +907,9 @@ func runInit() error {
 			}
 		}
 		if hasNew || len(installedHooks) > 0 {
-			cli.PrintSuccess("Installed AI coworker integrations and skills")
+			cli.PrintSuccess("Installed AI teammate integrations and skills")
 		} else {
-			cli.PrintPreserved("AI coworker integrations and skills")
+			cli.PrintPreserved("AI teammate integrations and skills")
 		}
 	}
 
@@ -1419,9 +1419,9 @@ func GetSageoxReadmeContent(cfg *config.ProjectConfig) string {
 
 ---
 
-## For AI Coworkers
+## For AI Teammates
 
-If you are an AI coworker (Claude Code, Cursor, Windsurf, OpenCode, etc.), run this command at the start of each session:
+If you are an AI teammate (Claude Code, Cursor, Windsurf, OpenCode, etc.), run this command at the start of each session:
 
 ` + "```bash" + `
 ox agent prime
@@ -1435,7 +1435,7 @@ When users ask if you're using SageOx: if you have an agent ID from running ` + 
 ` + linksSection + `
 ## The Problem
 
-AI coworkers have finite context windows. Every token spent on irrelevant guidance is a token not available for your actual code. Traditional approaches waste context:
+AI teammates have finite context windows. Every token spent on irrelevant guidance is a token not available for your actual code. Traditional approaches waste context:
 
 | Approach | Problem |
 |----------|---------|
@@ -1444,7 +1444,7 @@ AI coworkers have finite context windows. Every token spent on irrelevant guidan
 | Post-hoc code review | Wrong code already written, wasting tokens to explain and fix |
 | Copy-paste documentation | Stale, inconsistent, context-bloating |
 
-**Result:** AI coworkers receive diluted, generic guidance. They lack your team's shared context. You spend tokens correcting them.
+**Result:** AI teammates receive diluted, generic guidance. They lack your team's shared context. You spend tokens correcting them.
 
 ## The Solution: Progressive Disclosure
 
@@ -1456,7 +1456,7 @@ ox agent <id> guidance api  → 750 tokens: API/frontend/testing patterns, deepe
 ox agent <id> guidance api/rest → 500 tokens: REST endpoint conventions, auth patterns
 ` + "```" + `
 
-**80% context savings** in typical sessions. Your AI coworker gets exactly what it needs, when it needs it—not everything upfront.
+**80% context savings** in typical sessions. Your AI teammate gets exactly what it needs, when it needs it—not everything upfront.
 
 ## Getting Started
 
@@ -1468,12 +1468,12 @@ cd ox && make install
 # 2. Initialize in your repo (run from your project)
 ox init
 
-# 3. That's it. AI coworkers now call ox agent prime automatically.
+# 3. That's it. AI teammates now call ox agent prime automatically.
 ` + "```" + `
 
-## Works With Your AI Coworker
+## Works With Your AI Teammate
 
-SageOx integrates with the AI coworkers developers already use:
+SageOx integrates with the AI teammates developers already use:
 
 - **Claude Code, Codex, Goose** — Automatic via lifecycle hooks (primes and records at session start)
 - **Gemini CLI, Droid** — Lifecycle hooks for recording; initial prime via instruction file marker
@@ -1481,17 +1481,17 @@ SageOx integrates with the AI coworkers developers already use:
 - **Amp** — Plugin records the session; ` + "`AGENTS.md`" + ` primes it
 - **Pi, Aider** — Via the ` + "`ox agent prime`" + ` marker in their instruction file
 - **Cursor, Windsurf, Cline, Copilot, Kiro** — Via the marker in ` + "`.cursorrules`" + `, ` + "`.windsurfrules`" + `, and equivalents
-- **Any AI coworker** — Manual ` + "`ox agent prime`" + ` injection
+- **Any AI teammate** — Manual ` + "`ox agent prime`" + ` injection
 
-Sessions are recorded to the Ledger for every AI coworker above that has an ox adapter.
+Sessions are recorded to the Ledger for every AI teammate above that has an ox adapter.
 Run ` + "`ox status`" + ` to see which ones are wired up in this repo.
 
 ## Key Files
 
 After ` + "`ox init`" + `, your repository contains:
 
-- **` + "`.sageox/README.md`" + `** — This file, with AI coworker instructions
-- **` + "`AGENTS.md`" + `** — AI coworker configuration with ox agent prime integration
+- **` + "`.sageox/README.md`" + `** — This file, with AI teammate instructions
+- **` + "`AGENTS.md`" + `** — AI teammate configuration with ox agent prime integration
 
 Guidance content is fetched dynamically from the SageOx cloud via ` + "`ox agent prime`" + `, not stored locally.
 
@@ -1499,7 +1499,7 @@ Guidance content is fetched dynamically from the SageOx cloud via ` + "`ox agent
 
 *"Shared team context that makes agentic engineering multiplayer."*
 
-By giving AI coworkers your team patterns **before** they write code, SageOx prevents problems rather than fixing them. This shift-left approach is fundamentally more efficient than post-hoc reviews.
+By giving AI teammates your team patterns **before** they write code, SageOx prevents problems rather than fixing them. This shift-left approach is fundamentally more efficient than post-hoc reviews.
 
 ## Learn More
 
@@ -2190,7 +2190,7 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 
 	// Non-interactive callers cannot answer the selection prompt. Configure
 	// every detected agent so `ox init` keeps its hook-installation promise
-	// when invoked from an AI coworker or CI.
+	// when invoked from an AI teammate or CI.
 	if !cli.IsInteractive() {
 		selected["claude-code"] = true
 		for _, ea := range adapters.DiscoverExternalAdapters() {
@@ -2256,7 +2256,7 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 	}
 
 	chosen, err := cli.SelectMany(
-		"Which AI coworkers should ox configure for this repo?",
+		"Which AI teammates should ox configure for this repo?",
 		options,
 	)
 	if err != nil {
@@ -2385,7 +2385,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
-	// Install integrations only for AI coworkers the user selected.
+	// Install integrations only for AI teammates the user selected.
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	var selectedSkillAdapters []*adapters.ExternalAdapter
 	for _, ea := range externalAdapters {
@@ -2471,13 +2471,13 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 	}
 	if targets, err := skillTargetsForAdapters(gitRoot, selectedSkillAdapters); err != nil {
 		if !quiet {
-			cli.PrintWarning(fmt.Sprintf("Could not resolve AI coworker inventory targets: %v", err))
+			cli.PrintWarning(fmt.Sprintf("Could not resolve AI teammate inventory targets: %v", err))
 		}
 	} else if len(targets) > 0 {
 		plan, err := reconcileSelectedSkills(gitRoot, targets)
 		if err != nil {
 			if !quiet {
-				cli.PrintWarning(fmt.Sprintf("Could not reconcile AI coworker assets: %v", err))
+				cli.PrintWarning(fmt.Sprintf("Could not reconcile AI teammate assets: %v", err))
 			}
 		} else {
 			written := plan.WrittenPaths()
@@ -2488,11 +2488,11 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				switch {
 				case len(plan.Conflicts) > 0:
-					cli.PrintWarning(fmt.Sprintf("Reconciled AI coworker assets with %d preserved conflict(s)", len(plan.Conflicts)))
+					cli.PrintWarning(fmt.Sprintf("Reconciled AI teammate assets with %d preserved conflict(s)", len(plan.Conflicts)))
 				case len(written) > 0:
-					cli.PrintSuccess(fmt.Sprintf("Installed %d AI coworker asset file(s) across %d native target(s)", len(written), len(targets)))
+					cli.PrintSuccess(fmt.Sprintf("Installed %d AI teammate asset file(s) across %d native target(s)", len(written), len(targets)))
 				default:
-					cli.PrintPreserved("AI coworker assets already up to date")
+					cli.PrintPreserved("AI teammate assets already up to date")
 				}
 			}
 		}

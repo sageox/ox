@@ -402,7 +402,7 @@ func TestCaptureSlog_RoundTrips(t *testing.T) {
 }
 
 // TestKBGuidanceText_TeachesTheCoreConcepts pins the concepts the prime
-// KB block MUST teach an AI coworker, one marker per concept:
+// KB block MUST teach an AI teammate, one marker per concept:
 //
 //  1. WHAT a bubble is — the Curator's synthesis of the team's conversations,
 //     distilled into salient points/topics, one bubble per cohesive area.

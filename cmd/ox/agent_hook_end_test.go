@@ -192,7 +192,7 @@ func TestQuarantinedRecordingSurvivesSessionEndAndClear(t *testing.T) {
 
 // Failure prevented: the /clear and SessionEnd hooks send the daemon a
 // finalize request that bypasses its scan, so a manual-mode session is
-// summarized and uploaded the moment the AI coworker exits (GH #1093).
+// summarized and uploaded the moment the AI teammate exits (GH #1093).
 func TestHookStop_HoldsManualSessionAndSendsNoFinalize(t *testing.T) {
 	phases := []struct {
 		name string
@@ -293,7 +293,7 @@ func TestHookStop_HoldFailureKeepsTheRecording(t *testing.T) {
 
 // Failure prevented: 'session stop' holds a recording started in auto mode
 // (the coworker switched to manual mid-session), the hold write fails, and the
-// kept recording still says auto. Once its AI coworker exits, daemon recovery
+// kept recording still says auto. Once its AI teammate exits, daemon recovery
 // reads that and publishes the session.
 func TestHoldStoppedSession_FailedHoldStillRecordsManual(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)

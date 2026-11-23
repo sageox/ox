@@ -22,7 +22,7 @@ const identityReadTimeout = 5 * time.Second
 
 // oxIdentityEnv returns env with the inherited commit identity replaced by
 // the one ox stamped into repoPath's local config (a Ledger or Team Context
-// clone, or a repo where an AI coworker works). ox's hooks run inside the
+// clone, or a repo where an AI teammate works). ox's hooks run inside the
 // coding agent's environment, and a runner that hands the agent GIT_AUTHOR_*
 // for its code commits would otherwise author ox's Ledger commits too
 // (sageox/ox#1845). The stamped identity is set rather than the variables

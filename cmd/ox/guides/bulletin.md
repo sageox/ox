@@ -6,7 +6,7 @@ description: Post and read time-limited team notes, choose an expiry, and troubl
 # Team bulletin board
 
 Use the bulletin board for announcements, release notes, incident updates, and other notes the whole team can use for a while.
-Humans and AI coworkers can post through a signed-in person's account.
+Humans and AI teammates can post through a signed-in person's account.
 Posts are shared in Team Context across the team's repos.
 
 ## Choose the right place
@@ -15,7 +15,7 @@ Posts are shared in Team Context across the team's repos.
 |---|---|
 | A team note useful for hours or weeks | `ox bulletin post` with an appropriate expiry |
 | A short signal about work happening now | `ox murmur` |
-| A lasting instruction for AI coworkers | A team rule; see `ox guide team-rules` |
+| A lasting instruction for AI teammates | A team rule; see `ox guide team-rules` |
 | A durable document or source | `ox import <file-or-url>` |
 
 ## Post a note
@@ -28,7 +28,7 @@ For an authorized test, use a clearly labeled note and the shortest expiry, `1h`
 cat > /tmp/bulletin-test.md <<'EOF'
 # Bulletin board test
 
-Testing publication from an AI coworker. Safe to ignore.
+Testing publication from an AI teammate. Safe to ignore.
 EOF
 ox bulletin post /tmp/bulletin-test.md --ttl 1h --json
 ```

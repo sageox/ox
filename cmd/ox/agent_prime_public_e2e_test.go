@@ -53,7 +53,7 @@ func gitStatusPorcelain(t *testing.T, dir string) string {
 }
 
 // TestRunAgentPrime_PublicProjectPrimesAnyCoworker — Failure prevented: a
-// contributor's AI coworker in a clone of an onboarded open-source project
+// contributor's AI teammate in a clone of an onboarded open-source project
 // starts with nothing because they are not on the team, while the project
 // page tells them to prime it.
 func TestRunAgentPrime_PublicProjectPrimesAnyCoworker(t *testing.T) {
@@ -142,7 +142,7 @@ func TestRunAgentPrime_SageoxDirWithoutConfigIsNotInitialized(t *testing.T) {
 	assert.Contains(t, out, `<session-context agent_id="" status="unavailable">`)
 	assert.NotContains(t, out, `status="fresh"`)
 	_, err := os.Stat(filepath.Join(sageoxDir, "agent_instances"))
-	assert.True(t, os.IsNotExist(err), "prime must not register an AI coworker in an uninitialized repo")
+	assert.True(t, os.IsNotExist(err), "prime must not register an AI teammate in an uninitialized repo")
 }
 
 // servePublicPrimeAs answers the readest key with the golden bundle, as the
@@ -193,7 +193,7 @@ func runInitializedPrime(t *testing.T, env *oxE2E) (out, statusBefore string) {
 
 // TestRunAgentPrime_OutsideContributorInInitializedRepoGetsPublicPrime —
 // Failure prevented (#8331): an open-source project that committed .sageox/
-// gives an outside contributor's AI coworker nothing, because they cannot get
+// gives an outside contributor's AI teammate nothing, because they cannot get
 // its Team Context, while a clone of a project that never ran ox init primes
 // from its public plans.
 func TestRunAgentPrime_OutsideContributorInInitializedRepoGetsPublicPrime(t *testing.T) {
@@ -208,9 +208,9 @@ func TestRunAgentPrime_OutsideContributorInInitializedRepoGetsPublicPrime(t *tes
 	assert.Contains(t, out, "<public-rules>\nRule: contributing\nOpen an issue before a large PR.\nRun make test before you push.\nRule: go-style (when editing **/*.go)\nRun gofmt.\n</public-rules>\n")
 	assert.NotContains(t, out, "agent_id")
 
-	// read-only: no AI coworker registered, nothing repaired into their clone
+	// read-only: no AI teammate registered, nothing repaired into their clone
 	_, err := os.Stat(filepath.Join(env.Root, ".sageox", "agent_instances"))
-	assert.True(t, os.IsNotExist(err), "a non-member's prime must not register an AI coworker")
+	assert.True(t, os.IsNotExist(err), "a non-member's prime must not register an AI teammate")
 	assert.Equal(t, before, gitStatusPorcelain(t, env.Root), "the clone's working tree is untouched")
 }
 

@@ -496,7 +496,7 @@ func TestRenderKBDescribe_HumanOutput(t *testing.T) {
 		"member",
 		"usr_admin", // admin row (caller is not the admin)
 		// the curator steering prompt: how team conversations were
-		// synthesized into this bubble. `ox agent prime` tells AI coworkers
+		// synthesized into this bubble. `ox agent prime` tells AI teammates
 		// to read it here, so a dropped row breaks that promise.
 		"Focus on deploy tooling and incident retros",
 		"2026-07-27T10:00:00Z",

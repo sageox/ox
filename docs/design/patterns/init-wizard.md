@@ -43,7 +43,7 @@ Step 6 · Dock
 <summary>More: the dock, the prompt line, and the offers</summary>
 
 - **The payoff comes before the chores.** "Try this first" (the repo-initialized email's plan prompt) sits above Next Steps. Committing `.sageox/` stays step 1.
-- **Add-ons are offered once.** At a terminal, the first `ox init` on a machine lists what is not installed. Pipes, CI and AI coworkers get nothing and spend nothing.
+- **Add-ons are offered once.** At a terminal, the first `ox init` on a machine lists what is not installed. Pipes, CI and AI teammates get nothing and spend nothing.
 - **The dock fixes a silent gap.** Nothing in the terminal said sessions are recorded; that lived only in `.sageox/README.md`. The sentence follows the repo's own recording and publishing settings and never claims more than they give.
 - **The prompt is one unwrapped line.** The terminal soft-wraps it, so a click-and-copy takes the sentence, not a border or a hard break.
 - **Offers: `ox pet enable`, `ox session report pane enable`.** Init installs the pane itself when Claude Code is a selected integration, so the pane is only offered when it was not.

@@ -148,7 +148,7 @@ func sessionHeldByName(sessionPath string) bool {
 
 // unpublishedCacheSessions are cache sessions not yet in the Ledger, by name:
 // Held ones the coworker keeps on this machine (GH #1095), and Waiting ones
-// the daemon reclaims once their AI coworker exits (GH #1077).
+// the daemon reclaims once their AI teammate exits (GH #1077).
 type unpublishedCacheSessions struct {
 	Held    []string
 	Waiting []string
@@ -239,7 +239,7 @@ func checkHeldSessions(projectRoot, ledgerPath string) (checkResult, bool) {
 			result.children = append(result.children, checkResult{name: name, passed: true, warning: true, message: "could not be held, so the daemon may still publish it: " + err.Error()})
 			continue
 		}
-		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "cache only; recovered when its AI coworker exits"})
+		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "cache only; recovered when its AI teammate exits"})
 	}
 	return result, true
 }

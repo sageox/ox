@@ -222,7 +222,7 @@ func TestRenderDaemonSyncSection_StoppedDaemonWording(t *testing.T) {
 	}
 }
 
-// --- AI Coworkers section ---
+// --- AI Teammates section ---
 
 // TestRenderAICoworkersSection_NoDaemonRendersNothing verifies the section stays
 // silent rather than reporting zero.

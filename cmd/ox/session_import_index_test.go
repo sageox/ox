@@ -197,7 +197,7 @@ func TestImportMayUploadOnlyWithConfirmation(t *testing.T) {
 		{"--yes is the confirmation", importOptions{yes: true}, false, true},
 		{"a coworker at a terminal is asked", importOptions{}, true, true},
 		{"no terminal and no --yes is a preview", importOptions{}, false, false},
-		{"an AI coworker needs --yes", importOptions{agentCtx: true, jsonOut: true}, true, false},
+		{"an AI teammate needs --yes", importOptions{agentCtx: true, jsonOut: true}, true, false},
 		{"JSON output needs --yes", importOptions{jsonOut: true}, true, false},
 	}
 	for _, tt := range tests {

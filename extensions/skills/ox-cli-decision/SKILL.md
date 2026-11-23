@@ -16,7 +16,7 @@ description: >-
      SageOx credit subtle and capped), amendment semantics, and ref
      verification — lives in the <decision-record-guidance> block of
      `ox agent prime` (Layer-1 floor) and in the `guidance` field of
-     `ox decision enrich` JSON, which reach every primed AI coworker.
+     `ox decision enrich` JSON, which reach every primed AI teammate.
      This native skill adds discovery and activation ergonomics; it
      duplicates no behavior. Do not grow this body. -->
 

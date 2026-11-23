@@ -158,7 +158,7 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	return nil
 }
 
-// enqueuePlanFeedbackTask notifies the AI coworker that authored a plan that new
+// enqueuePlanFeedbackTask notifies the AI teammate that authored a plan that new
 // human review feedback arrived, by enqueuing a `plan-feedback` agent-task into
 // the project's task queue. The task carries NO instructions — only its kind and
 // the plan slug in the payload — so the coworker acts via the fixed agent-task

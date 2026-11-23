@@ -82,7 +82,7 @@ func (s *Store) GetSessions() []session.SessionInfo      { return s.Sessions }
 func (s *Store) GetMurmurs() []domain.MurmurEntry        { return s.Murmurs }
 func (s *Store) GetDiscussions() []domain.TeamDiscussion { return s.Discussions }
 
-// GetInstances returns the current AI coworker instance list.
+// GetInstances returns the current AI teammate instance list.
 func (s *Store) GetInstances() []daemon.InstanceInfo { return s.Instances }
 
 // GetStoredErrors returns the current unviewed stored error list.

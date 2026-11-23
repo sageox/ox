@@ -259,7 +259,7 @@ func touchCursorHookRecording(projectRoot, agentID, status string) {
 // runCursorPrimeForHook commits primed status only after the bounded child
 // succeeded and its complete context reached hook stdout. The child preserves
 // its assigned identity with PrimedAt unset, so timeout/overflow can retry on a
-// later deliverable event without allocating another AI coworker.
+// later deliverable event without allocating another AI teammate.
 func runCursorPrimeForHook(agentID string, hook *HookContext) error {
 	path, err := selfexec.Path()
 	if errors.Is(err, selfexec.ErrUnderTest) {
@@ -293,7 +293,7 @@ func runCursorPrimeExecutableForHook(path, agentID string, hook *HookContext) er
 	}
 	_, err := UpdateSessionMarker(hook.Input.SessionID, func(marker *SessionMarker) error {
 		if marker.AgentID == "" {
-			return fmt.Errorf("missing-native-identity: Cursor prime did not assign an AI coworker")
+			return fmt.Errorf("missing-native-identity: Cursor prime did not assign an AI teammate")
 		}
 		marker.PrimedAt = time.Now().UTC()
 		marker.ParentPID = 0

@@ -4,7 +4,7 @@
     "fast": {
       "description": "Deterministic unit and component tests for every local change and main push.",
       "includes": [
-        "Tests that complete quickly without network access or a real AI coworker",
+        "Tests that complete quickly without network access or a real AI teammate",
         "Tests using testing.Short-aware fakes and in-process protocol twins",
         "Bounded hermetic subprocess tests, including local git repositories isolated in temporary directories"
       ],
@@ -42,13 +42,13 @@
       }
     },
     "slow": {
-      "description": "Long-running hermetic tests that require a real compiled ox binary but no AI coworker.",
+      "description": "Long-running hermetic tests that require a real compiled ox binary but no AI teammate.",
       "includes": [
         "Tests marked with the slow build tag",
         "Real binary, git, filesystem, recovery, and stress scenarios"
       ],
       "excludes": [
-        "Real AI coworker and cloud-dependent scenarios",
+        "Real AI teammate and cloud-dependent scenarios",
         "Browser-tagged tests and the external ox-test-harness"
       ],
       "go_test": {
@@ -71,7 +71,7 @@
         "Coverage fragments from the compiled binary merged with the full Go test profile"
       ],
       "excludes": [
-        "Real cloud credentials and real AI coworker invocations",
+        "Real cloud credentials and real AI teammate invocations",
         "Scenarios already owned by the external ox-test-harness"
       ],
       "executor": "make test-acceptance"

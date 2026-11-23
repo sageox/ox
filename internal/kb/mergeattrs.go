@@ -55,7 +55,7 @@ const mergeAttributesRelPath = ".git/info/attributes"
 // Files included:
 //
 //   - AGENTS.md, CLAUDE.md, README.md, CONVENTIONS.md — appear at the
-//     root of both repo types; touched by humans, AI coworkers, server
+//     root of both repo types; touched by humans, AI teammates, server
 //     seed, ox prime injection.
 //   - SOUL.md — team-context "soul" doc; multi-coworker writes are the
 //     point of the file.

@@ -63,7 +63,7 @@ func isolateCaptureStorage(t *testing.T) {
 }
 
 // Failure prevented: capture-prior refuses a header without agent_id or source (an older prime's
-// example, or a shorter one an AI coworker writes) although its command line carries the agent ID,
+// example, or a shorter one an AI teammate writes) although its command line carries the agent ID,
 // or stores a history that every later strict reader rejects (ox-dfk7).
 func TestCapturePrior_HeaderWithoutAgentIDUsesCommandLine(t *testing.T) {
 	tests := []struct {

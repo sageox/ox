@@ -66,7 +66,7 @@ func goldenReport(width int) Report {
 
 // TestDisplay_Golden pins the dense layout at 80 and 120 columns. Failure
 // prevented: the block both harnesses print verbatim drifts, wraps past the
-// terminal, grows past one screen, or leaks color into an AI coworker's text.
+// terminal, grows past one screen, or leaks color into an AI teammate's text.
 func TestDisplay_Golden(t *testing.T) {
 	for _, width := range []int{80, 120} {
 		t.Run(filepath.Base(goldenName(width)), func(t *testing.T) {
@@ -97,7 +97,7 @@ func goldenName(width int) string {
 const exampleCnv = "cnv_01a17990-4cb6-7bf9-9584-4728f14b54f1"
 
 // exampleReport is the brief's design target: three used items (a discussion
-// cited in a commit, a plan the AI coworker reported following, a murmur it
+// cited in a commit, a plan the AI teammate reported following, a murmur it
 // read), the rest only available, and a derived co-author verdict.
 func exampleReport(width int) Report {
 	read := &ItemUsed{Evidence: EvidenceRead}
@@ -254,10 +254,10 @@ func TestRender_CoauthorRow(t *testing.T) {
 			[]string{"co-author  significant · would attribute (threshold 0.5)\n           derived from context use: cited plan pln_1\n"}, false},
 		{"self-reported with reason",
 			Attribution{WouldAttribute: true, Category: "critical", Source: AttributionSelfReported, Threshold: 0.7, Reason: "followed the ADR"},
-			[]string{"co-author  critical · would attribute (threshold 0.7)\n           reported by the AI coworker: followed the ADR\n"}, false},
+			[]string{"co-author  critical · would attribute (threshold 0.7)\n           reported by the AI teammate: followed the ADR\n"}, false},
 		{"self-reported, no reason",
 			Attribution{Category: "moderate", Source: AttributionSelfReported, Threshold: 0.7},
-			[]string{"co-author  moderate · below threshold (threshold 0.7)\n           reported by the AI coworker\n"}, false},
+			[]string{"co-author  moderate · below threshold (threshold 0.7)\n           reported by the AI teammate\n"}, false},
 		{"self-reported none is shown",
 			Attribution{Category: "none", Source: AttributionSelfReported, Threshold: 0.5},
 			[]string{"co-author  none · below threshold (threshold 0.5)\n"}, false},

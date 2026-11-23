@@ -40,14 +40,14 @@ func TestBulletinReadingHint_StatesTheFourRulesOnOneLine(t *testing.T) {
 	assert.Contains(t, hint, "instruction")
 	assert.Contains(t, hint, "policy")
 
-	// user-facing copy says "AI coworker", never "agent"
+	// user-facing copy says "AI teammate", never "agent"
 	assert.False(t, regexp.MustCompile(`(?i)\bagents?\b`).MatchString(hint),
-		"user-facing copy must say AI coworker, not agent: %q", hint)
+		"user-facing copy must say AI teammate, not agent: %q", hint)
 }
 
 // TestBulletinReceiptCopy_MatchesTheHintFraming keeps the receipt strings
 // consistent with the reading hint: same trust framing, and the receipt tells
-// the poster's AI coworker that a retry never doubles or extends a post.
+// the poster's AI teammate that a retry never doubles or extends a post.
 // Failure prevented: the receipt promising something the hint denies (or the
 // reverse), which is exactly the drift these constants exist to stop.
 func TestBulletinReceiptCopy_MatchesTheHintFraming(t *testing.T) {
@@ -62,7 +62,7 @@ func TestBulletinReceiptCopy_MatchesTheHintFraming(t *testing.T) {
 			assert.Contains(t, s, "time-limited")
 			assert.Contains(t, s, "never extends the expiry")
 			assert.False(t, regexp.MustCompile(`(?i)\bagents?\b`).MatchString(s),
-				"user-facing copy must say AI coworker, not agent: %q", s)
+				"user-facing copy must say AI teammate, not agent: %q", s)
 		})
 	}
 	assert.Contains(t, BulletinReceiptGuidance, "next Team Context sync",

@@ -13,20 +13,20 @@ import (
 func checkClaudeSkills(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return SkippedCheck("AI coworker assets", "not in git repo", "")
+		return SkippedCheck("AI teammate assets", "not in git repo", "")
 	}
 	plan, err := planCommittedSkills(gitRoot)
 	if err != nil {
-		return WarningCheck("AI coworker assets", "cannot inspect managed assets", err.Error())
+		return WarningCheck("AI teammate assets", "cannot inspect managed assets", err.Error())
 	}
 	if plan.TargetCount == 0 && !plan.RetiredSelections {
-		return SkippedCheck("AI coworker assets", "no project-selected native targets", "Run `ox init` and select an AI coworker")
+		return SkippedCheck("AI teammate assets", "no project-selected native targets", "Run `ox init` and select an AI teammate")
 	}
 	if len(plan.Warnings) > 0 {
-		return WarningCheck("AI coworker assets", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
+		return WarningCheck("AI teammate assets", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
 	}
 	if unusable := plan.UnusableTeamSkills(); len(unusable) > 0 {
-		return WarningCheck("AI coworker assets", describeUnusableTeamSkills(unusable),
+		return WarningCheck("AI teammate assets", describeUnusableTeamSkills(unusable),
 			"Rename each skill in the Team Context, including its directory and the name: key in SKILL.md")
 	}
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 && !plan.RetiredSelections {
@@ -34,39 +34,39 @@ func checkClaudeSkills(fix bool) checkResult {
 		// approval leaves the repository looking exactly as it would if nobody had
 		// authored it, so this is the one place a human finds out it exists.
 		if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
-			return WarningCheck("AI coworker assets", describeWithheldTeamSkills(withheld),
+			return WarningCheck("AI teammate assets", describeWithheldTeamSkills(withheld),
 				teamSkillApprovalHint(withheld))
 		}
-		return PassedCheck("AI coworker assets", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount)+
+		return PassedCheck("AI teammate assets", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount)+
 			claudeOrgDoctorSummary(gitRoot, plan))
 	}
 
 	problem := describeSkillPlan(plan)
 	if !fix {
 		if len(plan.Conflicts) > 0 && len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.RetiredSelections {
-			return WarningCheck("AI coworker assets", problem, describeSkillConflicts(plan.Conflicts))
+			return WarningCheck("AI teammate assets", problem, describeSkillConflicts(plan.Conflicts))
 		}
-		return FailedCheck("AI coworker assets", problem, "Run `ox doctor --fix` to reconcile unchanged managed files")
+		return FailedCheck("AI teammate assets", problem, "Run `ox doctor --fix` to reconcile unchanged managed files")
 	}
 	applied, err := reconcileCommittedSkills(gitRoot)
 	if err != nil {
-		return FailedCheck("AI coworker assets", problem, fmt.Sprintf("Fix failed: %v", err))
+		return FailedCheck("AI teammate assets", problem, fmt.Sprintf("Fix failed: %v", err))
 	}
 	plan = applied
 	if len(plan.Conflicts) > 0 {
-		return WarningCheck("AI coworker assets", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), describeSkillConflicts(plan.Conflicts))
+		return WarningCheck("AI teammate assets", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), describeSkillConflicts(plan.Conflicts))
 	}
 	if unusable := plan.UnusableTeamSkills(); len(unusable) > 0 {
-		return WarningCheck("AI coworker assets", describeUnusableTeamSkills(unusable),
+		return WarningCheck("AI teammate assets", describeUnusableTeamSkills(unusable),
 			"Rename each skill in the Team Context, including its directory and the name: key in SKILL.md")
 	}
 	if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
-		return WarningCheck("AI coworker assets",
+		return WarningCheck("AI teammate assets",
 			fmt.Sprintf("reconciled %d file change(s); %s",
 				len(plan.Creates)+len(plan.Updates)+len(plan.Removes), describeWithheldTeamSkills(withheld)),
 			teamSkillApprovalHint(withheld))
 	}
-	return PassedCheck("AI coworker assets", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount)+
+	return PassedCheck("AI teammate assets", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount)+
 		claudeOrgDoctorSummary(gitRoot, plan))
 }
 
@@ -192,7 +192,7 @@ func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {
 func init() {
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugClaudeSkills,
-		Name:        "AI coworker assets",
+		Name:        "AI teammate assets",
 		Category:    "Integration",
 		FixLevel:    FixLevelAuto,
 		Description: "Reconciles project-selected native skill and rule targets",

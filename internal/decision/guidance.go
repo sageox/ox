@@ -33,7 +33,7 @@ func buildGuidance(in Input, sum SignalSummary, conv Conventions, annotations []
 	}
 	if sum.Degraded {
 		// A source could not be read, so even surfaced matches are not exhaustive
-		// and an empty result is not a checked absence. Never tell the AI coworker
+		// and an empty result is not a checked absence. Never tell the AI teammate
 		// to assert "no prior decision" as fact when retrieval was blind (#823).
 		b.WriteString("Retrieval was DEGRADED — a decision source could not be read (an unreadable corpus, or a lookup that errored), so the surfaced context may be incomplete and any apparent absence is NOT a verified 'no prior decision'. Do not assert absence as fact. Investigate first: check the decision dir parses (a DR needs a number in filename/H1, or title + Status/Date), run `ox doctor`, and try `ox code search`. Only draft from first principles once you have confirmed there is genuinely nothing to reconcile. ")
 	}

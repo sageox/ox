@@ -30,7 +30,7 @@ recap mines your ledger for the specific team-context knowledge that reached
 your coding sessions — the decisions, conventions, and prior work SageOx put in
 front of you so you didn't re-derive them — and points at each by name.
 
-When called by an AI coworker it emits a JSON evidence bundle plus guidance to
+When called by an AI teammate it emits a JSON evidence bundle plus guidance to
 narrate a personalized, prose answer. In a bare terminal it prints an honest
 summary. If value is still ramping, it prescribes the next steps that start
 generating it. Scoped to the current project's ledger; personal by default.`,
@@ -161,7 +161,7 @@ func terminalWidth() int {
 }
 
 func init() {
-	recapCmd.Flags().Bool("json", false, "structured JSON evidence bundle for AI coworkers")
+	recapCmd.Flags().Bool("json", false, "structured JSON evidence bundle for AI teammates")
 	recapCmd.Flags().String("since", "30d", "reporting window (e.g. 7d, 30d, 24h, or an ISO date)")
 	recapCmd.Flags().String("user", "", "report for a specific coworker (display name or slug); default is you")
 }

@@ -595,7 +595,7 @@ func BuildManifest() *TwinManifest {
 	)
 
 	// ═══════════════════════════════════════════════════════════════
-	// Murmurs: WIP status updates from AI coworkers
+	// Murmurs: WIP status updates from AI teammates
 	// Dense, technical one-liners describing current work.
 	// ═══════════════════════════════════════════════════════════════
 
@@ -729,7 +729,7 @@ func BuildManifest() *TwinManifest {
 	// File-change murmurs: daemon-emitted watchman observations.
 	// These fire ~10 min after the daemon detects filesystem changes,
 	// separate from the agent-emitted WIP murmurs above.
-	// agent_id is the resolved AI coworker when exactly one is active,
+	// agent_id is the resolved AI teammate when exactly one is active,
 	// comma-separated when multiple, or "daemon" during idle windows.
 	// ═══════════════════════════════════════════════════════════════
 

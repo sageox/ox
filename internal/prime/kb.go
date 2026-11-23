@@ -14,7 +14,7 @@ import (
 )
 
 // hint strings for KBInfo.Hint, kept short on purpose. These are
-// AI-coworker-facing prose; quote command names for scannability.
+// AI-teammate-facing prose; quote command names for scannability.
 const (
 	hintPersonal = "your personal scratchpad — your own notes/decisions across all repos"
 	hintProfile  = "your public profile bubble"
@@ -108,7 +108,7 @@ func normalizedTypeKey(t api.KBType) string {
 	return string(t)
 }
 
-// hintForType returns a short, type-specific AI-coworker hint.
+// hintForType returns a short, type-specific AI-teammate hint.
 func hintForType(t api.KBType) string {
 	switch t {
 	case api.KBTypePersonal:

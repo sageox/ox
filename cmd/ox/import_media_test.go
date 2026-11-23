@@ -859,7 +859,7 @@ func TestImportMedia_RefusalShowsServerMessage(t *testing.T) {
 
 // TestImportMedia_SecondImportIsRecognized keeps the source-OID dedup the
 // document path has: the same bytes import once unless --force.
-// Failure prevented: re-running an import (an AI coworker retrying a command)
+// Failure prevented: re-running an import (an AI teammate retrying a command)
 // creating a duplicate recording and a second transcription bill.
 func TestImportMedia_SecondImportIsRecognized(t *testing.T) {
 	f := newMediaFixture(t, "standup.m4a", 4096)
@@ -998,7 +998,7 @@ func TestPlanRecordingUpload(t *testing.T) {
 
 // TestUploadProgress prints quarters for a large upload off a terminal, and
 // nothing for a small one.
-// Failure prevented: an AI coworker's transcript flooded with progress lines,
+// Failure prevented: an AI teammate's transcript flooded with progress lines,
 // or a retried part counted twice and reported past 100%.
 func TestUploadProgress(t *testing.T) {
 	var buf bytes.Buffer

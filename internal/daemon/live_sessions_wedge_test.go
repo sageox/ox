@@ -45,7 +45,7 @@ func sandboxLiveHome(t *testing.T) (home string) {
 	}
 	userConfig := filepath.Join(home, "user-config.yaml")
 	t.Setenv("OX_USER_CONFIG", userConfig)
-	// no AI coworker CLI probe at setup: it execs claude, codex and gemini,
+	// no AI teammate CLI probe at setup: it execs claude, codex and gemini,
 	// which is not what these tests time, and must not reach a real login
 	require.NoError(t, os.WriteFile(userConfig, []byte("agent_worker:\n  agent: none\n"), 0o600))
 	t.Setenv("DO_NOT_TRACK", "1")

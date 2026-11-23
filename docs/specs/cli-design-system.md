@@ -11,7 +11,7 @@ document into multiple concatenated objects.
 
 `cli.PrintJSON` writes the command result to stdout, syntax-colored when a
 human is reading it at a terminal and byte-exact plain JSON whenever the output
-is piped, redirected, or captured by an AI coworker. It is the only JSON
+is piped, redirected, or captured by an AI teammate. It is the only JSON
 printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
 `PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
@@ -25,7 +25,7 @@ The common CLI pre-run resolves `OX_JSON=1` as the JSON default; explicit
 `--json` or `--json=false` takes precedence. It applies that result to both the
 configuration and command flags so handlers agree regardless of which they read.
 An environment default must not mark the flag as explicitly supplied: commands
-that choose JSON automatically for AI coworkers still need to distinguish an
+that choose JSON automatically for AI teammates still need to distinguish an
 omitted flag from `--json=false`.
 
 The stdout color-stripping proxy must finish flushing before the command reports
@@ -260,7 +260,7 @@ Platform: darwin/arm64 ← StyleDim
 ## Help Output Structure
 
 ```
-SageOx (ox) - Shared team context for AI coworkers            ← StyleBrand + StyleDim
+SageOx (ox) - Shared team context for AI teammates            ← StyleBrand + StyleDim
 
 Usage
 ─────

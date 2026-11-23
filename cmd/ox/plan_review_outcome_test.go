@@ -102,7 +102,7 @@ func TestPlanReview_ReportsHowTheSessionEnded(t *testing.T) {
 
 // TestPlanReviewAwait_ReportsWhatItReturned checks the await command's usage
 // event says whether it returned feedback or timed out: it exits 0 either way.
-// Failure prevented: usage data can't tell an AI coworker that got feedback
+// Failure prevented: usage data can't tell an AI teammate that got feedback
 // from one that waited out its timeout.
 func TestPlanReviewAwait_ReportsWhatItReturned(t *testing.T) {
 	gitRoot := newPlanStatusTestRepo(t)

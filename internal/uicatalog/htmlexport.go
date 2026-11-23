@@ -196,7 +196,7 @@ type pageInput struct {
 }
 
 // renderThemeBlock emits the palette/tokens reference at the top of the
-// catalog page so designers and AI coworkers can see every semantic
+// catalog page so designers and AI teammates can see every semantic
 // color without reading Go source. Data comes from theme.Tokens, which
 // mirrors internal/theme/generated.go (the npm-synced output of
 // sageox-design).

@@ -161,7 +161,7 @@ func TestSuggestDeterministicMatches(t *testing.T) {
 
 	// PR #773 is a representative architecture story: one portable catalog
 	// reconciles into native and shared targets with a safe, recoverable apply.
-	// Its language must select visuals instead of forcing an AI coworker to
+	// Its language must select visuals instead of forcing an AI teammate to
 	// browse the entire catalog or silently omit the explanation.
 	intent := "show how one portable skill catalog is reconciled into native Claude and shared Codex/Gemini project targets, including deduplication, safe apply, ownership, and crash recovery"
 	got := Suggest(intent, 5)

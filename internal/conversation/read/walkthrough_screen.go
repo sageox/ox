@@ -14,7 +14,7 @@ import (
 
 // The screen-side readers behind `ox conversation walkthrough`: they turn a
 // walkthrough's client layers (pointer, ax-tree) into the few moments worth
-// an AI coworker's attention — clicks, deliberate dwells, and page changes —
+// an AI teammate's attention — clicks, deliberate dwells, and page changes —
 // each naming the element or page involved. The producer is SageOx Desktop
 // (src/shared/layers/take.ts documents the row forms); every value is
 // screen-derived, untrusted, and cleaned before it leaves this file.

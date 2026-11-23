@@ -48,12 +48,12 @@ const (
 	digestLaneColumns = 100
 	// digestFirstNoticeWindow bounds what a session's first notice may show
 	// when it is not recording: the not-recording trace is kept per AI
-	// coworker for a week, and calls from an earlier sitting are not this
+	// teammate for a week, and calls from an earlier sitting are not this
 	// turn's news.
 	digestFirstNoticeWindow = 10 * time.Minute
 )
 
-// detectOrchestrator names the app running the AI coworker ("conductor", …),
+// detectOrchestrator names the app running the AI teammate ("conductor", …),
 // or "" when there is none. A variable so tests can stand in for Conductor.
 var detectOrchestrator = agentx.OrchestratorType
 

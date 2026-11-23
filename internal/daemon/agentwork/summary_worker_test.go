@@ -75,7 +75,7 @@ func TestSummaryWorkersIsolateStrictlyUnderTeamToken(t *testing.T) {
 }
 
 // Failure prevented: under a team token, a Claude Code too old for --safe-mode
-// summarizes an untrusted transcript with tools on, next to the AI coworker's
+// summarizes an untrusted transcript with tools on, next to the AI teammate's
 // stored credentials.
 func TestTeamTokenRefusesClaudeWithoutSafeMode(t *testing.T) {
 	stubTeamToken(t, true)

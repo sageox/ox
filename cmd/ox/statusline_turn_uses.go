@@ -9,7 +9,7 @@ import (
 )
 
 // recordTurnUses counts, on the status line, the surfaced items the AI
-// coworker's latest turn shows it used. It runs from the Stop hook, once per
+// teammate's latest turn shows it used. It runs from the Stop hook, once per
 // turn, after the turn has been drained into raw.jsonl: that reply is where
 // the use evidence lands. Without it "N used" moved only when `ox session
 // report` ran the same scan, so with the pane closed the line sat stale until

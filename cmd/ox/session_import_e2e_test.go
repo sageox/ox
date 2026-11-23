@@ -547,7 +547,7 @@ func (f *importFixture) uploadedContent(t *testing.T, name, file string) string 
 	return string(data)
 }
 
-// optionsFromCommand runs a printed command the way an AI coworker does: as
+// optionsFromCommand runs a printed command the way an AI teammate does: as
 // written, with JSON output, in an agent context.
 func optionsFromCommand(t *testing.T, command string) importOptions {
 	t.Helper()
@@ -816,7 +816,7 @@ func TestImportE2E_PreviewComesFirst(t *testing.T) {
 	assert.Contains(t, r.out, "Nothing was uploaded. To upload these 1 session:\n  ox session import --yes --session "+e2eClaudeA+"\n")
 	assertNothingMoved(t, f, head)
 
-	t.Run("Devon's AI coworker gets the preview and is told to ask", func(t *testing.T) {
+	t.Run("Devon's AI teammate gets the preview and is told to ask", func(t *testing.T) {
 		r := f.run(t, importOptions{agentCtx: true, jsonOut: true})
 		require.NoError(t, r.err, r.out)
 		assert.Equal(t, "preview", r.report.Status)
@@ -963,7 +963,7 @@ func TestImportE2E_CredentialOutputIsRedactedBeforeLeaving(t *testing.T) {
 }
 
 // Devon previews only last week's Codex sessions and approves them; the AI
-// coworker then runs the command the preview printed. Only what Devon saw may
+// teammate then runs the command the preview printed. Only what Devon saw may
 // be uploaded: not the Claude session the filter hid, and not a Codex session
 // that became ready after the preview.
 //

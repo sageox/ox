@@ -229,7 +229,7 @@ func (s *Store) Add(task *Task) (added bool, err error) {
 	// like they carry a credential so a producer can't leak a secret into the
 	// agent's context window.
 	if k := sensitivePayloadKey(task.Payload); k != "" {
-		return false, fmt.Errorf("task payload key %q looks sensitive; payload is surfaced to an AI coworker and must not carry secrets", k)
+		return false, fmt.Errorf("task payload key %q looks sensitive; payload is surfaced to an AI teammate and must not carry secrets", k)
 	}
 
 	ctx := context.Background()

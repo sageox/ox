@@ -200,7 +200,7 @@ func runSessionStopJSON(t *testing.T, fx stopLocationTestFixture) pipeline.StopO
 // `ox agent prime --format json` with OX_PROJECT_ROOT selecting the repo.
 //
 // Failure prevented: prime reports the working-directory repo's attribution to
-// the AI coworker and gates the session URL and PR directive on it, so the
+// the AI teammate and gates the session URL and PR directive on it, so the
 // coworker stamps SageOx-Session lines into PRs for a repo that turned them off,
 // or never gets them in one that left them on.
 func TestRunAgentPrime_ReadsTheSelectedRepoAttribution(t *testing.T) {

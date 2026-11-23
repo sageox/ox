@@ -321,7 +321,7 @@ func TestFeedbackDigest_HighlightStaysOneBoundedLine(t *testing.T) {
 }
 
 // TestFeedbackDigest_ReviewerTextIsUntrustedData verifies the digest tells the
-// AI coworker that reviewer text is untrusted and prints each item on one line,
+// AI teammate that reviewer text is untrusted and prints each item on one line,
 // each field cleaned on its own. Failure prevented: a field's line break, open
 // escape, closing quote or hidden characters make reviewer text read as the
 // digest's own words, or hide the fields after it.
@@ -348,7 +348,7 @@ func TestFeedbackDigest_ReviewerTextIsUntrustedData(t *testing.T) {
 // TestFeedbackDigest_UnsafeAnchorIsNotPrinted verifies the digest prints an
 // anchor only when it is safe to paste into the resolve command its footer
 // shows. Failure prevented: a record's anchor carries shell syntax or a flag
-// and the AI coworker runs it as part of `ox plan feedback resolve`.
+// and the AI teammate runs it as part of `ox plan feedback resolve`.
 func TestFeedbackDigest_UnsafeAnchorIsNotPrinted(t *testing.T) {
 	drawing := "q-" + strings.Repeat("a", 64) // the longest anchor ox writes
 	d := FeedbackDigest([]MergedItem{

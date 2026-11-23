@@ -1,5 +1,5 @@
 Feature: The Browser Review Round-Trip
-  Devon reviews a plan in his browser and Avery, the authoring AI coworker, acts
+  Devon reviews a plan in his browser and Avery, the authoring AI teammate, acts
   on what he leaves there. Devon marks up a section, adds a note, and submits —
   and those exact marks reach Avery without Devon copying anything into a chat.
   Avery addresses each item and Devon's open page updates to show it resolved,

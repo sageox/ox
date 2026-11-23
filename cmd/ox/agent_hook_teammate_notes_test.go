@@ -408,14 +408,14 @@ func TestConfigReportsTheTeammateNotesEnvOverride(t *testing.T) {
 	assert.Equal(t, "on", cv.UserVal)
 }
 
-// R5: user-facing settings text calls the recipient an AI coworker (AGENTS.md).
+// R5: user-facing settings text calls the recipient an AI teammate (AGENTS.md).
 func TestTeammateNotesSettingTextSaysAICoworker(t *testing.T) {
 	setting := GetSetting("session.teammate_notes")
 	require.NotNil(t, setting)
 	for _, text := range []string{setting.Description, setting.LongDescription} {
-		assert.NotContains(t, strings.ToLower(text), " agent", "settings copy must say AI coworker: %q", text)
+		assert.NotContains(t, strings.ToLower(text), " agent", "settings copy must say AI teammate: %q", text)
 	}
-	assert.Contains(t, setting.Description, "AI coworker")
+	assert.Contains(t, setting.Description, "AI teammate")
 }
 
 // R7: the order is the contract. A writer that fails must stop the confirm (the

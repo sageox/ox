@@ -213,7 +213,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		attribute.String(observability.AttrHostArch, runtime.GOARCH),
 	}
 	// AGENT_ENV is set by adapter hooks (claude-code, aider, gemini, ...)
-	// to identify the AI coworker driving this invocation. Only attach it
+	// to identify the AI teammate driving this invocation. Only attach it
 	// when present so human-driven invocations stay clean.
 	if env := os.Getenv("AGENT_ENV"); env != "" {
 		resourceAttrs = append(resourceAttrs, attribute.String(observability.AttrAgentEnv, env))

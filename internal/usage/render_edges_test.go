@@ -27,7 +27,7 @@ func forceColor(t *testing.T) {
 // TestHuman_ColorIsOnlyDecoration: on a color terminal every view is styled,
 // and stripping the escapes gives back exactly the plain display. Failure
 // prevented: the terminal view says something different from what the AI
-// coworker prints, or wraps differently because escapes were counted as width.
+// teammate prints, or wraps differently because escapes were counted as width.
 func TestHuman_ColorIsOnlyDecoration(t *testing.T) {
 	forceColor(t)
 	ledger := t.TempDir()

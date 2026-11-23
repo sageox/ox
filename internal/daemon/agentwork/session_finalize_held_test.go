@@ -274,7 +274,7 @@ func TestDetect_ManualPublishingHoldsUnpublishedSessions(t *testing.T) {
 	}
 }
 
-// Failure prevented: an exited AI coworker's recording that says auto (it
+// Failure prevented: an exited AI teammate's recording that says auto (it
 // started before the coworker switched to manual) is finalized and published
 // by the agent-exit sweep, which went only by the recorded mode.
 func TestDetectOrphanedForAgent_ManualPublishingHoldsAnUnpublishedRecording(t *testing.T) {

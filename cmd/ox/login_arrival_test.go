@@ -120,7 +120,7 @@ func TestLoginFailure(t *testing.T) {
 // TestLoginArtEnv_Allowed verifies Oxy appears for exactly one audience and
 // each condition alone keeps him away.
 // Failure prevented: art in a pipe, CI log, --json or --quiet run, or an AI
-// coworker's captured output, where DESIGN.md promises calm, precise text.
+// teammate's captured output, where DESIGN.md promises calm, precise text.
 func TestLoginArtEnv_Allowed(t *testing.T) {
 	person := loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.TrueColor}
 	require.True(t, person.allowed(), "a person at a truecolor terminal sees Oxy")
@@ -135,7 +135,7 @@ func TestLoginArtEnv_Allowed(t *testing.T) {
 		{"not interactive (CI, --no-input, --no-interactive, no TTY on stdin)", func(e *loginArtEnv) { e.Interactive = false }},
 		{"--quiet", func(e *loginArtEnv) { e.Quiet = true }},
 		{"--json", func(e *loginArtEnv) { e.JSON = true }},
-		{"run by an AI coworker", func(e *loginArtEnv) { e.AgentContext = true }},
+		{"run by an AI teammate", func(e *loginArtEnv) { e.AgentContext = true }},
 		{"NO_COLOR", func(e *loginArtEnv) { e.Profile = colorprofile.ASCII }},
 		{"16 colors cannot carry the picture", func(e *loginArtEnv) { e.Profile = colorprofile.ANSI }},
 		{"no TTY profile", func(e *loginArtEnv) { e.Profile = colorprofile.NoTTY }},

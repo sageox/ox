@@ -147,7 +147,7 @@ describe('parseReport: used items and attribution', () => {
 })
 
 // The fixture the design is drawn for: a discussion cited in a commit, a plan
-// the AI coworker reported using, a murmur it read, two discussions unused.
+// the AI teammate reported using, a murmur it read, two discussions unused.
 const USED_REPORT = {
   ...REPORT,
   surfaced: [
@@ -277,7 +277,7 @@ describe('header and co-author', () => {
     const below = parseReport(
       JSON.stringify({ ...USED_REPORT, attribution: { would_attribute: false, category: 'minor', source: 'self-reported', threshold: 2 } }),
     )!
-    expect(coauthorRows(below, 80)).toEqual({ key: 'coauthor', category: 'minor', verdict: '· below threshold 2', reason: 'reported by the AI coworker' })
+    expect(coauthorRows(below, 80)).toEqual({ key: 'coauthor', category: 'minor', verdict: '· below threshold 2', reason: 'reported by the AI teammate' })
     expect(coauthorRows(derived, 20)?.reason).toBe('derived from use: a…')
     expect(coauthorRows(parseReport(JSON.stringify(REPORT))!, 80)).toBeNull()
   })
@@ -492,7 +492,7 @@ test('/ox-session-report opens the pane and lists each ox call, oldest first', a
     expect(await ui.find({ type: 'Link', text: 'https://sageox.ai/p/plan_4' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Brief pane redesign|Sam/ })).toBeUndefined()
     expect(await ui.find({ key: 'coauthor' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: "used = evidence from the transcript, a commit, or the AI coworker's report" })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: "used = evidence from the transcript, a commit, or the AI teammate's report" })).toBeDefined()
 
     const rows = [await ui.find({ key: 'row:0' }), await ui.find({ key: 'row:1' }), await ui.find({ key: 'row:2' })]
     expect(rows.map(r => r?.text.replace(/^\d\d:\d\d/, 'HH:MM'))).toEqual([

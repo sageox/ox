@@ -244,7 +244,7 @@ type importInvocationEnvironment struct {
 
 func (importInvocationEnvironment) IsDir(string) bool { return false }
 
-// importAgentContext detects an AI coworker from runtime evidence. Installed
+// importAgentContext detects an AI teammate from runtime evidence. Installed
 // project integration directories do not imply an AI invocation.
 func importAgentContext(ctx context.Context, env agentx.Environment) bool {
 	if ctx == nil {
@@ -577,7 +577,7 @@ func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions
 
 // importMayUpload decides whether a run goes past the preview. --yes is the
 // confirmation; without it only a coworker at a terminal, reading text, is
-// asked. An AI coworker or a JSON reader gets the preview and must rerun.
+// asked. An AI teammate or a JSON reader gets the preview and must rerun.
 func importMayUpload(opts importOptions, interactive bool) bool {
 	if opts.dryRun || opts.preview {
 		return false

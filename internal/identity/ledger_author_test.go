@@ -196,7 +196,7 @@ func serveTeamToken(t *testing.T, coworker string) string {
 	return srv.URL
 }
 
-// Failure prevented: an AI coworker's Ledger commits carry the machine's git
+// Failure prevented: an AI teammate's Ledger commits carry the machine's git
 // identity (or fail without one) wherever its git server is not the API's
 // own host, because only the API host was ever compared with the clone's.
 func TestLedgerAuthor_TeamTokenAuthorsAsItsCoworker(t *testing.T) {
@@ -231,14 +231,14 @@ func TestLedgerAuthor_TeamTokenWithoutACoworkerIsNobody(t *testing.T) {
 	assert.Empty(t, name+email)
 }
 
-// Failure prevented: a person's own credential is taken for an AI coworker,
+// Failure prevented: a person's own credential is taken for an AI teammate,
 // or a coworker without a display name gets no git name.
 func TestCoworkerAuthor(t *testing.T) {
 	isolateSignIns(t)
 	api := newServer(t)
 	saveSignIn(t, api, "token-devon", "usr_devon", "Devon Example")
 	name, email := CoworkerAuthor(api)
-	assert.Empty(t, name+email, "a signed-in person is not an AI coworker")
+	assert.Empty(t, name+email, "a signed-in person is not an AI teammate")
 
 	api = serveTeamToken(t, `{"id":"agt_rip"}`)
 	name, email = CoworkerAuthor(api)

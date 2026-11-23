@@ -294,7 +294,7 @@ func TestFetchTokenMetaFromServer_Coworker(t *testing.T) {
 	}
 }
 
-// Failure prevented: ox keeps refusing for an hour after an AI coworker is attached.
+// Failure prevented: ox keeps refusing for an hour after an AI teammate is attached.
 func TestFetchTokenMetaCached_NoCoworkerAnswerExpiresInAMinute(t *testing.T) {
 	withTempCacheDir(t)
 	ep := serveIntrospectBody(t, teamAnswer(`{"id":"agt_rip","display_name":"Rip"}`))

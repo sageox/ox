@@ -10,7 +10,7 @@
 
 The actor runs `ox init`. ox wires the repo to the team's endpoint, sets up the
 Ledger and Team Context, installs the agent hooks, and injects the prime marker
-so any AI coworker knows to run `ox agent prime` at session start. The actor
+so any AI teammate knows to run `ox agent prime` at session start. The actor
 then commits the `.sageox/` directory and pushes, so teammates inherit the same
 SageOx setup when they pull. Re-running init is safe and non-destructive.
 

@@ -424,7 +424,7 @@ func TestOutputInstancesTable_EmptyInstances(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	require.NoError(t, outputInstancesTable(&buf, nil))
-	assert.Contains(t, buf.String(), "No active AI coworker instances")
+	assert.Contains(t, buf.String(), "No active AI teammate instances")
 }
 
 func TestOutputInstancesTable_WithInstances(t *testing.T) {

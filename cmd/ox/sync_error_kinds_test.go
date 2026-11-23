@@ -24,7 +24,7 @@ import (
 //
 // Failure prevented: every `ox sync` failure reaching PostHog as
 // error_kind=other with an empty error_detail (or cli.SilentError in --json,
-// which is how AI coworkers run it), so a daemon that is down, a diverged
+// which is how AI teammates run it), so a daemon that is down, a diverged
 // Ledger, and a mistyped --team are indistinguishable on the dashboard.
 func TestSync_FailuresCarryAKindAndDetail(t *testing.T) {
 	const secret = "sk-secret-path" // must never reach PostHog

@@ -1,5 +1,5 @@
 // Package contextuse derives, from a session's context-trace events, which
-// SageOx context was surfaced to an AI coworker and which of it was actually
+// SageOx context was surfaced to an AI teammate and which of it was actually
 // used, and turns that into a display-only attribution category.
 //
 // The package is pure: it reads events handed to it and does no I/O. Like the
@@ -20,7 +20,7 @@ const (
 	ViaRetrieval = "retrieval"
 )
 
-// SurfacedRef is one piece of context that reached the AI coworker.
+// SurfacedRef is one piece of context that reached the AI teammate.
 type SurfacedRef struct {
 	Ref      string `json:"ref"`
 	RefType  string `json:"ref_type"`

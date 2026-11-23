@@ -441,7 +441,7 @@ func checkTeamAgentsMD(tc config.TeamContext) checkResult {
 	if os.IsNotExist(err) {
 		// AGENTS.md is critical - this is a warning, not a failure
 		return WarningCheck(name, "missing",
-			"AGENTS.md defines your team's coding conventions for AI coworkers.\n"+
+			"AGENTS.md defines your team's coding conventions for AI teammates.\n"+
 				"        Without it, AI sessions lack team context.\n"+
 				"        → Add team norms at https://sageox.ai, or\n"+
 				"        → Create manually: "+agentsMDPath)

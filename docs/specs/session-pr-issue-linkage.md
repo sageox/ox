@@ -1,6 +1,6 @@
 # Session ↔ PR / Issue Linkage (Design)
 
-**Audience:** AI coworkers and engineers extending ox's linkage system beyond commits to GitHub PRs and Issues.
+**Audience:** AI teammates and engineers extending ox's linkage system beyond commits to GitHub PRs and Issues.
 **Status:** v1 (M1–M5) shipped; v2 (M6–M8, GitHub App) + v3 remain. Tracked under epic `bd ox-fdre`.
 **Companion:** [`session-commit-linkage.md`](./session-commit-linkage.md) (commit-level linkage; this design builds on it).
 

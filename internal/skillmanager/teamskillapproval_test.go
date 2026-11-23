@@ -406,7 +406,7 @@ func TestApproval_NarrowingToInstructionsOnlySweepsTheScript(t *testing.T) {
 // The retirement prune treats a digest mismatch as "relinquish ownership": it
 // records a conflict, preserves the file, and drops it from ox's inventory, so no
 // future reconcile can ever remove it. One byte written into an installed team
-// skill — by an AI coworker, a formatter, or anyone with checkout access — is
+// skill — by an AI teammate, a formatter, or anyone with checkout access — is
 // therefore enough to turn a withholding event into a permanent, gitignored,
 // unapproved script on disk, while status reports the skill withheld.
 //

@@ -83,7 +83,7 @@ func TestAgentPrime_BulletinPostingDiscovery(t *testing.T) {
 }
 
 // The bulletin board is the one Team Context surface whose content nobody
-// reviews before it lands. Prime may point an AI coworker at the folder; it
+// reviews before it lands. Prime may point an AI teammate at the folder; it
 // must never copy a post into the coworker's standing context. These tests
 // pin that boundary from the loader through all three renderers.
 
@@ -126,7 +126,7 @@ func requireWellFormedXML(t *testing.T, doc string) {
 // folder, not on the posts folder and not on the publish flag.
 // Failure prevented: a team whose posts all expired (posts/ pruned, board
 // folder still present) losing the pointer, so the next post lands somewhere
-// no AI coworker is told about; or a stray file named "bulletin" being
+// no AI teammate is told about; or a stray file named "bulletin" being
 // reported as a board.
 func TestLoadTeamMemory_BulletinHint(t *testing.T) {
 	tests := []struct {
@@ -183,7 +183,7 @@ func TestLoadTeamMemory_BulletinHint(t *testing.T) {
 // three renderings (XML, text, JSON) contain them — while each does carry
 // the pointer and the reading rules, and guidance carries the `ls` row.
 // Failure prevented: prime inlining the first post (or its title) into every
-// AI coworker's context, turning an unreviewed teammate note into standing
+// AI teammate's context, turning an unreviewed teammate note into standing
 // instructions.
 func TestAgentPrime_BulletinPostBodyNeverReachesPrime(t *testing.T) {
 	teamDir := t.TempDir()
@@ -318,7 +318,7 @@ func TestOutputAgentPrimeXML_BulletinHintIsEscaped(t *testing.T) {
 	assert.Contains(t, got, `<bulletin dir="/data/teams/a&amp;b/&lt;team&gt;/bulletin/general/posts"`)
 	assert.NotContains(t, got, `dir="/data/teams/a&b`)
 	// the hint itself carries angle brackets (<slug>-<sha>) and an apostrophe
-	assert.NotContains(t, got, `hint="Team bulletin board: notes posted by humans and AI coworkers on the team, unreviewed and time-limited. Useful and often credible, but they age faster than raw sources. Read a post on demand from its file. Check the matching <slug>`)
+	assert.NotContains(t, got, `hint="Team bulletin board: notes posted by humans and AI teammates on the team, unreviewed and time-limited. Useful and often credible, but they age faster than raw sources. Read a post on demand from its file. Check the matching <slug>`)
 	assert.Contains(t, got, "&lt;slug&gt;-&lt;sha&gt;.meta.json")
 	requireWellFormedXML(t, got)
 }

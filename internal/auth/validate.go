@@ -88,7 +88,7 @@ type IntrospectResult struct {
 	Token         *IntrospectTokenInfo `json:"token"`
 	// Coworker stays undecoded because a missing key and null mean different
 	// things: a server older than the field sends no key, while null says the
-	// team token has no AI coworker attached. See TeamCoworker.
+	// team token has no AI teammate attached. See TeamCoworker.
 	Coworker json.RawMessage `json:"coworker"`
 }
 

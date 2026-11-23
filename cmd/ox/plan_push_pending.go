@@ -409,7 +409,7 @@ func flushPendingPlanPushes(ctx context.Context, ledgerPath string) (succeeded, 
 
 // kickPendingPlanPushes is the retry trigger, called from `ox agent prime`.
 //
-// Why prime: it runs automatically at every AI coworker session start and
+// Why prime: it runs automatically at every AI teammate session start and
 // after every compaction, so a stranded plan push is retried within the next
 // session with no human action — unlike `ox doctor --fix`, which someone must
 // remember to run. The daemon cannot do it (its pushes bypass the gate stack

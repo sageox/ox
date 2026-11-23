@@ -19,7 +19,7 @@ import (
 //
 // Failure prevented: a paused recording that reports itself as simply
 // "recording". The whole point of surfacing pause state in --json is that an AI
-// coworker checks status programmatically and must be able to tell "I am
+// teammate checks status programmatically and must be able to tell "I am
 // recording" from "I am paused and nothing I say is being captured". Without
 // these fields the agent keeps working believing its session is being recorded,
 // and the guidance naming the resume command never reaches it either.

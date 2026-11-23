@@ -236,7 +236,7 @@ func TestBuildCapturePriorGuidance(t *testing.T) {
 
 // TestBuildCapturePriorGuidance_ExampleIsAccepted pipes the example's JSONL through the validator
 // capture-prior runs, and checks the instructions name every header field it requires.
-// Failure prevented: an AI coworker copies the example from prime verbatim and capture-prior
+// Failure prevented: an AI teammate copies the example from prime verbatim and capture-prior
 // rejects it, as it did when the header lacked source and agent_id (ox-os6n).
 func TestBuildCapturePriorGuidance_ExampleIsAccepted(t *testing.T) {
 	const agentID = "Oxa7b3"
@@ -266,7 +266,7 @@ func TestBuildCapturePriorGuidance_ExampleIsAccepted(t *testing.T) {
 // the trust rules (never a post body).
 // Failure prevented: ungating the row (dead `ls` on every prime, pointing at
 // a directory that does not exist), duplicating it, or dropping the trust
-// framing from the intent so an AI coworker reads a post as policy.
+// framing from the intent so an AI teammate reads a post as policy.
 func TestBuildGuidance_BulletinRowGatedOnHint(t *testing.T) {
 	const hint = "/data/teams/team-1/bulletin/general/posts"
 

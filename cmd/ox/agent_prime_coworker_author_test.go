@@ -21,7 +21,7 @@ import (
 
 // coworkerMachine is an initialized repo on a machine whose git refuses to
 // guess an identity (a fresh container), with SAGEOX_TOKEN a team token acting
-// as the AI coworker Rip. keepRepoIdentity leaves the person's own local
+// as the AI teammate Rip. keepRepoIdentity leaves the person's own local
 // identity in the repo.
 func coworkerMachine(t *testing.T, keepRepoIdentity bool) *oxE2E {
 	t.Helper()
@@ -51,7 +51,7 @@ func unsetTeamToken(t *testing.T) {
 	require.NoError(t, os.Unsetenv("SAGEOX_TOKEN"))
 }
 
-// commitInProject makes a real commit in repo the way an AI coworker would,
+// commitInProject makes a real commit in repo the way an AI teammate would,
 // with the machine's environment, and returns its author.
 func commitInProject(t *testing.T, repo string) (string, error) {
 	t.Helper()
@@ -63,7 +63,7 @@ func commitInProject(t *testing.T, repo string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// Failure prevented: an AI coworker on a machine whose git has no identity (a
+// Failure prevented: an AI teammate on a machine whose git has no identity (a
 // fresh container) cannot commit its work in the project, or commits it as the
 // machine; its identity outlives its team token; or a person's own identity in
 // their repository is replaced.
@@ -81,7 +81,7 @@ func TestRunAgentPrime_AICoworkerCommitsItsWorkAsItself(t *testing.T) {
 
 			runPrimeJSON(t)
 			author, err := commitInProject(t, env.Root)
-			require.NoError(t, err, "the AI coworker must be able to commit its work")
+			require.NoError(t, err, "the AI teammate must be able to commit its work")
 			assert.Equal(t, tc.want, author)
 
 			unsetTeamToken(t)

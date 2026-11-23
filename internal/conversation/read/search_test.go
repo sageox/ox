@@ -418,7 +418,7 @@ func TestSearchFoldsDuplicateRecordings(t *testing.T) {
 }
 
 // TestSearchLimitTruncates: Failure prevented: an unbounded result list
-// floods an AI coworker's context.
+// floods an AI teammate's context.
 func TestSearchLimitTruncates(t *testing.T) {
 	d := mustSearch(t, searchReader(t), SearchOptions{Since: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Limit: 1})
 	if len(d.Results) != 1 || !d.Truncated {

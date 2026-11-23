@@ -1,5 +1,5 @@
 // Package flowlane draws the SageOx flow lane as one line of terminal text:
-// what an ox call moved between SageOx and the AI coworker's session, in
+// what an ox call moved between SageOx and the AI teammate's session, in
 // which direction, and how much.
 //
 //	SAGEOX ●┄┄•┄┄┄┄┄•┄┄┄┄┄•┄○ SESSION  searching team discussions

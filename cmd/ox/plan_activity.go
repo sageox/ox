@@ -64,7 +64,7 @@ func postPlanActivityBestEffort(gitRoot, planDir string, kind plan.EventKind) {
 	}
 
 	// Short timeout, deliberately far below the client default of 10s. This runs
-	// synchronously on the plan-save path, which an AI coworker's turn blocks
+	// synchronously on the plan-save path, which an AI teammate's turn blocks
 	// on — and that path already does a network git push. Stalling a coworker
 	// for 10s to deliver an advisory index hint is strictly worse than not
 	// delivering it; the server's periodic ledger sweep is the backstop.

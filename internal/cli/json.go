@@ -16,7 +16,7 @@ import (
 //
 // A `--json` payload has two audiences with opposite needs. A human running
 // `ox addons list --json` at a terminal is reading a document and wants the
-// structure to pop. An AI coworker — or `jq`, or a test — is parsing bytes and
+// structure to pop. An AI teammate — or `jq`, or a test — is parsing bytes and
 // must never receive an escape sequence.
 //
 // Both are served by the SAME call because the two audiences are already
@@ -115,7 +115,7 @@ func PrintJSONTo(w io.Writer, v any) error {
 // newline, never colorized.
 //
 // For callers that need the bytes themselves — to measure the payload an AI
-// coworker will actually consume, to embed it in a markdown fence, or to hash
+// teammate will actually consume, to embed it in a markdown fence, or to hash
 // it. Pair it with WriteJSONBytes to print what you measured instead of
 // encoding the value twice.
 func MarshalJSONIndent(v any) ([]byte, error) {

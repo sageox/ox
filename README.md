@@ -13,7 +13,7 @@ sessions back to the shared context so the next coworker inherits them.
 
 Today that context lives in scattered places: a meeting nobody recorded, a Slack
 thread three weeks deep, the head of whoever wrote the code. So humans repeat
-themselves and AI coworkers drift — rebuilding the same lost context every
+themselves and AI teammates drift — rebuilding the same lost context every
 session. `ox` closes that gap. Decisions become shared memory; every session
 starts with the full picture instead of from zero.
 
@@ -21,7 +21,7 @@ starts with the full picture instead of from zero.
 > your coding sessions; the [SageOx desktop app](https://sageox.ai/product/desktop)
 > helps make capturing human context in the first place even easier. One click
 > records a call or an in-person conversation, and within 60 seconds after the
-> recording ends, SageOx distills it into shared context your AI coworkers can
+> recording ends, SageOx distills it into shared context your AI teammates can
 > build on — no re-explaining, no copied notes.
 > **[Install SageOx Desktop →](https://sageox.ai/product/desktop)** (macOS 14.4+)
 
@@ -92,10 +92,10 @@ ox feedback --file report.txt  # send private feedback to SageOx Support
 ox status               # auth, project, sync state, and daemon health
 ```
 
-That's the whole setup. When an AI coworker runs `ox agent prime` at the start of
+That's the whole setup. When an AI teammate runs `ox agent prime` at the start of
 a session, team context loads in automatically.
 
-**Recording is on by default.** Once a repo is initialized, every new AI coworker
+**Recording is on by default.** Once a repo is initialized, every new AI teammate
 session records automatically — there's nothing to start. Context only compounds
 when sessions are actually captured, and the payoff arrives a week later when a
 teammate's agent already knows what you decided today.
@@ -109,7 +109,7 @@ ox config                # interactive editor; walks you through the modes
 
 More detail in [What gets recorded](#what-gets-recorded).
 
-Then just ask your AI coworker things it couldn't have known on its own:
+Then just ask your AI teammate things it couldn't have known on its own:
 
 - *"What did we decide about the daemon design, and who worked on it?"*
 - *"Draft a plan from this week's team discussions."*
@@ -119,11 +119,11 @@ Then just ask your AI coworker things it couldn't have known on its own:
 
 ## What gets recorded
 
-`ox` records coding sessions — the conversation between you and your AI coworker —
+`ox` records coding sessions — the conversation between you and your AI teammate —
 so teammates and future sessions can learn from prior work. Here is exactly what
 leaves your machine, and what doesn't.
 
-**Recording is on by default.** In an initialized repo, each new AI coworker
+**Recording is on by default.** In an initialized repo, each new AI teammate
 session records automatically, and secrets are stripped locally before anything is
 uploaded.
 
@@ -199,7 +199,7 @@ team and you record, your teammates can read your sessions.
 
 ### Turning it off, or recording manually
 
-Recording starts automatically with each new AI coworker session. To end the
+Recording starts automatically with each new AI teammate session. To end the
 active one:
 
 ```bash
@@ -235,7 +235,7 @@ ox config set session_publishing manual   # don't auto-publish when a session st
 
 With `session_publishing: manual`, a session is *held* on your machine when it
 stops: nothing summarizes it, pushes it to the shared ledger, or deletes it —
-not the background daemon, not `ox doctor`, and not closing your AI coworker.
+not the background daemon, not `ox doctor`, and not closing your AI teammate.
 `ox session list` shows it as `held`, and `ox doctor` / `ox status` list your
 held sessions. Publish one when you're ready with `ox session upload <name>`;
 its summary is generated after it's published. This is different from
@@ -260,7 +260,7 @@ Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 | Real-time coordination signals between coworkers | ✅ | `ox murmur "..."` | — |
 | Team-context-enriched plans (design, GTM, rollout, engineering) | ✅ | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
 | Planning-relevant code insights (hotspots, contention) | ✅ | `ox code insights` | — |
-| Load an expert AI coworker into context | ✅ | `ox coworker load <name>` | — |
+| Load an expert AI teammate into context | ✅ | `ox coworker load <name>` | — |
 | Diagnose and auto-fix your setup | ✅ | `ox doctor --fix` | [doctor](docs/reference/doctor.mdx) |
 
 ✅ generally available
@@ -269,7 +269,7 @@ Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 
 `ox init` writes a `.sageox/` directory that ties the repo to your team. From
 then on, `ox agent prime` injects team context — conventions, security
-requirements, architectural decisions, prior sessions — into each AI coworker
+requirements, architectural decisions, prior sessions — into each AI teammate
 before it writes a line. Coworkers, human and AI, share that context.
 
 The payoff is multiplayer by default. When a discussion, an implementation

@@ -39,7 +39,7 @@ func gitOK(t *testing.T, dir string, args ...string) {
 	require.NoError(t, err, "git %v: %s", args, out)
 }
 
-// An AI coworker primed in one checkout of a repository keeps working from any
+// An AI teammate primed in one checkout of a repository keeps working from any
 // other worktree of it.
 //
 // Failure prevented (#1407): the Claude desktop app runs hooks — and so
@@ -149,7 +149,7 @@ func TestInstanceStoreRoot(t *testing.T) {
 	}
 }
 
-// An AI coworker primed in a worktree by an ox version that kept a store per
+// An AI teammate primed in a worktree by an ox version that kept a store per
 // checkout still resolves after the upgrade, and a lookup never creates an
 // empty store in the worktree.
 func TestResolveInstanceReadsWorktreeStoreFromBeforeSharing(t *testing.T) {
@@ -218,7 +218,7 @@ func TestResolveInstanceReportsAnUnreadableStore(t *testing.T) {
 }
 
 // `ox doctor` run from a linked worktree reads the instance store every
-// worktree shares, and never counts a running AI coworker's instance as
+// worktree shares, and never counts a running AI teammate's instance as
 // stale, however old it is.
 // Failure prevented: doctor reports "no instances" from the worktree that is
 // actually in use, or tells the coworker of a multi-day session that its own

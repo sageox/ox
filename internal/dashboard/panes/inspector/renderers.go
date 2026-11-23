@@ -496,7 +496,7 @@ func RenderDefault(status *daemon.StatusData, activeCoworkers int, width int) st
 		}
 
 		if activeCoworkers > 0 {
-			lines = append(lines, row("Active AI coworkers", fmt.Sprintf("%d", activeCoworkers)))
+			lines = append(lines, row("Active AI teammates", fmt.Sprintf("%d", activeCoworkers)))
 		}
 
 		if len(status.Issues) > 0 {

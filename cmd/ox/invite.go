@@ -32,7 +32,7 @@ type inviteSender interface {
 }
 
 // inviteStatus is the closed set of per-recipient outcomes. These strings are
-// the --json contract; AI coworkers branch on them, so they are stable.
+// the --json contract; AI teammates branch on them, so they are stable.
 type inviteStatus string
 
 const (
@@ -859,7 +859,7 @@ func inviteSummaryLine(sent, pending, failed int) string {
 	return line
 }
 
-// inviteGuidance tells an AI coworker what actually happened and what to do
+// inviteGuidance tells an AI teammate what actually happened and what to do
 // next. Per CLAUDE.md this — not a skill file — is where agent-facing
 // behavior belongs, so every agent gets it, not just Claude Code.
 func inviteGuidance(res inviteResult, sent, pending, failed int) string {
@@ -1352,7 +1352,7 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 }
 
 // pluralizeInvitations renders a count with the right noun. The "(s)" form was
-// leaking into agent-facing guidance, which AI coworkers quote back to humans
+// leaking into agent-facing guidance, which AI teammates quote back to humans
 // verbatim.
 func pluralizeInvitations(n int) string {
 	if n == 1 {

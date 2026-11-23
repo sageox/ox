@@ -14,7 +14,7 @@ import (
 // facts card in the repo-initialized email (Repository, Connected to, and who
 // can read what you save), in the same order.
 
-// InitPlanPrompt is the first thing to ask an AI coworker once a repo is
+// InitPlanPrompt is the first thing to ask an AI teammate once a repo is
 // initialized. It mirrors PLAN_PROMPT in the web app's RepoInitializedEmail:
 // the same words in the terminal and in the inbox, so keep the two in step.
 const InitPlanPrompt = "Plan the next thing you're building. Make it a SageOx enriched visual plan, save it, and render it for review."
@@ -53,7 +53,7 @@ type InitDock struct {
 
 // Render draws the dock. framed is the interactive terminal's rounded box; the
 // unframed form is the same facts as labeled lines, for a pipe, CI, or an AI
-// coworker, where a border is noise.
+// teammate, where a border is noise.
 func (d InitDock) Render(framed bool) string {
 	if !framed {
 		return d.plain()
@@ -146,7 +146,7 @@ func wrapWords(s string, width int) []string {
 	return append(lines, line)
 }
 
-// RenderTryFirst is the plan prompt to paste into an AI coworker. The prompt is
+// RenderTryFirst is the plan prompt to paste into an AI teammate. The prompt is
 // one unwrapped line: the terminal soft-wraps it, so a click-and-copy takes the
 // sentence and not a border or a hard line break.
 func RenderTryFirst() string {

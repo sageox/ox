@@ -4,7 +4,7 @@
 
 ## The inversion
 
-The richest artifact leads. An AI coworker (or human) authors a **rich,
+The richest artifact leads. An AI teammate (or human) authors a **rich,
 self-contained interactive HTML page first** — that page IS the plan of record.
 Markdown is **extracted from** the HTML by ox: never authored in parallel, never
 required.
@@ -20,7 +20,7 @@ around.
 
 | Artifact | Produced by | Role |
 |---|---|---|
-| `plan.html` | Author (AI coworker or human) | **Plan of record.** Stored verbatim in the ledger plan dir |
+| `plan.html` | Author (AI teammate or human) | **Plan of record.** Stored verbatim in the ledger plan dir |
 | `plan.md` | ox, derived on every save | Terminal view (`ox plan view`), search, enrichment input. **Never hand-edit** — regenerated from the HTML |
 | `meta.json` | ox | Records `"primary": "html"` |
 | ox chrome | ox, injected at render/serve time | Enrichment overlay + footer credit + live review loop |
@@ -162,7 +162,7 @@ A material plan has two readers and therefore two layers:
 
 Do not average the two audiences into a long document. Keep the depth, but move
 it behind native progressive disclosure so the approver's first scan stays
-visual and whoever executes — an AI coworker, an engineer, a marketer — still
+visual and whoever executes — an AI teammate, an engineer, a marketer — still
 has precise instructions.
 
 ## The minimal authoring contract

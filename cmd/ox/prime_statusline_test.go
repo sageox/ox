@@ -34,7 +34,7 @@ type primeStatusLineRun struct {
 // coworker never gets the status line unless they happen to run `ox doctor`; or
 // prime rewrites settings.local.json on every session start; or it replaces a
 // coworker's own status line; or a sync failure is printed where the hook pipes
-// it into the AI coworker's context on every session start.
+// it into the AI teammate's context on every session start.
 func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 	const foreign = `{"statusLine":{"type":"command","command":"~/bin/my-status.sh"},"model":"opus"}`
 
@@ -216,7 +216,7 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 			}
 			require.Equal(t, tt.detected, detectClaudeCode())
 
-			// prime's stdout and stderr both reach the AI coworker's context
+			// prime's stdout and stderr both reach the AI teammate's context
 			// (hooks run it with 2>&1); its slog WARNs go to a file instead.
 			logs := captureSlog(t, slog.LevelWarn)
 
@@ -230,8 +230,8 @@ func TestEnsureClaudeHooks_SyncsStatusLineWhenHooksPresent(t *testing.T) {
 			run.logs = logs.String()
 
 			assert.False(t, installed, "hooks were already installed, so none are newly installed")
-			assert.Empty(t, string(stdout), "nothing may reach the AI coworker's context on stdout")
-			assert.Empty(t, stderr, "nothing may reach the AI coworker's context on stderr")
+			assert.Empty(t, string(stdout), "nothing may reach the AI teammate's context on stdout")
+			assert.Empty(t, stderr, "nothing may reach the AI teammate's context on stderr")
 			tt.check(t, run)
 		})
 	}

@@ -337,7 +337,7 @@ func TestClassify_MarksOnlySessionHoldsAsDeferrals(t *testing.T) {
 	require.Len(t, held, 1)
 	require.Equal(t, StatePending, held[0].State)
 	require.Equal(t, DeferralActiveSession, held[0].Deferral)
-	require.Equal(t, "active AI coworker session keeps the current skill snapshot stable", held[0].Detail,
+	require.Equal(t, "active AI teammate session keeps the current skill snapshot stable", held[0].Detail,
 		"the message every report and pending record carries must not change")
 
 	busy := classify(Snapshot{}, items, nil, errors.New("projection lock is busy"))

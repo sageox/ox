@@ -80,7 +80,7 @@ tests:
     install:
       - copy-ox-login.sh
       - seed-ox-init.sh
-    # The README's own first example question to an AI coworker.
+    # The README's own first example question to an AI teammate.
     prompt: >-
       What did we decide about the daemon design, and who worked on it?
       What's installed on PATH is the build under test; don't reinstall or

@@ -115,7 +115,7 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 // rows, which share one repo policy: each row must still apply its own
 // recording's saved publishing mode.
 //
-// Failure prevented: with two AI coworkers recording, the one held on this
+// Failure prevented: with two AI teammates recording, the one held on this
 // machine reports "pending" or prints a dead /c/ link (or the other one loses
 // its link) because the rows were decided from the repo setting alone.
 func TestRunSessionStatus_DraftStatePerRecording(t *testing.T) {

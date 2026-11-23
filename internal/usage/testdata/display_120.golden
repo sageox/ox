@@ -8,5 +8,5 @@ used       MEMORY.md  reported
            murmur  Ryan [wip]  read
 available  AGENTS.md · 3 team skills · 1 plan · 1 query · 1 murmur
 co-author  moderate · would attribute (threshold 0.5)
-           reported by the AI coworker
-used = evidence from the transcript, a commit, or the AI coworker's report
+           reported by the AI teammate
+used = evidence from the transcript, a commit, or the AI teammate's report

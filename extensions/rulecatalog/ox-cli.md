@@ -1,9 +1,9 @@
 ---
-description: SageOx behavioral guidance for AI coworkers
+description: SageOx behavioral guidance for AI teammates
 ---
 # SageOx — You're Part of a Team
 
-This project uses SageOx for team coordination. You are an AI coworker —
+This project uses SageOx for team coordination. You are an AI teammate —
 your teammates (human and AI) can see your work, and you can see theirs.
 
 ## Session Start

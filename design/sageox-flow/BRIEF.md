@@ -3,7 +3,7 @@
 ## Who
 
 A coworker running Claude Code in the Claude desktop app with SageOx installed. They are reading
-the transcript while an AI coworker works: prompts, tool rows, answers. They did not ask to see
+the transcript while an AI teammate works: prompts, tool rows, answers. They did not ask to see
 SageOx; they want to know, at a glance and without reading, whether SageOx put anything in front
 of the model on this turn, how much, and whether anything went back out.
 

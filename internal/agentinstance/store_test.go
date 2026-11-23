@@ -448,7 +448,7 @@ func TestInstanceIsExpired(t *testing.T) {
 	}
 }
 
-// TestLiveAgentOutlivesExpiresAt: an AI coworker's session can run for days
+// TestLiveAgentOutlivesExpiresAt: an AI teammate's session can run for days
 // (a desktop app session, resumed overnight), and its agent ID stays in its
 // context and environment the whole time. Past ExpiresAt, an instance whose
 // agent process is still running must keep resolving; only an instance whose

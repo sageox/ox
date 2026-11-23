@@ -201,7 +201,7 @@ func TestMurmurListPositionalTopicArg(t *testing.T) {
 //
 // Failure prevented: file-changes murmurs (auto-published by the daemon for
 // AI collision detection) leaking into human terminal output as noise, and
-// the converse — silently hiding them from JSON consumers (AI coworkers)
+// the converse — silently hiding them from JSON consumers (AI teammates)
 // who need the full picture.
 
 func TestShouldHideFileChanges(t *testing.T) {
@@ -301,7 +301,7 @@ func TestMurmurListShowFileChangesFlagRegistered(t *testing.T) {
 }
 
 // TestMurmurListJSON_FileChangesNeverHidden documents the contract that
-// JSON output is unaffected by --show-file-changes. AI coworkers consuming
+// JSON output is unaffected by --show-file-changes. AI teammates consuming
 // the JSON path need the full data set regardless of human-facing flags.
 // This test asserts the property via the JSON entry shape (Topic field
 // preserved through marshal/unmarshal); the actual JSON-path behavior in

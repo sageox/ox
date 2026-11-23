@@ -17,17 +17,17 @@ import (
 )
 
 // ErrSessionHold matches (errors.Is) a convergence that automatic mode deferred
-// because a live AI coworker session is using the current projection. That is
+// because a live AI teammate session is using the current projection. That is
 // the designed steady state while anyone is working, so callers report it as a
 // deferral, never as a failure (ox#1242).
-var ErrSessionHold = errors.New("active AI coworker session holds the current snapshot")
+var ErrSessionHold = errors.New("active AI teammate session holds the current snapshot")
 
 // sessionHoldError keeps the message every report and pending record already
 // carries while letting callers recognize the hold without parsing it.
 type sessionHoldError struct{ snapshot string }
 
 func (e sessionHoldError) Error() string {
-	return "active AI coworker session keeps the current " + e.snapshot + " snapshot stable"
+	return "active AI teammate session keeps the current " + e.snapshot + " snapshot stable"
 }
 
 func (sessionHoldError) Is(target error) bool { return target == ErrSessionHold }

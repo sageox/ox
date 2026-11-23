@@ -82,7 +82,7 @@ func applyMetadata(p *VizPattern) {
 const conceptualClarityGuidance = "Conceptual clarity comes first: preserve the reader's simplest truthful mental model, and prefer prose, a table, or GitHub-safe Mermaid whenever it makes the primary relationship faster to understand. Rich styling must reveal information the simpler baseline cannot—not reorganize an already-clear idea."
 
 // guidanceByID is deliberately separate from the primitive snippets. A
-// primitive says how to draw a form; this tells an AI coworker what to make
+// primitive says how to draw a form; this tells an AI teammate what to make
 // dominant, what to omit, and the perceptual failure mode to avoid. Every
 // catalog entry must have one (enforced by TestCatalogMetadataComplete).
 var guidanceByID = map[string]string{

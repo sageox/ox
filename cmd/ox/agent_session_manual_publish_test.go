@@ -74,7 +74,7 @@ func (a *blockingStopCodexAdapter) ReadFromOffset(path string, offset int64) ([]
 
 func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
 	// The test binary may itself run inside Codex, Claude Code, or another AI
-	// coworker. Do not let that ambient session identity make
+	// teammate. Do not let that ambient session identity make
 	// ensurePrimeBeforeSession recursively execute the test binary as `ox`.
 	for _, key := range []string{
 		"AMP_THREAD_URL",
@@ -357,7 +357,7 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 
 	// (g) The session is held on this machine (GH #1093): the hold travels
 	// with the session data, nothing invites the daemon (.needs-summary) or
-	// the AI coworker (summary prompt) to summarize and publish it, and
+	// the AI teammate (summary prompt) to summarize and publish it, and
 	// nothing reaches the team's memory.
 	require.True(t, session.IsHeld(sessionDir), "a manual stop must hold the session it saved: %s", sessionDir)
 	require.NoFileExists(t, filepath.Join(sessionDir, ".needs-summary"), "a held session must not invite summarization")

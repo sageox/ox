@@ -9,7 +9,7 @@ import (
 const marker = HiddenTextMarker
 
 // Failure prevented: text a person cannot see on GitHub (HTML comments,
-// zero-width and bidi characters) reaching an AI coworker's context.
+// zero-width and bidi characters) reaching an AI teammate's context.
 func TestCleanup(t *testing.T) {
 	tests := []struct {
 		name        string

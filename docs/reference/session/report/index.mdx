@@ -10,12 +10,12 @@ Show what SageOx gave this session
 
 ### Synopsis
 
-Show what SageOx gave this session: the ox calls your AI coworker made, how
+Show what SageOx gave this session: the ox calls your AI teammate made, how
 much context ox put in front of the model (estimated tokens), what it read by
 title (with sageox.ai links where one exists), and which items have evidence
 they were used. Murmurs are listed only when they were useful.
 
-When called by an AI coworker it emits JSON with a pre-rendered display and
+When called by an AI teammate it emits JSON with a pre-rendered display and
 guidance; in a bare terminal it prints the same report. --me rolls up your
 recent sessions; --team shows a team-wide aggregate only — never who did what.
 
@@ -33,7 +33,7 @@ ox session report [flags]
   ox session report --session <name>    # a recorded session in the Ledger
   ox session report --me --since 14d    # your recent sessions, one row each
   ox session report --team              # team-wide aggregate (no per-person data)
-  ox session report --json              # structured report for AI coworkers
+  ox session report --json              # structured report for AI teammates
   ox session report --json --recent 0   # every ox call in calls.recent
 ```
 
@@ -41,7 +41,7 @@ ox session report [flags]
 
 ```
   -h, --help             help for report
-      --json             structured JSON report for AI coworkers
+      --json             structured JSON report for AI teammates
       --limit int        maximum sessions for --me (default 10)
       --me               roll up your recent sessions, one row each
       --recent int       session view: ox calls listed in the JSON calls.recent (0 = all) (default 10)
@@ -64,5 +64,5 @@ ox session report [flags]
 
 ### SEE ALSO
 
-* [ox session](/session)	 - Manage AI coworker sessions
+* [ox session](/session)	 - Manage AI teammate sessions
 * [ox session report pane](/session/report/pane)	 - Show this session's ox calls in a Claude Code pane

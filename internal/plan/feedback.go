@@ -207,7 +207,7 @@ func ContestedAnchors(items []MergedItem) map[string]bool {
 	return contested
 }
 
-// ReviewTextGuidance tells the plan's AI coworker how to read what reviewers
+// ReviewTextGuidance tells the plan's AI teammate how to read what reviewers
 // wrote. A reviewer can put instructions aimed at the coworker in a note, so
 // the digest prints this above the items and the JSON outputs carry it as
 // guidance.

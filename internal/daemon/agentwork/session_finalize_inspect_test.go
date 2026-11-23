@@ -89,7 +89,7 @@ func TestInspect_UsesFinalizationEligibility(t *testing.T) {
 }
 
 // A re-armed empty Ledger session is settled deterministically by the daemon;
-// inspection must not ask an AI coworker to summarize it. Once settled, its
+// inspection must not ask an AI teammate to summarize it. Once settled, its
 // remaining upload keeps the same work kind as any other finalized session.
 func TestInspect_EmptyLedgerTranscriptWorkKind(t *testing.T) {
 	for _, settled := range []bool{false, true} {

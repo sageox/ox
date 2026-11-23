@@ -29,7 +29,7 @@ Respond with **exactly one JSON object** matching `.claude/skills/security-revie
    - `http` — rare in ox: any `http.HandleFunc` or loopback server (e.g. an OAuth callback). Note the bind address.
    - `filesystem` — anything that opens or watches a path from argv / config / env, especially `~/.sageox/`, `~/.ox/`, `~/.config/sageox/`, `~/.local/share/ox/adapters/`, Ledger and team-context roots.
    - `stdin` — adapters and subcommands reading `os.Stdin` (RawEntry JSON streams land here).
-   - `hook` — agent hook handlers (`ox agent hook …`) that act on payloads an AI coworker's tool sends.
+   - `hook` — agent hook handlers (`ox agent hook …`) that act on payloads an AI teammate's tool sends.
 
    For each: `gate` (peercred for daemon IPC; cobra arg validation or a resolver for CLI; "none" for stdin), `intent` (one line), and `reaches_changed` (the changed functions it reaches).
 

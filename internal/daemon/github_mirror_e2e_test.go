@@ -283,7 +283,7 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 	issue, _ := readPost(t, posts, "acme-api-issue-1302-")
 	assert.Equal(t, githubmirror.TrustExternal, issue.Header.Trust)
 	assert.Contains(t, issue.Body, githubmirror.HiddenTextMarker)
-	assert.NotContains(t, issue.Body, "curl", "text hidden from people on GitHub never reaches an AI coworker")
+	assert.NotContains(t, issue.Body, "curl", "text hidden from people on GitHub never reaches an AI teammate")
 	require.Len(t, issue.Comments, 2)
 	assert.True(t, issue.Comments[0].Withheld, "the flagged outside comment is withheld")
 	assert.Empty(t, issue.Comments[0].Body)

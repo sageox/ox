@@ -1,6 +1,6 @@
 Feature: Status Line Counts Team Context Without a Recording
   Devon watches the ox status line in Claude Code to see how much Team Context
-  shaped their session. The line counts the plans and discussions their AI coworker
+  shaped their session. The line counts the plans and discussions their AI teammate
   read and the ones it reported using whether or not the session is recording,
   so a session that is primed but not recorded no longer looks as if nothing was
   used. When ox cannot tell which session a use belongs to, it counts nothing
@@ -10,7 +10,7 @@ Feature: Status Line Counts Team Context Without a Recording
   See also: session-recording/auto-record.feature
   See also: priming/prime-session.feature
 
-  Rule: A session that is not recording counts the Team Context its AI coworker reads and reports using
+  Rule: A session that is not recording counts the Team Context its AI teammate reads and reports using
 
     Scenario: Devon sees a plan counted as read and used in a session that is not recording
       Given Devon's session is primed but not recording
@@ -57,10 +57,10 @@ Feature: Status Line Counts Team Context Without a Recording
       Then the status line shows "1 plan · 1 used  ● rec"
       And later reads and uses add to those counts
 
-  Rule: When two sessions share one AI coworker, a reported use is counted on neither line
+  Rule: When two sessions share one AI teammate, a reported use is counted on neither line
 
     Scenario: Devon sees neither status line count a use ox cannot place
-      Given Devon has two Claude Code sessions open that share one AI coworker
+      Given Devon has two Claude Code sessions open that share one AI teammate
       And neither session is recording
       When Avery reports using one of the team's plans
       Then neither session's status line counts the use

@@ -1,6 +1,6 @@
 # Business Action: Prime a Session
 
-**Actor:** An AI coworker (e.g., Avery)
+**Actor:** An AI teammate (e.g., Avery)
 **Goal:** Start a session with the team's full context and recording underway
 **Preconditions:**
 - The repo is initialized for the team

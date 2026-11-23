@@ -53,7 +53,7 @@ makes the artifact checkable by someone who does not trust the machine that prod
 and it means a byte difference between two publishes of one export is a real signal, not
 noise.
 
-## For AI coworkers
+## For AI teammates
 
 - Never offer to "regenerate" or "rebuild" an Attest report from the repository. That is
   the one thing this command exists to refuse.

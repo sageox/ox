@@ -11,7 +11,7 @@ import (
 )
 
 // TestPrintJSONTo_PipedOutputIsByteExactJSON is the load-bearing one: an AI
-// coworker or `jq` reading a piped `--json` payload must receive parseable
+// teammate or `jq` reading a piped `--json` payload must receive parseable
 // bytes with no escape sequence anywhere.
 //
 // Failure prevented: a colorized payload reaching a parser, which fails with
@@ -146,7 +146,7 @@ func TestEndOfJSONString(t *testing.T) {
 
 // TestMarshalJSONIndent_IsAlwaysPlainAndNewlineTerminated pins the contract the
 // measuring callers depend on: the bytes they count are the bytes an AI
-// coworker consumes, never a colorized variant, and there is exactly one
+// teammate consumes, never a colorized variant, and there is exactly one
 // trailing newline whether the old site used MarshalIndent (adds none) or
 // Encoder.Encode (adds one).
 //

@@ -1,6 +1,6 @@
 # Pattern · Session timeline
 
-How a recorded AI coworker session renders in `ox session view` and the dashboard.
+How a recorded AI teammate session renders in `ox session view` and the dashboard.
 
 ## Composition
 

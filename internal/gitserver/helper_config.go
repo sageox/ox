@@ -200,18 +200,18 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 }
 
 // LedgerAuthorGetter reports who authors the commits ox makes in a clone whose
-// origin is remoteURL: the AI coworker a team token acts as, else the SageOx
+// origin is remoteURL: the AI teammate a team token acts as, else the SageOx
 // account signed in, on that clone's git server. Both are "" when neither
 // applies there. Set by cmd/ox, which can reach auth, identity and user
 // config. Nil reads as nobody.
 var LedgerAuthorGetter func(remoteURL string) (name, email string)
 
-// coworkerEmailDomain ends an AI coworker's git address. ".invalid" (RFC 2606)
+// coworkerEmailDomain ends an AI teammate's git address. ".invalid" (RFC 2606)
 // never resolves, so the address belongs to no one. Stamps written before
 // authorStampKey existed are recognized by it.
 const coworkerEmailDomain = "@ai-coworker.invalid"
 
-// CoworkerEmail is the git address of the AI coworker whose agt_ id is id.
+// CoworkerEmail is the git address of the AI teammate whose agt_ id is id.
 func CoworkerEmail(id string) string { return id + coworkerEmailDomain }
 
 // authorStampKey records the identity ox wrote into a repository's local
@@ -263,7 +263,7 @@ func stampLedgerAuthor(repoPath, remoteURL string) error {
 }
 
 // StampProjectAuthor makes name and email the commit identity of the person's
-// repository at repoPath, so an AI coworker working there commits as itself,
+// repository at repoPath, so an AI teammate working there commits as itself,
 // or, with email "", removes an identity ox stamped there earlier. The
 // repository is the person's: an identity someone else set in its local
 // config is never replaced or removed.

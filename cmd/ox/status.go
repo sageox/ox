@@ -1578,7 +1578,7 @@ func buildAgentWorkerJSON() *status.AgentWorkerJSON {
 	}
 }
 
-// renderAICoworkersSection renders a one-line summary of active AI coworkers.
+// renderAICoworkersSection renders a one-line summary of active AI teammates.
 // Detail belongs in `ox agent list`.
 func renderAICoworkersSection(client *daemon.Client) string {
 	if client == nil {
@@ -1598,7 +1598,7 @@ func renderAICoworkersSection(client *daemon.Client) string {
 
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(statusLabelStyle.Render("AI Coworkers"))
+	b.WriteString(statusLabelStyle.Render("AI Teammates"))
 
 	total := len(instances)
 	if active == total {
@@ -1981,7 +1981,7 @@ func renderStatusHumanOutput(cwd, gitRoot string, projectInitialized bool,
 		// show daemon sync section
 		fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
 
-		// show active AI coworkers with context stats
+		// show active AI teammates with context stats
 		fmt.Print(renderAICoworkersSection(client))
 
 		// show pending scheduled agent tasks, if any
@@ -2182,7 +2182,7 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		}
 	}
 
-	// daemon section + AI coworkers — use pre-fetched data to avoid a second
+	// daemon section + AI teammates — use pre-fetched data to avoid a second
 	// ping that could race with the first and produce contradictory output
 	if gitRoot != "" {
 		output.Daemon = &statusDaemonJSON{}
@@ -2198,7 +2198,7 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		output.Daemon.AgentWorker = buildAgentWorkerJSON()
 
 		if daemonClient != nil {
-			// AI coworkers with context stats (per-source split included)
+			// AI teammates with context stats (per-source split included)
 			if instances, err := daemonClient.Instances(); err == nil && len(instances) > 0 {
 				for _, inst := range instances {
 					output.AICoworkers = append(output.AICoworkers, statusAICoworkerJSON{

@@ -59,7 +59,7 @@ func TestFetchAndRenderRoster_JSONContract(t *testing.T) {
 }
 
 // TestFetchAndRenderRoster_JSONEnvelopeStable — Failure prevented: a JSON
-// consumer (often an AI coworker) can't rely on a single shape because success
+// consumer (often an AI teammate) can't rely on a single shape because success
 // emits `members:null` / omits `available` while degrade emits `members:[]`.
 // Both paths must carry the same keys: members is always an array, available is
 // always present.

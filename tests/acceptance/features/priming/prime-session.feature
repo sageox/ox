@@ -1,4 +1,4 @@
-Feature: Priming an AI Coworker Session
+Feature: Priming an AI Teammate Session
   At the start of a session, Avery runs `ox agent prime` to load the team's
   shared context and start recording. Priming pulls in conventions, decisions,
   and expert coworkers, issues an agent ID for the session, and begins the

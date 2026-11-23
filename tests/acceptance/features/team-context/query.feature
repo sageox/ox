@@ -32,6 +32,6 @@ Feature: Searching Team Knowledge
   Rule: Query results are usable by both humans and tooling
 
     Scenario: Avery queries for machine-readable results in-session
-      Given Avery is querying from within an AI-coworker session
+      Given Avery is querying from within an AI-teammate session
       When she runs a query
       Then ox returns the results as structured data she can act on

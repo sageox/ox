@@ -117,7 +117,7 @@ func TestFormatTraceTimestamp(t *testing.T) {
 
 // TestViewContextTrace_CountsInvokedSeparately mixes old event types with the
 // new `invoked` ox-call events. Failure prevented: every ox call the AI
-// coworker made is counted (and listed) as "provided context", inflating what
+// teammate made is counted (and listed) as "provided context", inflating what
 // the session view says reached the coworker.
 func TestViewContextTrace_CountsInvokedSeparately(t *testing.T) {
 	t.Parallel()

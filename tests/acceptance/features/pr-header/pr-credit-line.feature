@@ -1,5 +1,5 @@
 Feature: A SageOx Credit Line on a Pull Request
-  When Devon opens a pull request for work an AI coworker did, ox gives him a
+  When Devon opens a pull request for work an AI teammate did, ox gives him a
   thin one-line credit to paste at the TOP of the PR description — the
   human-facing counterpart to the SageOx-Session: trailer at the bottom. The line
   links the session(s), plan(s), and recorded discussion(s) that produced the
@@ -14,7 +14,7 @@ Feature: A SageOx Credit Line on a Pull Request
   Rule: The credit line links the work that produced the PR
 
     Scenario: Devon asks for the credit line on a session that made a plan
-      Given Devon's AI coworker recorded a session and saved a plan
+      Given Devon's AI teammate recorded a session and saved a plan
       When Devon asks ox for the PR header
       Then the line names Devon's team
       And the line links to the session

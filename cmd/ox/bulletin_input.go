@@ -359,7 +359,7 @@ func bulletinCheckContent(content []byte, source string) error {
 
 // bulletinShouldConfirm decides whether to show the preview and ask before
 // publishing. --yes, --json, and a non-interactive terminal each skip it: AI
-// coworkers always pass --json, so they are never prompted.
+// teammates always pass --json, so they are never prompted.
 func bulletinShouldConfirm(yes, jsonOutput, interactive bool) bool {
 	return !yes && !jsonOutput && interactive
 }

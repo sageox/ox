@@ -1,7 +1,7 @@
 # Agent Task Scheduling
 
 Internal mechanism for scheduling units of work that the **next available AI
-coworker** picks up and executes — typically as a fresh-context subagent. The
+teammate** picks up and executes — typically as a fresh-context subagent. The
 work is about a developer's **own existing sessions and data**: finalizing
 incomplete recordings, summarizing recorded sessions, doctor repairs, anti
 -entropy. It replaces ad-hoc one-off signals (the `.needs-doctor-agent` file

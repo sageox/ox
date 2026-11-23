@@ -364,7 +364,7 @@ func renderKBQueryGroup(w io.Writer, group *api.KBSearchGroup, dimStyle, warnSty
 	}
 }
 
-// kbQueryGuidance tells an AI coworker how to act on the result. Statuses
+// kbQueryGuidance tells an AI teammate how to act on the result. Statuses
 // are restated because they are load-bearing: collapsing empty/not_indexed
 // into "no results" is exactly the misreport this command is designed to
 // prevent.

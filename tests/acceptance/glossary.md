@@ -8,26 +8,26 @@ come from SageOx's product vocabulary — use these exact names.
 
 **ox** — The SageOx command-line tool. It makes a team's architectural
 decisions, conventions, and session history automatically available to AI
-coworkers, so every coding session starts with the full picture instead of from
+teammates, so every coding session starts with the full picture instead of from
 zero.
 
 **Coworker** — Any member of a team, human or AI. The umbrella term.
 
-**AI Coworker** — An AI participant on a team: a coding agent running in a
-session. User-facing copy always says "AI coworker", never bare "agent".
+**AI Teammate** — An AI participant on a team: a coding agent running in a
+session. User-facing copy always says "AI teammate", never bare "agent".
 (`agent` remains fine in internal contexts — CLI subcommands like
 `ox agent prime`, variable names, logs.)
 
 **Team Context** — The shared knowledge base for a team: norms, conventions,
 architectural decisions, expert coworkers, and distilled discussions. Loaded
-into a session at prime time so the AI coworker reasons with the team's
+into a session at prime time so the AI teammate reasons with the team's
 accumulated judgment, not just the code in front of it.
 
 **Ledger** — The historical record of work, decisions, and discussions on a
 specific repo. Sessions, plans, and murmurs are written here. Stored as a git
 repo so it travels with the team and syncs across machines.
 
-**Session** — A human-to-AI-coworker conversation or plan recording. Sessions
+**Session** — A human-to-AI-teammate conversation or plan recording. Sessions
 auto-record when `ox agent prime` runs and finalize when the work ends, landing
 a summarized record in the Ledger that future coworkers can recall.
 
@@ -37,7 +37,7 @@ team), **repo** (scoped to one repository), and **custom**. `ox kb list`
 surfaces every bubble a coworker can access, including legacy Team Contexts and
 Ledgers during the migration window.
 
-**Murmur** — A short-lived coordination signal one AI coworker publishes for
+**Murmur** — A short-lived coordination signal one AI teammate publishes for
 other coworkers on the same repo or team. Murmurs carry a topic, an importance
 (critical / normal / ambient), and optionally the files being touched. They
 expire after 24 hours. Durable team rules belong in Team Context, not murmurs.
@@ -47,7 +47,7 @@ delivered as a whisper into other coworkers' active sessions, so teammates stay
 in sync without interrupting each other.
 
 **Priming** — Running `ox agent prime` to load Team Context, start session
-recording, and register the AI coworker for a session. Done at session start,
+recording, and register the AI teammate for a session. Done at session start,
 after context compaction, and after a context clear.
 
 **Plan Enrichment** — Folding deterministic SageOx team-context signals
@@ -79,7 +79,7 @@ feedback inline, auto-reloads as the plan changes, and tracks open items until
 they are resolved or the plan is approved.
 
 **Plan-mode hint** — A just-in-time, once-per-entry nudge that fires while an AI
-coworker is drafting in plan mode, reminding it to fold in
+teammate is drafting in plan mode, reminding it to fold in
 `ox plan enrich` team context *before* presenting. It fires once per plan-mode
 entry and re-arms when plan mode is re-entered.
 
@@ -107,7 +107,7 @@ defense.
 initialization, sync state, and daemon health for the current repo.
 
 **ox prime marker** — The line in a repo's agent instructions that tells an AI
-coworker to run `ox agent prime` at session start. `ox init` injects it; `ox
+teammate to run `ox agent prime` at session start. `ox init` injects it; `ox
 doctor` repairs it if it goes missing.
 
 **Stub vs. local** — A session or plan whose heavy content lives out-of-band
@@ -116,5 +116,5 @@ doctor` repairs it if it goes missing.
 
 **Code Intelligence** — `ox code search` (symbols, git history, diffs) and `ox
 code insights` (hotspots, open PRs, contention risk). Used before planning so an
-AI coworker plans against the live shape of the codebase, not a stale mental
+AI teammate plans against the live shape of the codebase, not a stale mental
 model.

@@ -132,7 +132,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("You are connected to SageOx, which provides team context and session recording.\n")
 		sb.WriteString("SageOx has two SEPARATE knowledge sources:\n")
 		sb.WriteString("(1) TEAM CONTEXT: team-wide meetings, architecture decisions, conventions (shared across ALL repos)\n")
-		sb.WriteString("(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions (THIS repo only)\n")
+		sb.WriteString("(2) SESSIONS/LEDGER: repo-specific archive of prior AI teammate coding sessions (THIS repo only)\n")
 		sb.WriteString("These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.\n")
 		sb.WriteString("When you find relevant prior sessions or discussions, attribute insights to teammates by name:\n")
 		sb.WriteString("- \"SageOx found [name]'s session on [topic] — they solved a similar problem by...\"\n")
@@ -462,7 +462,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			// team bulletin board — a pointer and the reading rules, nothing
 			// else. No rows and no bodies: posts are teammates' unreviewed,
 			// time-limited notes, and prime must never copy one into an AI
-			// coworker's standing context. Emitted whenever the board folder
+			// teammate's standing context. Emitted whenever the board folder
 			// exists, independent of the docs catalog above. The framing is
 			// ours; the path is one line, so the whole element is charged to
 			// the sageox bucket. Attribute values, so escapeXML (quotes too).
@@ -513,7 +513,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// ledger info
 		if output.Ledger != nil && output.Ledger.Exists {
 			sb.WriteString("\n<ledger>\n")
-			sb.WriteString("Repo-specific archive of prior AI coworker coding sessions.\n")
+			sb.WriteString("Repo-specific archive of prior AI teammate coding sessions.\n")
 			sb.WriteString("NOT team context. Use `ox session list` to browse, `ox session view &lt;name&gt; --text` to view.\n")
 			sb.WriteString("Do not read ledger files directly (LFS stubs).\n")
 			sb.WriteString("</ledger>\n")
@@ -896,7 +896,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 
-// writeVisualizationGuidance gives every AI coworker the same portable visual
+// writeVisualizationGuidance gives every AI teammate the same portable visual
 // vocabulary, independent of whether it uses SageOx enriched plans.
 func writeVisualizationGuidance(sb *strings.Builder) {
 	sb.WriteString("\n<visualization-guidance>\n")
@@ -1034,7 +1034,7 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 		}
 	}
 
-	sb.WriteString("\n<team-rules hint=\"agents/rules/&lt;topic&gt;.md — modular AI-coworker rules. See `ox guide team-rules`.\">\n")
+	sb.WriteString("\n<team-rules hint=\"agents/rules/&lt;topic&gt;.md — modular AI-teammate rules. See `ox guide team-rules`.\">\n")
 	bk.charge(prime.BudgetSourceSageox)
 
 	// always-tier rules: framing is ours, body+name+desc+path are team's

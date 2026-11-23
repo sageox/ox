@@ -25,7 +25,7 @@ logic are in [`cmd/ox-adapter-codex/hooks.go`](../../cmd/ox-adapter-codex/hooks.
 | `Stop` | SageOx: saving turns and plans; publishing drafts if configured | Drains recording entries, counts the completed turn, registers the session link and publishes draft metadata according to publishing policy, and saves a completed Codex `<proposed_plan>` through the plan capture path. It prints nothing unless a [flow lane](#flow-lanes) could not be shown under its call. It does not end the recording. |
 | `SessionEnd` | SageOx: finalizing recordings; publishing if configured | Stops an active recording and finalizes it directly or hands it to the daemon. Publishing follows configuration; manual publishing holds the recording locally. Repeated calls are safe when the recording is already stopped. |
 
-Active phases also send a heartbeat to the local daemon when an AI coworker ID
+Active phases also send a heartbeat to the local daemon when an AI teammate ID
 is available. The inactive pre-tool phase exits before that step. All hooks
 exit quietly if SageOx is not initialized. A label does not change any of these
 behaviors.

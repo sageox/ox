@@ -219,7 +219,7 @@ func runQuietPrime(t *testing.T, threadURL string) prime.Output {
 }
 
 // The bridge's quiet re-prime is a real prime: it reuses the thread's AI
-// coworker, links the new session as continued from the one that ended,
+// teammate, links the new session as continued from the one that ended,
 // starts it at the reply's prompt, and says it is recording, which is all
 // ox-bridge.ts reads from it.
 func TestAgentPrime_AmpQuietRePrimeContinuesTheThread(t *testing.T) {
@@ -235,7 +235,7 @@ func TestAgentPrime_AmpQuietRePrimeContinuesTheThread(t *testing.T) {
 
 	require.NotNil(t, out.Session, "prime must report the recording")
 	assert.True(t, out.Session.Recording, "ox-bridge.ts counts the resume only when prime says it records")
-	assert.Equal(t, f.agentID, out.AgentID, "the thread keeps its AI coworker")
+	assert.Equal(t, f.agentID, out.AgentID, "the thread keeps its AI teammate")
 	second, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
 	require.NoError(t, err)
 	require.NotNil(t, second)

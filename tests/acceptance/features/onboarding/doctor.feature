@@ -24,7 +24,7 @@ Feature: Diagnosing and Repairing with ox doctor
       Given the prime marker is missing from the repo's agent instructions
       When Devon runs `ox doctor`
       Then ox detects the missing marker
-      And ox restores it so AI coworkers prime at session start
+      And ox restores it so AI teammates prime at session start
 
     Scenario: Doctor repairs a misconfigured endpoint
       Given the repo's stored endpoint carries a subdomain prefix that should be normalized

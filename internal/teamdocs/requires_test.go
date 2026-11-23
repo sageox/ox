@@ -230,7 +230,7 @@ func TestFrontmatter_ByteOrderMarkIsReadThrough(t *testing.T) {
 		byName[s.Name] = s
 	}
 	require.NotContains(t, byName, "draft", "a BOM hid status: draft and the draft was published")
-	require.NotContains(t, byName, "people", "a BOM hid audience: human and it was published to AI coworkers")
+	require.NotContains(t, byName, "people", "a BOM hid audience: human and it was published to AI teammates")
 
 	scoped := byName["scoped"]
 	require.Equal(t, "Only for api.", scoped.Description)

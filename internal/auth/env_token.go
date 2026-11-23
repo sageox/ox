@@ -236,7 +236,7 @@ func ReauthenticationRemedy(ep string) string {
 	return "Run 'ox login' to re-authenticate."
 }
 
-// Coworker is the AI coworker a team token acts as, as introspection names it.
+// Coworker is the AI teammate a team token acts as, as introspection names it.
 type Coworker struct {
 	ID          string `json:"id"`           // agt_…
 	DisplayName string `json:"display_name"` // the coworker's name in SageOx; may be empty
@@ -268,11 +268,11 @@ func isCoworkerID(id string) bool {
 }
 
 // ErrNoCoworker reports that the server says the team token in SAGEOX_TOKEN has
-// no AI coworker attached. Recording and murmurs refuse it rather than file
+// no AI teammate attached. Recording and murmurs refuse it rather than file
 // the work under the git identity of whatever machine runs ox.
-var ErrNoCoworker = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is a team token with no AI coworker attached: attach an AI coworker to the token in SageOx, or unset SAGEOX_TOKEN to use your own login")
+var ErrNoCoworker = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is a team token with no AI teammate attached: attach an AI teammate to the token in SageOx, or unset SAGEOX_TOKEN to use your own login")
 
-// TeamCoworker returns the AI coworker that the team token in SAGEOX_TOKEN acts
+// TeamCoworker returns the AI teammate that the team token in SAGEOX_TOKEN acts
 // as for ep. identity.ResolveAttribution, GetUserID and GetUsername attribute
 // work to it.
 //
@@ -301,7 +301,7 @@ func TeamCoworker(ep string) (*Coworker, error) {
 }
 
 // CachedTeamCoworker is TeamCoworker without asking the server: the AI
-// coworker this machine last learned the team token at ep acts as, however old
+// teammate this machine last learned the team token at ep acts as, however old
 // that answer is. known is false only when a team token's metadata was never
 // fetched here, so the caller cannot tell. Any other credential has no
 // coworker, which is known without asking.

@@ -25,7 +25,7 @@ import (
 const tokenMetaCacheTTL = 1 * time.Hour
 
 // noCoworkerTTL replaces tokenMetaCacheTTL for an answer that a team token
-// has no AI coworker. Recording and murmurs refuse on that answer, and the
+// has no AI teammate. Recording and murmurs refuse on that answer, and the
 // operator's fix is to attach a coworker in SageOx; serving the refusal from
 // cache for an hour would keep refusing after the fix. While the server cannot
 // be reached, the stale answer stands (FetchTokenMetaCached falls back to it)
@@ -44,7 +44,7 @@ const tokenMetaCacheFile = "token_meta.json"
 
 // TokenMeta is the subset of /api/v1/auth/me fields ox needs to drive the
 // expiry-warning UX — or, for a team token, of the introspection answer, which
-// also names the AI coworker the token acts as. ExpiresAt is a pointer so
+// also names the AI teammate the token acts as. ExpiresAt is a pointer so
 // "never expires" (server returns null) round-trips as nil — IsZero on
 // time.Time is ambiguous with the zero-time sentinel used elsewhere in
 // storage.go.
@@ -65,12 +65,12 @@ type TokenMeta struct {
 	// Name is the human-friendly label the user gave the token.
 	Name string `json:"name,omitempty"`
 
-	// Coworker is the AI coworker a team token acts as. Nil unless the server
+	// Coworker is the AI teammate a team token acts as. Nil unless the server
 	// named one.
 	Coworker *Coworker `json:"coworker,omitempty"`
 
 	// NoCoworker records the server answering "coworker": null for a team
-	// token: no AI coworker is attached. False when the server's answer has no
+	// token: no AI teammate is attached. False when the server's answer has no
 	// coworker field at all.
 	NoCoworker bool `json:"no_coworker,omitempty"`
 
@@ -295,7 +295,7 @@ func fetchTokenMetaFromServer(ctx context.Context, ep, token string) (*TokenMeta
 }
 
 // fetchTeamTokenMeta introspects a team token: introspection is the answer
-// that names the AI coworker the token acts as.
+// that names the AI teammate the token acts as.
 func fetchTeamTokenMeta(ctx context.Context, ep, token string) (*TokenMeta, error) {
 	res, err := introspect(ctx, ep, token)
 	if err != nil {

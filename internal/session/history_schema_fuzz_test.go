@@ -6,7 +6,7 @@ import (
 )
 
 // FuzzParseHistoryEntry exercises the untrusted JSONL boundary shared by
-// imported planning history and reconstructed AI coworker sessions. Successful
+// imported planning history and reconstructed AI teammate sessions. Successful
 // parses must classify a line as exactly one shape, and that classification
 // must survive a JSON round trip.
 func FuzzParseHistoryEntry(f *testing.F) {

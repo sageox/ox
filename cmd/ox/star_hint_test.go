@@ -291,7 +291,7 @@ func TestStarHint_PrintsOnceWhenEligible(t *testing.T) {
 
 // --- who never sees it ---
 
-// Failure prevented: the ask lands in machine output, an AI coworker's
+// Failure prevented: the ask lands in machine output, an AI teammate's
 // transcript, automation, or a credential that has no person behind it.
 func TestStarHint_SilentWhenNobodyIsReading(t *testing.T) {
 	tests := []struct {

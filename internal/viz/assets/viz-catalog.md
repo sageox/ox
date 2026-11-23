@@ -3,7 +3,7 @@
      cognitive payoff — what it lets the reader grasp faster), then one or more
      copy-paste snippets. Snippets use the scaffold's CSS variables / classes
      (assets/scaffold.css) so they render design-faithfully and theme with the
-     page. Surfaced progressively via `ox viz [id]` — the AI coworker lists the
+     page. Surfaced progressively via `ox viz [id]` — the AI teammate lists the
      catalog cheaply, then pulls only the patterns it needs. Goal: aid human
      understanding and cut cognitive load (Tufte: maximize data-ink, minimize
      chrome). Keep snippets minimal and self-contained — no external JS.
@@ -166,7 +166,7 @@ why: adjacency makes the delta obvious; the reader diffs with their eyes, not by
 ```html
 <div class="ba">
   <div class="ba-col"><h4>Before</h4><pre><code>render: skill-only (Claude)</code></pre></div>
-  <div class="ba-col"><h4>After</h4><pre><code>render: ox binary (any AI coworker)</code></pre></div>
+  <div class="ba-col"><h4>After</h4><pre><code>render: ox binary (any AI teammate)</code></pre></div>
 </div>
 ```
 
@@ -572,13 +572,13 @@ use: data moving from sources through transformations to stores or consumers —
 why: a role-scoped pipeline shows what changes at each boundary and where state becomes durable. Use plain verbs on edges and reserve gold for the transformation under review.
 ```html
 <svg data-ox-viz="data-flow" class="oxv-data" viewBox="0 0 960 600" role="img" aria-labelledby="data-title data-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
-  <title id="data-title">Context data flow</title><desc id="data-desc">Loose inputs are normalized, enriched, stored, and then consumed by AI coworkers.</desc>
+  <title id="data-title">Context data flow</title><desc id="data-desc">Loose inputs are normalized, enriched, stored, and then consumed by AI teammates.</desc>
   <defs><marker id="data-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#b7b6a3)"/></marker></defs>
   <style>.oxv-data text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-data .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#212620);stroke-width:2}.oxv-data .name{font-size:15px;font-weight:600}.oxv-data .sub{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#b7b6a3)}.oxv-data .edge{fill:none;stroke:var(--dim,#b7b6a3);stroke-width:2;marker-end:url(#data-arrow)}</style>
   <g data-ox-node><rect class="node" x="40" y="230" width="160" height="100" rx="6"/><text class="name" x="120" y="274" text-anchor="middle">Discussions</text><text class="sub" x="120" y="300" text-anchor="middle">loose input</text></g>
   <g data-ox-node data-ox-focus><rect x="265" y="210" width="180" height="140" rx="6" fill="var(--gold,#d9b654)" fill-opacity=".12" stroke="var(--gold,#d9b654)" stroke-width="2"/><text class="name" x="355" y="270" text-anchor="middle">Normalize</text><text class="sub" x="355" y="296" text-anchor="middle">structure + identity</text></g>
   <g data-ox-node><rect class="node" x="510" y="230" width="160" height="100" rx="6"/><text class="name" x="590" y="274" text-anchor="middle">Ledger</text><text class="sub" x="590" y="300" text-anchor="middle">durable state</text></g>
-  <g data-ox-node><rect class="node" x="735" y="230" width="180" height="100" rx="6"/><text class="name" x="825" y="274" text-anchor="middle">AI coworkers</text><text class="sub" x="825" y="300" text-anchor="middle">context consumer</text></g>
+  <g data-ox-node><rect class="node" x="735" y="230" width="180" height="100" rx="6"/><text class="name" x="825" y="274" text-anchor="middle">AI teammates</text><text class="sub" x="825" y="300" text-anchor="middle">context consumer</text></g>
   <path data-ox-connector class="edge" d="M200 280H265"/><path data-ox-connector class="edge" d="M445 280H510"/><path data-ox-connector class="edge" stroke="var(--teal,#97aebd)" d="M670 280H735"/>
 </svg>
 ```
@@ -588,9 +588,9 @@ use: stacked abstractions, enforcement surfaces, or compensating defenses — wh
 why: a layer stack makes boundaries and residual-risk propagation visible without drawing redundant connectors. Keep 3–6 layers and label what each owns, not its implementation inventory.
 ```html
 <svg data-ox-viz="layer-stack" class="oxv-layer" viewBox="0 0 960 600" role="img" aria-labelledby="layer-title layer-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
-  <title id="layer-title">Responsibility layers</title><desc id="layer-desc">AI coworker guidance sits above deterministic CLI contracts, local data access, and durable team context.</desc>
+  <title id="layer-title">Responsibility layers</title><desc id="layer-desc">AI teammate guidance sits above deterministic CLI contracts, local data access, and durable team context.</desc>
   <style>.oxv-layer text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-layer .band{fill:var(--bg,#0b0d0b);stroke:var(--hair,#212620);stroke-width:2}.oxv-layer .name{font-size:17px;font-weight:600}.oxv-layer .sub{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#b7b6a3)}</style>
-  <g data-ox-node><rect class="band" x="120" y="70" width="720" height="90" rx="6"/><text class="name" x="160" y="112">AI coworker judgment</text><text class="sub" x="160" y="138">selects the visual · writes the explanation</text></g>
+  <g data-ox-node><rect class="band" x="120" y="70" width="720" height="90" rx="6"/><text class="name" x="160" y="112">AI teammate judgment</text><text class="sub" x="160" y="138">selects the visual · writes the explanation</text></g>
   <g data-ox-node data-ox-focus><rect x="100" y="180" width="760" height="100" rx="6" fill="var(--gold,#d9b654)" fill-opacity=".12" stroke="var(--gold,#d9b654)" stroke-width="2"/><text class="name" x="140" y="226">ox viz contract</text><text class="sub" x="140" y="252">catalog · deterministic rendering · lint</text></g>
   <g data-ox-node><rect class="band" x="80" y="300" width="800" height="90" rx="6"/><text class="name" x="120" y="342">Local context and code</text><text class="sub" x="120" y="368">zero-network retrieval · repository truth</text></g>
   <g data-ox-node><rect class="band" x="60" y="410" width="840" height="100" rx="6"/><text class="name" x="100" y="456">Ledger and Team Context</text><text class="sub" x="100" y="482">durable memory · attribution · shared decisions</text></g>

@@ -1,8 +1,8 @@
 # Visualization catalog
 
-`ox viz` gives every AI coworker a shared visual vocabulary for plans,
+`ox viz` gives every AI teammate a shared visual vocabulary for plans,
 documentation, pull requests, reports, and design notes. Selection and
-rendering are deterministic and local; the AI coworker still decides what the
+rendering are deterministic and local; the AI teammate still decides what the
 artifact needs to explain.
 
 ## Choose a pattern

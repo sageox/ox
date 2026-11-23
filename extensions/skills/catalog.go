@@ -42,7 +42,7 @@ var Catalog = []Bundle{
 	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-report", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
 	// Carts is experimental and gated behind FEATURE_CARTS. These four skills
 	// used to sit in "lifecycle" (Default: true), so they installed for
-	// everyone — teaching an AI coworker to run `ox carts …`, which then
+	// everyone — teaching an AI teammate to run `ox carts …`, which then
 	// refuses because the feature is off. A skill for a disabled command is
 	// worse than a missing one: the coworker follows it and hits a wall it
 	// cannot diagnose.

@@ -1,6 +1,6 @@
 # Send feedback to SageOx
 
-Use `ox feedback` when a command fails, confuses you, or makes your AI coworker do unnecessary work. Reports are private correspondence with SageOx Support.
+Use `ox feedback` when a command fails, confuses you, or makes your AI teammate do unnecessary work. Reports are private correspondence with SageOx Support.
 
 Write a report in a file. Its first line is the title (8–200 characters); the whole report must fit within 4 KiB and 4,000 characters.
 

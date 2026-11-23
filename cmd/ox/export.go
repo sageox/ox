@@ -61,7 +61,7 @@ var exportCmd = &cobra.Command{
 	Short: "Show where your data lives and how to take it with you",
 	Long: `Show where all your SageOx data lives on disk and how to access it locally.
 
-SageOx is not a walled garden. Everything an AI coworker learns about your
+SageOx is not a walled garden. Everything an AI teammate learns about your
 work is stored in ordinary git repositories that you fully own and control:
 
   Ledger        this repo's history of work, decisions, and coding sessions

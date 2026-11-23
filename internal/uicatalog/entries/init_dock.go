@@ -33,7 +33,7 @@ func init() {
 
 			return caption("at a terminal") + dock.Render(true) + "\n\n" + ui.RenderTryFirst() + "\n" +
 				caption("first time on this machine: the add-ons, offered once") + offers + "\n" +
-				caption("piped, in CI, or run by an AI coworker: the same facts, no frame") + dock.Render(false) + "\n\n" +
+				caption("piped, in CI, or run by an AI teammate: the same facts, no frame") + dock.Render(false) + "\n\n" +
 				caption("when uploads are manual, the box says nobody can read a session yet") + manual.Render(false) + "\n"
 		},
 	})

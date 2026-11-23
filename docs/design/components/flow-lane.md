@@ -9,7 +9,7 @@ exports: [Render, Moving, Lane, Options]
 
 # Flow lane
 
-> One line showing what an ox call moved between SageOx and an AI coworker's session.
+> One line showing what an ox call moved between SageOx and an AI teammate's session.
 
 ## When to use
 

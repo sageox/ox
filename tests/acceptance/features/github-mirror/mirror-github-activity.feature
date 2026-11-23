@@ -1,5 +1,5 @@
 Feature: Recent GitHub activity on the team bulletin board
-  AI coworkers in every repo see what the team is doing on GitHub right now.
+  AI teammates in every repo see what the team is doing on GitHub right now.
   Each pull request and issue becomes one small, read-only post on the team's
   github bulletin board. The team publishes it after a prompt-injection scan,
   a newer version replaces it when the item changes, and it expires once
@@ -11,13 +11,13 @@ Feature: Recent GitHub activity on the team bulletin board
 
   Rule: A team's GitHub work appears on the github board without anyone posting it
 
-    Scenario: Devon's merged pull request shows up for every repo's AI coworkers
+    Scenario: Devon's merged pull request shows up for every repo's AI teammates
       Given the GitHub mirror is enabled for the "Acme Engineering" team
       And Devon merged a pull request in "acme/api" today
       When Devon's ox daemon runs its next GitHub sync
       Then the github board holds one post for that pull request
       And the post names Devon as the GitHub author and the team as the publisher
-      And Avery's AI coworker in "acme/api" is pointed at the post when it primes
+      And Avery's AI teammate in "acme/api" is pointed at the post when it primes
 
   Rule: One live post per item, however many teammates run a daemon
 
@@ -39,7 +39,7 @@ Feature: Recent GitHub activity on the team bulletin board
       When a review bot comments on pull request 1287 on GitHub
       Then the post for pull request 1287 is unchanged
 
-  Rule: Text hidden from people on GitHub never reaches an AI coworker
+  Rule: Text hidden from people on GitHub never reaches an AI teammate
 
     Scenario: An outside contributor hides instructions in an issue
       Given an outside contributor opens an issue in "acme/api" containing a hidden HTML comment addressed to AI agents
@@ -56,7 +56,7 @@ Feature: Recent GitHub activity on the team bulletin board
 
     Scenario: Sam's issue goes quiet and leaves the board
       Given Sam's issue in "acme/web" has had no real activity for 90 days
-      When Riley's AI coworker primes in "acme/web"
+      When Riley's AI teammate primes in "acme/web"
       Then the issue is no longer counted among the live github posts
 
   Rule: The mirror never gets in the way

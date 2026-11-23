@@ -19,7 +19,7 @@ import (
 	"github.com/sageox/ox/internal/session/contextuse"
 )
 
-// maxContextWhyRunes caps the one-line --why an AI coworker records with a use.
+// maxContextWhyRunes caps the one-line --why an AI teammate records with a use.
 const maxContextWhyRunes = 200
 
 // Error codes for `ox agent <id> context used`.
@@ -60,14 +60,14 @@ type contextUsedOutput struct {
 	Guidance    string `json:"guidance"`
 }
 
-// contextErrorDetail names a context command failure an AI coworker can act on.
+// contextErrorDetail names a context command failure an AI teammate can act on.
 type contextErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
 // contextErrorOutput is the JSON printed when a ref cannot be resolved: it lists
-// what was surfaced so the AI coworker corrects the ref instead of inventing one.
+// what was surfaced so the AI teammate corrects the ref instead of inventing one.
 type contextErrorOutput struct {
 	Success  bool               `json:"success"`
 	Type     string             `json:"type"` // always "context_used"
@@ -164,7 +164,7 @@ func parseContextUsedArgs(args []string) (contextUsedArgs, error) {
 	return out, nil
 }
 
-// agentContextTrace is where an AI coworker's context events live: the recording's
+// agentContextTrace is where an AI teammate's context events live: the recording's
 // context-trace.jsonl, or the per-agent cache file when not recording.
 type agentContextTrace struct {
 	writer    *contexttrace.Writer
@@ -172,7 +172,7 @@ type agentContextTrace struct {
 	readPaths []string
 }
 
-// resolveAgentContextTrace finds the trace an AI coworker's use reports read from
+// resolveAgentContextTrace finds the trace an AI teammate's use reports read from
 // and write to. Not recording, it reads prime's shared cache trace plus the
 // per-agent usage cache file, and writes to the per-agent file.
 func resolveAgentContextTrace(projectRoot, agentID string) (agentContextTrace, error) {
@@ -313,7 +313,7 @@ func runAgentContextList(w io.Writer, projectRoot, agentID string) error {
 	return printContextJSON(w, out)
 }
 
-// resolveSurfacedRef matches a ref an AI coworker typed against what was
+// resolveSurfacedRef matches a ref an AI teammate typed against what was
 // surfaced, through every name an item went by — its ref and its aliases, raw
 // and canonical — so a rec_ id, a /c/ link or a citation finds the cnv_ it
 // names and a slug or dated directory finds its plan: exact ref, then
@@ -375,7 +375,7 @@ func resolveSurfacedRef(ref, refType string, surfaced []contextuse.SurfacedRef) 
 	case 1:
 		return prefixed[0], "", ""
 	case 0:
-		return contextuse.SurfacedRef{}, contextErrUnknownRef, fmt.Sprintf("%q was not surfaced to this AI coworker", ref)
+		return contextuse.SurfacedRef{}, contextErrUnknownRef, fmt.Sprintf("%q was not surfaced to this AI teammate", ref)
 	default:
 		names := make([]string, 0, len(prefixed))
 		for _, s := range prefixed {

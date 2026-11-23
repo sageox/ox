@@ -27,7 +27,7 @@ type MurmurPublisher interface {
 	PublishMurmur(payload MurmurPayload)
 }
 
-// ActiveAgentResolver returns IDs of active AI coworker instances.
+// ActiveAgentResolver returns IDs of active AI teammate instances.
 type ActiveAgentResolver interface {
 	ActiveAgentIDs() []string
 }
@@ -84,7 +84,7 @@ func NewFileChangeMurmurPublisher(
 	}
 }
 
-// SetAgentResolver sets the resolver used to look up active AI coworker IDs.
+// SetAgentResolver sets the resolver used to look up active AI teammate IDs.
 func (p *FileChangeMurmurPublisher) SetAgentResolver(r ActiveAgentResolver) {
 	p.agentResolver = r
 }
@@ -210,7 +210,7 @@ func (p *FileChangeMurmurPublisher) publish() {
 		return
 	}
 
-	// A team token with no AI coworker attached has no one to attribute the
+	// A team token with no AI teammate attached has no one to attribute the
 	// changes to; ox murmur refuses the same way.
 	coworker, err := auth.TeamCoworker(endpoint.GetForProject(p.projectRoot))
 	if err != nil {

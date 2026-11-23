@@ -41,7 +41,7 @@ var addonsCmd = &cobra.Command{
 
 An add-on is a versioned bundle of three things your team selects once:
 
-  skills   what an AI coworker should DO, and when
+  skills   what an AI teammate should DO, and when
   rules    conventions it should follow
   context  the reference material those skills carry with them
 
@@ -57,7 +57,7 @@ is. So an add-on hands a coworker the instruction and the evidence together,
 rather than an instruction and a hope that it goes looking.
 
 It installs into your Team Context — never into a single repository — so every
-repository on the team receives it, and every teammate's AI coworker sees the
+repository on the team receives it, and every coworker's AI teammate sees the
 same selection. ` + "`ox sync`" + ` distributes it; this command chooses it.
 
 Add-on content is pinned to an exact version and digest until someone runs
@@ -74,7 +74,7 @@ their own opt-in.
 
 Add-on files are written non-executable, always — a provider cannot choose
 otherwise. Content that arrives with runnable scripts still needs
-` + "`ox skills approve <name>`" + ` before an AI coworker may read it, and that
+` + "`ox skills approve <name>`" + ` before an AI teammate may read it, and that
 command's ` + "`--allow-scripts`" + ` before anything becomes runnable. Installing an
 add-on grants neither.`,
 	// Same reasoning as `ox skills`: an unknown verb is named rather than
@@ -306,7 +306,7 @@ func renderAddonRows(out io.Writer, rows []addonRow) error {
 			p("  %s", cli.StyleDim.Render(line))
 		}
 		if r.HasScripts {
-			p("  %s", cli.StyleWarning.Render("⚠ runnable scripts — approve before an AI coworker reads them:"))
+			p("  %s", cli.StyleWarning.Render("⚠ runnable scripts — approve before an AI teammate reads them:"))
 			p("    %s", cli.StyleDim.Render(fmt.Sprintf("ox skills approve %s --allow-scripts", r.Name)))
 		}
 		p("")

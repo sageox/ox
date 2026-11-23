@@ -131,7 +131,7 @@ func TestReconcile_UnstampedTeamNamedDirectoryIsLeftAlone(t *testing.T) {
 // migration, end to end.
 //
 // Every repository on the old scheme holds `sageox-team-<name>` directories that
-// nothing will ever install again. Leaving them would give an AI coworker two
+// nothing will ever install again. Leaving them would give an AI teammate two
 // copies of the same skill under two names — and the stale one would keep
 // answering, forever, because nothing retires it.
 //
@@ -157,7 +157,7 @@ func TestReconcile_LegacyPrefixedTeamSkillIsSweptAndReinstalledUnderTheSuffix(t 
 	require.NoError(t, err)
 
 	require.NoFileExists(t, filepath.Join(legacyDir, "SKILL.md"),
-		"the pre-suffix projection survived; an AI coworker now sees the same skill twice, and the stale copy never retires")
+		"the pre-suffix projection survived; an AI teammate now sees the same skill twice, and the stale copy never retires")
 	require.NoDirExists(t, legacyDir)
 
 	suffixed := filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix, "SKILL.md")

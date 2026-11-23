@@ -158,7 +158,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 }
 
 // logConvergenceError reports a convergence pass that produced no per-artifact
-// outcomes. A live AI coworker session holding the snapshot is the designed
+// outcomes. A live AI teammate session holding the snapshot is the designed
 // steady state while anyone works, so it is INFO; anything else is a failure
 // worth a WARN (ox#1242).
 func logConvergenceError(logger *slog.Logger, repoRoot string, err error) {
@@ -177,7 +177,7 @@ func logConvergenceError(logger *slog.Logger, repoRoot string, err error) {
 // artifacts, because a repository with N team skills hits that reason N times
 // in the same pass:
 //
-//   - pending because a live AI coworker session holds the snapshot is the
+//   - pending because a live AI teammate session holds the snapshot is the
 //     designed steady state, so it is a single INFO summary (ox#1242: 90 WARN
 //     lines in one pass, burying the real warnings around them);
 //   - pending for any other reason is a stall, so it stays a WARN;

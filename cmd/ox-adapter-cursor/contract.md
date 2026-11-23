@@ -179,7 +179,7 @@ not guess at a completed old conversation: report boundary-unavailable and
 wait for the next pre-prompt/manual-start boundary. Manual start explicitly
 starts at complete exported EOF and cannot promise to exclude older text still
 buffered inside Cursor. Session controls use the recorded native identity or an
-explicit AI coworker ID; never choose a chat by PID alone.
+explicit AI teammate ID; never choose a chat by PID alone.
 
 .11 may add only startup boundary fields/helpers in recording.go after .5;
 that file then transfers to .14 along with the other startup files. This is a

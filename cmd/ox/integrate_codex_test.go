@@ -78,7 +78,7 @@ func TestIntegrateCodex_InteractiveTrustGuidanceMatchesInstalledState(t *testing
 			})
 			require.NoError(t, err)
 			if tc.claudeInstalled && tc.codexInstalled {
-				assert.Contains(t, output, "All detected AI coworkers are already integrated")
+				assert.Contains(t, output, "All detected AI teammates are already integrated")
 			} else {
 				assert.Contains(t, output, "No new integrations installed")
 			}

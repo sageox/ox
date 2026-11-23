@@ -94,7 +94,7 @@ func publishRepoSkillsToTeam(repoRoot string, names []string) (skillsChangeOutpu
 		return out, err
 	}
 	if len(roots) == 0 {
-		return out, fmt.Errorf("this repository has not selected an AI coworker, so there is no skills directory to publish from — run `ox init`")
+		return out, fmt.Errorf("this repository has not selected an AI teammate, so there is no skills directory to publish from — run `ox init`")
 	}
 	desired, _, err := skillmanager.LoadDesired(repoRoot)
 	if err != nil {
@@ -383,7 +383,7 @@ func validatePublishManifest(name string, files []skills.File) error {
 		}
 	}
 	if audience, _ := publishManifestField(manifest, "audience"); audience == teamdocs.RuleAudienceHuman {
-		return fmt.Errorf("audience: human prevents AI coworkers from receiving this skill")
+		return fmt.Errorf("audience: human prevents AI teammates from receiving this skill")
 	}
 	if visibility, _ := publishManifestField(manifest, "visibility"); visibility == teamdocs.VisibilityHidden {
 		return fmt.Errorf("visibility: hidden prevents this skill from being published")

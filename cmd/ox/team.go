@@ -48,7 +48,7 @@ ADR-028 for the distinction).
 
 Commands:
   list       List the teams you belong to
-  members    List a team's coworkers (humans and AI coworkers)
+  members    List a team's coworkers (humans and AI teammates)
   show       Show one team's details
   open       Open a team's dashboard in the browser
   invite     Invite people to a team by email`,
@@ -80,8 +80,8 @@ discussions, sessions, and shared memory. It is not a knowledge bubble
 var teamMembersCmd = &cobra.Command{
 	Use:     "members",
 	Aliases: []string{"coworkers"},
-	Short:   "List the team's coworkers (humans and AI coworkers)",
-	Long: `List the coworkers on your team — humans and AI coworkers alike.
+	Short:   "List the team's coworkers (humans and AI teammates)",
+	Long: `List the coworkers on your team — humans and AI teammates alike.
 
 Shows each coworker's display name, type, role, and the handles they're known
 by (e.g. a GitHub login). The roster answers "who is this?" and renders the
@@ -249,7 +249,7 @@ func fetchAndRenderRoster(ctx context.Context, w io.Writer, lister memberLister,
 }
 
 // writeRosterJSON emits ONE stable envelope for both success and graceful
-// degrade so a JSON consumer (often an AI coworker) can rely on the shape:
+// degrade so a JSON consumer (often an AI teammate) can rely on the shape:
 // `members` is always an array (never null) and `available` is always present.
 func writeRosterJSON(w io.Writer, resp *api.TeamRosterResponse, available bool) error {
 	env := struct {
@@ -321,7 +321,7 @@ type teamCard struct {
 	primary  bool
 	path     string
 	lastSync string
-	// published is what the team ships to every coworker's AI coworker, read
+	// published is what the team ships to every coworker's AI teammate, read
 	// from the checkout when it is on disk. Nil when it is not.
 	published *publishedContent
 }

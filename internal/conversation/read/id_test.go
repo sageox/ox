@@ -113,7 +113,7 @@ func TestValidateTopicID(t *testing.T) {
 }
 
 // TestParseIDLinks covers pasted sageox.ai links. Failure prevented: an AI
-// coworker handed a recording link cannot open it (it used to be invalid_id),
+// teammate handed a recording link cannot open it (it used to be invalid_id),
 // or a lookalike/foreign host smuggles an id past the host check.
 func TestParseIDLinks(t *testing.T) {
 	const team = "team_01a0e91c"

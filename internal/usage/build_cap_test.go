@@ -27,7 +27,7 @@ func fetched(ref, refType string, seq int) contexttrace.Event {
 
 // TestBuild_SurfacedCapKeepsFetchedAndUsed: startup context (prime docs,
 // whispers) arrives first; it must not crowd out of the brief what the AI
-// coworker fetched or used. Failure prevented: a session that fetched 2
+// teammate fetched or used. Failure prevented: a session that fetched 2
 // discussions and 5 plans shows a brief listing only startup docs and
 // murmurs, so the pane never mentions what was fetched.
 func TestBuild_SurfacedCapKeepsFetchedAndUsed(t *testing.T) {

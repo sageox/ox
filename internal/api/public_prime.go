@@ -16,7 +16,7 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 )
 
-// publicPrimePath is the cloud endpoint that primes an AI coworker from a
+// publicPrimePath is the cloud endpoint that primes an AI teammate from a
 // public open-source project on SageOx, for anyone, member or not. 404 means
 // SageOx has no public project for the repo (or the endpoint is not deployed):
 // callers treat it as "nothing to add".

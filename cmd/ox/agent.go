@@ -41,10 +41,10 @@ const agentHumanHandoff = `The "ox agent" command is used automatically by AI co
 You do not need to run it directly.
 
 For SageOx setup and health, run:     ox status
-To review AI coworker sessions, run:  ox session list
+To review AI teammate sessions, run:  ox session list
 To see current team activity, run:    ox glance
 
-For AI-coworker integration or debugging details, run: ox agent --help
+For AI-teammate integration or debugging details, run: ox agent --help
 `
 
 // contextBytesProduced accumulates the number of context bytes written by the
@@ -145,10 +145,10 @@ Example:
 	RunE:                  runAgentDispatcher,
 }
 
-// agentListCmd lists active AI coworker instances.
+// agentListCmd lists active AI teammate instances.
 var agentListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List active AI coworkers and their session state",
+	Short: "List active AI teammates and their session state",
 	RunE:  runAgentList,
 }
 
@@ -223,7 +223,7 @@ func init() {
 	// handler sources so a new manual flag cannot ship unregistered.
 	//
 	// session log: parseSessionLogArgs. ox's own next-action guidance tells AI
-	// coworkers to run `session log --role user --content ...`.
+	// teammates to run `session log --role user --content ...`.
 	registerHiddenAgentFlag("role", "entry role: user, assistant, system, tool (session log)")
 	registerHiddenAgentFlag("content", "entry content (session log)")
 	registerHiddenAgentFlag("tool-name", "tool name for a tool entry (session log)")
@@ -247,9 +247,9 @@ func init() {
 	registerHiddenAgentBoolFlag("none", "report that no surfaced context was used (context used)")
 
 	// Explicit identity for the agent-ID-free shorthands. `ox agent heartbeat
-	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI coworkers
+	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI teammates
 	// reach for it; see runAgentDispatcher.
-	registerHiddenAgentFlag("agent-id", "explicit AI coworker ID when none is given positionally")
+	registerHiddenAgentFlag("agent-id", "explicit AI teammate ID when none is given positionally")
 
 	// Session-stop escape hatch: skip the summary-input optimization pass
 	// entirely and hand raw.jsonl directly to the summarizer. Useful as a
@@ -358,7 +358,7 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 			return runWithAgentID(cmd, agentID, args)
 		}
 		if cursorRequiresExplicitAgentID() {
-			return errkind.Errorf(errkind.Other, "missing-native-identity: Cursor requires the explicit AI coworker ID from hook context: ox agent <id> %s", strings.Join(args, " "))
+			return errkind.Errorf(errkind.Other, "missing-native-identity: Cursor requires the explicit AI teammate ID from hook context: ox agent <id> %s", strings.Join(args, " "))
 		}
 		return errkind.Errorf(errkind.Other, "no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
@@ -375,10 +375,10 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 }
 
 // resolveImplicitAgentID resolves `ox agent session ...` and the other
-// agent-ID-free shorthands to the AI coworker that owns the calling process.
+// agent-ID-free shorthands to the AI teammate that owns the calling process.
 //
 // SAGEOX_AGENT_ID remains the cheapest path for Claude Code, whose env file can
-// export it into later tool calls. Other AI coworkers cannot generally mutate
+// export it into later tool calls. Other AI teammates cannot generally mutate
 // their parent environment, so prime's native-session marker is the portable
 // identity source. When an agent has no native session ID, fall back to the
 // live agent-process PID recorded in the marker. The PID lookup returns nil
@@ -612,7 +612,7 @@ func registerHiddenAgentBoolFlag(name, usage string) {
 	_ = agentCmd.Flags().MarkHidden(name)
 }
 
-// explicitAgentIDFlag returns the AI coworker ID passed via --agent-id, or ""
+// explicitAgentIDFlag returns the AI teammate ID passed via --agent-id, or ""
 // when the flag is absent. A present but malformed value is a usage error.
 func explicitAgentIDFlag(cmd *cobra.Command) (string, error) {
 	raw, err := cmd.Flags().GetString("agent-id")
@@ -869,7 +869,7 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 		return nil, fmt.Errorf("failed to read instance store: %w", readErr)
 	}
 	if expired {
-		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
+		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI teammate's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
 	}
 	return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentID, strings.Join(searched, ", "))
 }
@@ -930,7 +930,7 @@ func getInstanceStore(projectRoot string) (*agentinstance.Store, error) {
 	return agentinstance.NewStoreForUser(instanceStoreRoot(projectRoot), getUserSlug())
 }
 
-// runAgentList lists active AI coworkers with context consumption and session info.
+// runAgentList lists active AI teammates with context consumption and session info.
 // Uses daemon as primary source (heartbeat-based), merges with disk instances for metadata.
 func runAgentList(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
@@ -956,7 +956,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(daemonInstances) == 0 && len(diskInstances) == 0 {
-		fmt.Println("No active AI coworkers.")
+		fmt.Println("No active AI teammates.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -1036,7 +1036,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(merged) == 0 {
-		fmt.Println("No active AI coworkers.")
+		fmt.Println("No active AI teammates.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -1072,7 +1072,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		roots = append(roots, m.AgentID)
 	}
 
-	fmt.Printf("Active AI coworkers (%d):\n\n", len(merged))
+	fmt.Printf("Active AI teammates (%d):\n\n", len(merged))
 	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s  %s",
 		dim.Render(fmt.Sprintf("%-8s", "ID")),
 		dim.Render(fmt.Sprintf("%-10s", "Type")),
@@ -1671,7 +1671,7 @@ func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, e
 	return formatWhispersForAgent(w, "", entries, edited)
 }
 
-// formatWhispersForAgent is formatWhispersWithEdits for a known AI coworker,
+// formatWhispersForAgent is formatWhispersWithEdits for a known AI teammate,
 // so the murmur framing names the exact `context used` command to cite an
 // entry with. An empty agentID falls back to a placeholder.
 func formatWhispersForAgent(w io.Writer, agentID string, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
@@ -1697,7 +1697,7 @@ func formatWhispersForAgent(w io.Writer, agentID string, entries []whisperstore.
 }
 
 // writeTeamWhispers writes teammates' whispers inside <system-reminder>. Each
-// entry carries its id so the AI coworker can cite it with `context used`.
+// entry carries its id so the AI teammate can cite it with `context used`.
 func writeTeamWhispers(w io.Writer, agentID string, entries []whisperstore.WhisperEntry) {
 	// scan for murmur entries and collect unique topics
 	hasMurmurs := false
@@ -1762,7 +1762,7 @@ func writeTeamWhispers(w io.Writer, agentID string, entries []whisperstore.Whisp
 	fmt.Fprintln(w, "</system-reminder>")
 }
 
-// writeMurmurUseLine tells the AI coworker how to record that a murmur changed
+// writeMurmurUseLine tells the AI teammate how to record that a murmur changed
 // its work, at the moment it happens. The agent ID is XML-escaped like any
 // other text; without one, the line names a placeholder.
 func writeMurmurUseLine(w io.Writer, agentID string) {
@@ -1786,7 +1786,7 @@ func writeXMLAttribute(w io.Writer, name, value string) {
 
 // whisperMetadataJSON preserves the message payload as an opaque JSON object.
 // A relay cannot reliably know every producer's metadata schema, so adding a
-// new murmur field reaches AI coworkers without a matching Ox release.
+// new murmur field reaches AI teammates without a matching Ox release.
 func whisperMetadataJSON(metadata map[string]string) string {
 	if len(metadata) == 0 {
 		return ""

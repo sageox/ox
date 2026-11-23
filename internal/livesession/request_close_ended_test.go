@@ -10,7 +10,7 @@ import (
 	"github.com/sageox/ox/internal/sessionid"
 )
 
-// Failure prevented: a recording that ended with no stop (its AI coworker
+// Failure prevented: a recording that ended with no stop (its AI teammate
 // crashed) left its stream open, so SageOx showed the session live for 72 h.
 // The close is requested only for the stream of that recording, and never
 // for a held one, whose live copy the daemon deletes instead.

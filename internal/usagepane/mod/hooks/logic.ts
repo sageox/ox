@@ -38,7 +38,7 @@ export const STATUSLINE_RUN_TIMEOUT_MS = 2_000
 
 // briefRunInit is how the pane runs `ox session report`. The pane runs it from the
 // Claude Code host process, which carries none of the variables the AI
-// coworker's shell gets, so ox cannot tell which session to report on and
+// teammate's shell gets, so ox cannot tell which session to report on and
 // reads it as not recording while the status line says it is. Claude Code's
 // own session id lets ox find the session the same way the status line does.
 export function briefRunInit(
@@ -343,7 +343,7 @@ export function usedCount(report: UsageReport): number {
   return report.relevant?.count ?? report.surfaced.filter(s => s.used !== undefined).length
 }
 
-// surfacedCount: how many items ox put in front of the AI coworker.
+// surfacedCount: how many items ox put in front of the AI teammate.
 export function surfacedCount(report: UsageReport): number {
   return report.relevant?.surfaced_count ?? report.surfaced.length
 }
@@ -372,7 +372,7 @@ export function contextRows(report: UsageReport): ContextRow[] {
   }))
 }
 
-// usedItems: what the AI coworker used, strongest evidence per ref in seq
+// usedItems: what the AI teammate used, strongest evidence per ref in seq
 // order. An older ox has no relevant.items: fall back to the surfaced items
 // that carry use evidence.
 export function usedItems(report: UsageReport): UsageUsedItem[] {
@@ -503,7 +503,7 @@ export function availableRows(report: UsageReport): AvailableRow[] {
 export type CoauthorRows = { key: string; category: string; verdict: string; reason: string }
 
 const SOURCE_WORDS: Record<string, string> = {
-  'self-reported': 'reported by the AI coworker',
+  'self-reported': 'reported by the AI teammate',
   derived: 'derived from use',
 }
 

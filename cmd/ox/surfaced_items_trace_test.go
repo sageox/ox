@@ -21,7 +21,7 @@ import (
 	"github.com/sageox/ox/internal/session/contextuse"
 )
 
-// Commands that put one specific team item in front of the AI coworker trace
+// Commands that put one specific team item in front of the AI teammate trace
 // it as a surfaced item — ref, type, title, link — so it can be cited later.
 // None of these carries content: no summary, transcript, or document text.
 

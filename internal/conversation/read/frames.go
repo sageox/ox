@@ -339,7 +339,7 @@ func keyframeImagePath(droot *os.Root, name string) (string, bool) {
 }
 
 // cleanScreenText makes a screen- or model-derived string safe to put in
-// front of an AI coworker or a terminal: escape sequences and control
+// front of an AI teammate or a terminal: escape sequences and control
 // characters dropped (cli.SanitizeTerminalText, after turning line breaks
 // into spaces so words do not fuse), whitespace collapsed, and length capped.
 // It is still untrusted DATA — cleaning bounds its shape, not its meaning.

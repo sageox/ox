@@ -6,7 +6,7 @@ description: How to discover and use team-context rules and knowledge from the S
 This repo uses SageOx. Behavioral rules and conventions that apply to your
 whole team—not just this repo—live in your team's SageOx Team Context. That
 repository is the source of truth. ox may place ignored, managed
-`sageox-team-*` projections in `{{RULE_ROOT}}` when the active AI coworker can
+`sageox-team-*` projections in `{{RULE_ROOT}}` when the active AI teammate can
 preserve a rule's semantics. Never edit those projections; edit the Team
 Context source instead.
 
@@ -24,14 +24,14 @@ Its typical layout is:
           backend/postgres.md    # subdirectories supported
           frontend/react.md
         commands/                # read on demand, not slash commands
-        profiles/                # AI coworker profiles
+        profiles/                # AI teammate profiles
       discussions/               # archived team meetings
       memory/                    # daily/weekly/monthly summaries
       documents/                 # imported docs
 
 ## How to Discover and Read Them
 
-Each rule has exactly one delivery path for the active AI coworker:
+Each rule has exactly one delivery path for the active AI teammate:
 
 - Native-compatible rules projected into `{{RULE_ROOT}}` load there and are
   omitted from `ox agent prime`.
@@ -46,7 +46,7 @@ prime's `<team-rules>` block.
 To search team-wide knowledge:
 
 - `ox query "<question>"` searches discussions, sessions, and documents.
-- `ox agent team-ctx` returns distilled Team Context for AI coworkers.
+- `ox agent team-ctx` returns distilled Team Context for AI teammates.
 
 Run `ox guide team-rules` before authoring or promoting a rule.
 

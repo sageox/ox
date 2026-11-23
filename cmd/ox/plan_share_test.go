@@ -491,7 +491,7 @@ func TestPlanSaveCmd_VisibleWithShareFlags(t *testing.T) {
 
 // TestWritePlanSaveReport_NotSharedIsLoudOnBothChannels verifies the JSON
 // stays one parseable document and the warning still reaches stderr.
-// Failure prevented: an AI coworker parsing --json never seeing shared=false,
+// Failure prevented: an AI teammate parsing --json never seeing shared=false,
 // or the warning corrupting stdout.
 func TestWritePlanSaveReport_NotSharedIsLoudOnBothChannels(t *testing.T) {
 	r := planSaveReport{Dir: "/l/data/plans/x", Slug: "x", PlanID: "pln_1", URL: "https://sageox.ai/plan/pln_1",

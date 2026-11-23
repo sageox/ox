@@ -10,7 +10,7 @@ import (
 // Grades of evidence behind a use.
 const (
 	GradeProvable = "provable" // retrieval or citation: observed, not claimed
-	GradeReported = "reported" // the AI coworker's own self-report
+	GradeReported = "reported" // the AI teammate's own self-report
 	GradeJudged   = "judged"   // an LLM judge's inference
 )
 

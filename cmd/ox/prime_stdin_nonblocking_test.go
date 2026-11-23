@@ -17,7 +17,7 @@ func swapStdinForProbeTest(t *testing.T, r *os.File) {
 	t.Cleanup(func() { os.Stdin = orig })
 }
 
-// Failure prevented: a bare `ox agent prime` run by an AI coworker whose stdin
+// Failure prevented: a bare `ox agent prime` run by an AI teammate whose stdin
 // is a pipe or socket that never closes (a harness's background shell) blocked
 // until EOF, which never came. The hook-payload probe must give up and let
 // prime run without a payload.

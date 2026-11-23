@@ -18,7 +18,7 @@ surfaced:
 | `docs/specs/cli-design-system.md` | output streams, spinner cancellation, `--no-input` / `--yes` / `--force`, argument validation, palette, global flags, help layout |
 | `.claude/rules/design.md` | semantic styles, `NO_COLOR`, non-TTY fallbacks, 80 columns, the component catalog |
 | `.claude/rules/json-output.md` | one JSON printer; color only on a TTY |
-| `docs/specs/agent-ux-principles.md` | output an AI coworker consumes: tokens, JSON, non-blocking, next actions |
+| `docs/specs/agent-ux-principles.md` | output an AI teammate consumes: tokens, JSON, non-blocking, next actions |
 | `CLAUDE.md` | `SAGEOX_*` env-var namespace, XDG, `cli.OpenInBrowser`, Required Reviews |
 
 None of them says what a new command owes its users in general: exit codes, help
@@ -35,7 +35,7 @@ people use directly. Cobra, ox's parser, is one of the Go libraries it
 recommends.
 
 ox differs from the programs clig.dev was written for in one way that matters. A
-large share of its invocations come from AI coworkers — through hooks, skills, and
+large share of its invocations come from AI teammates — through hooks, skills, and
 direct tool calls — with stdout on a pipe, nobody to answer a prompt, and a
 context window that pays for every byte of output. clig.dev's human-first
 principle needs an explicit ox reading (§3).
@@ -68,18 +68,18 @@ governs, and the guideline below points to it instead of restating it. If one of
 them contradicts these guidelines, one of the two is wrong: fix it, and do not let
 a reviewer pick silently.
 
-### 3. Two audiences: a person at a terminal, an AI coworker on a pipe
+### 3. Two audiences: a person at a terminal, an AI teammate on a pipe
 
 The guidelines are written for the person who types a command, and every command
-a person types is designed for that person. AI coworkers run the same commands,
+a person types is designed for that person. AI teammates run the same commands,
 and ox serves them through the machinery built for programs: TTY detection,
 `--json`, `--no-input`, exit codes, and diagnostics on stderr. Nobody declares
 which audience they are — a pipe selects the machine path
 (`.claude/rules/json-output.md`, "Why it colors, and why that is safe"). Some
-commands also switch to JSON on their own when they detect an AI coworker and
+commands also switch to JSON on their own when they detect an AI teammate and
 `--json` was not passed (`ox session list`).
 
-The scoped exception is `ox agent …`, whose caller is an AI coworker by design.
+The scoped exception is `ox agent …`, whose caller is an AI teammate by design.
 It is machine-first: structured output by default, `--text` for a person,
 `--review` for both (`cmd/ox/agent.go`, `docs/specs/agent-ux-principles.md` §3).
 `ox agent prime` defaults to tagged XML (`--format json` for JSON)
@@ -102,13 +102,13 @@ The deviations ox holds today:
 
 | Guideline | ox behavior | Why |
 |---|---|---|
-| P1, OUT-2 | `ox agent …` is machine-first (§3). | Its caller is an AI coworker by design. |
-| INV-1, INV-2 | `ox agent <id> <verb>` is dispatched by hand: the agent ID precedes the verb, `agent` accepts arbitrary arguments, and the verbs' flags are hidden persistent flags on `agent` that the dispatcher re-injects (`runAgentDispatcher` in `cmd/ox/agent.go`). The verbs have no help of their own; `--help` shows `ox agent`'s. | Every verb acts on one AI coworker instance, named by its ID (`docs/specs/agent-ux-ox-implementation.md`). |
-| HELP-3, INV-12 | A curated catalog (`cmd/ox/default_catalog.json`: 40 `auto_execute` entries, confidence ≥ 0.85) re-runs a mistyped command once as its correction, after printing `-> Correcting to: …`. `ox setup` runs `ox init`; `ox auth` runs `ox login`. | Each entry records a guess AI coworkers or people commonly make, so it resolves without a round trip. Accepted cost: some targets change state, and every entry is syntax ox keeps supporting. |
+| P1, OUT-2 | `ox agent …` is machine-first (§3). | Its caller is an AI teammate by design. |
+| INV-1, INV-2 | `ox agent <id> <verb>` is dispatched by hand: the agent ID precedes the verb, `agent` accepts arbitrary arguments, and the verbs' flags are hidden persistent flags on `agent` that the dispatcher re-injects (`runAgentDispatcher` in `cmd/ox/agent.go`). The verbs have no help of their own; `--help` shows `ox agent`'s. | Every verb acts on one AI teammate instance, named by its ID (`docs/specs/agent-ux-ox-implementation.md`). |
+| HELP-3, INV-12 | A curated catalog (`cmd/ox/default_catalog.json`: 40 `auto_execute` entries, confidence ≥ 0.85) re-runs a mistyped command once as its correction, after printing `-> Correcting to: …`. `ox setup` runs `ox init`; `ox auth` runs `ox login`. | Each entry records a guess AI teammates or people commonly make, so it resolves without a round trip. Accepted cost: some targets change state, and every entry is syntax ox keeps supporting. |
 | INPUT-2 | Yes/no, numbered, and text prompts accept answers piped on a non-TTY stdin; `--no-input` is the strict mode. | Existing scripts pipe answers (`cli-design-system.md` § Prompts and Automation; `internal/cli/confirm.go`). |
-| INPUT-6 | `SAGEOX_TOKEN` supplies a SageOx access token from the environment and outranks a stored login (`internal/auth/env_token.go`). ox also reads other tools' standard token variables (`GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, …) in `internal/identity/`. | CI/CD, headless AI coworkers, and ephemeral containers have no browser for the device flow, and no flag or file option exists yet. A malformed `SAGEOX_TOKEN` fails closed, and adapter processes get an allowlisted environment (`internal/envutil`). |
+| INPUT-6 | `SAGEOX_TOKEN` supplies a SageOx access token from the environment and outranks a stored login (`internal/auth/env_token.go`). ox also reads other tools' standard token variables (`GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_TOKEN`, …) in `internal/identity/`. | CI/CD, headless AI teammates, and ephemeral containers have no browser for the device flow, and no flag or file option exists yet. A malformed `SAGEOX_TOKEN` fails closed, and adapter processes get an allowlisted environment (`internal/envutil`). |
 | INV-4 | `-v` is the global `--verbose`; `--version` has no short form. | The familiar-flags list in `agent-ux-principles.md` §5 (`-v, --verbose`). |
-| OUT-9 | After `ox init` and `ox login`, the daemon syncs the Ledger and Team Context in the background, and hooks run ox inside AI coworker sessions. | That is the product. `ox init` and `ox login` are the explicit consent, and `ox status` shows the state. |
+| OUT-9 | After `ox init` and `ox login`, the daemon syncs the Ledger and Team Context in the background, and hooks run ox inside AI teammate sessions. | That is the product. `ox init` and `ox login` are the explicit consent, and `ox status` shows the state. |
 | CONF-2 | User configuration outranks repository and team configuration: flags > environment > user > repo > team > default. | `README.md`: a repo or team can suggest a default, but cannot override a person's own preference, such as recording mode or telemetry. |
 | CONF-4 | `ox agent prime` and `ox doctor`'s automatic fixes restore missing prime markers and Claude Code hooks without asking (`EnsureOxPrimeMarker`, `ensureClaudeHooks`, `FixLevelAuto`). | `ox init` is the consent; repairs keep that installed state intact (`CLAUDE.md` § Doctor as Last Line of Defense). `ox uninstall` removes it. |
 | CONF-6 (`TMPDIR`) | Ephemeral files, such as the trace log and prime session markers, go to `/tmp/<user>/sageox` on macOS and Linux, ignoring `TMPDIR` (`paths.TempDir`). Daemon logs persist in `$XDG_STATE_HOME` instead (`paths.DaemonLogFile`). | macOS's per-user temporary directory is purged unpredictably (comment in `internal/paths/paths.go`). |
@@ -137,23 +137,23 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
 ### Principles (P)
 
 - **P1 · Two audiences, both first-class.** A person at a terminal and an AI
-  coworker on a pipe run the same commands. Design each command for the person
+  teammate on a pipe run the same commands. Design each command for the person
   who types it, and serve programs through the standard machinery: streams, exit
   codes, TTY detection, structured output. *Source: [clig.dev § Human-first
   design](https://clig.dev/#human-first-design); §3.*
 - **P2 · Every command is a part in someone else's system.** Scripts, CI jobs,
-  and AI coworker tool loops will embed ox in ways nobody planned. Standard
+  and AI teammate tool loops will embed ox in ways nobody planned. Standard
   streams, exit codes, signals, line-oriented text, and JSON are what make it a
   well-behaved part, and none of them costs a person anything. *Source:
   [clig.dev § Simple parts that work together](https://clig.dev/#simple-parts-that-work-together).*
 - **P3 · Familiar first; break conventions on purpose.** A command that behaves
   like the tools people already know is guessable — by people, and by the models
-  behind AI coworkers. Depart from a convention only when it demonstrably hurts
+  behind AI teammates. Depart from a convention only when it demonstrably hurts
   usability, and record the departure (§5). *Source: [clig.dev § Consistency
   across programs](https://clig.dev/#consistency-across-programs) and
   [§ Chaos](https://clig.dev/#chaos); `agent-ux-principles.md` §5.*
 - **P4 · Spend the reader's attention carefully.** Minutes of silence read as a
-  hang; pages of detail bury the one line that matters. For an AI coworker, every
+  hang; pages of detail bury the one line that matters. For an AI teammate, every
   surplus line also spends context-window tokens. *Source: [clig.dev § Saying
   (just) enough](https://clig.dev/#saying-just-enough); `agent-ux-principles.md`
   §2.*
@@ -280,7 +280,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   Help](https://clig.dev/#help).*
   - **ox:** frictionax suggests a correction: `Did you mean?` on stderr for a
     person, or a `_suggestion` object on stdout under `--json` or in an AI
-    coworker's context (`cmd/ox/main.go`). Auto-running a correction is a
+    teammate's context (`cmd/ox/main.go`). Auto-running a correction is a
     deviation (§5); misfires are Known gaps.
 - **HELP-4 · Examples come first.** People copy examples before they read flag
   tables. Show the common and the tricky invocations first, with output when it
@@ -398,7 +398,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   Output](https://clig.dev/#output).*
   - **ox:** `theme.Profile` decides color from stdout. When stdout or stderr is
     not a TTY, `cmd/ox/main.go` strips ANSI from that stream, and in an AI
-    coworker's context it sets `NO_COLOR=1`. `ox agent` is a deviation (§5).
+    teammate's context it sets `NO_COLOR=1`. `ox agent` is a deviation (§5).
 - **OUT-3 · `--json` prints structured output.** JSON carries structure that text
   cannot, and it works with `jq` and web tooling. *Source: [clig.dev §
   Output](https://clig.dev/#output).*
@@ -412,14 +412,14 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   several lines (wrapped table cells, say), `--plain` prints one record per line
   without decoration. *Source: [clig.dev § Output](https://clig.dev/#output).*
   - **ox:** not met — Known gaps.
-- **OUT-5 · Output an AI coworker reads is budgeted and actionable.** Lead with the
+- **OUT-5 · Output an AI teammate reads is budgeted and actionable.** Lead with the
   instruction, leave out what the reader already has, keep payloads small, and
   carry the next action in the output's `guidance` field rather than in prose a
   skill has to repeat. *Source: `agent-ux-principles.md` §2–§4; ADR-023 Layer 1;
   `CLAUDE.md` thin-relay rule.* <!-- SOURCE: sageox adr:docs/adr/ADR-023-skill-injection-two-layer-model.md -->
   - **ox:** `--json` envelopes carry a `guidance` field (`ox decision enrich`,
     `ox pr header`), and `ox session list` switches to JSON on its own in an AI
-    coworker's context.
+    teammate's context.
 - **OUT-6 · Say success briefly; `-q` silences the rest.** Silence after success
   reads as a hang, so print something short. `-q`/`--quiet` drops non-essential
   output for scripts, so they need not redirect stderr to `/dev/null`. *Source:
@@ -440,7 +440,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   workflow. *Source: [clig.dev § Output](https://clig.dev/#output).*
   - **ox:** `ox status`, and `ox doctor` for health. Next steps come from
     contextual highlighting in help for people (`cli-design-system.md` §
-    Contextual Highlighting) and from `guidance` for AI coworkers (OUT-5).
+    Contextual Highlighting) and from `guidance` for AI teammates (OUT-5).
 - **OUT-9 · Leaving the program's own world is explicit.** Reading or writing files
   the user did not name (other than the program's own state, such as a cache), and
   talking to a server, should happen because the user asked. *Source: [clig.dev §
@@ -560,7 +560,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   run as many copies at once, and run in environments nobody tested, such as
   filesystems that ignore case. *Source: [clig.dev §
   Robustness](https://clig.dev/#robustness-guidelines).*
-  - **ox:** many AI coworkers and worktrees drive one machine's clones at once;
+  - **ox:** many AI teammates and worktrees drive one machine's clones at once;
     git operations are serialized per clone
     ([ADR-030](ADR-030-per-clone-git-serialization.md)).
 
@@ -650,7 +650,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
 - **CHANGE-1 · Interfaces change only through a documented deprecation.**
   Subcommands, arguments, flags, configuration files, and environment variables
   are interfaces — and for ox, so are `--json` payloads and the `ox agent` output
-  AI coworkers parse. Semantic versioning does not excuse constant breakage.
+  AI teammates parse. Semantic versioning does not excuse constant breakage.
   *Source: [clig.dev § Future-proofing](https://clig.dev/#future-proofing).*
 - **CHANGE-2 · Prefer additive changes.** Add a new flag rather than changing an
   old one incompatibly, as long as the interface does not bloat. *Source:
@@ -703,7 +703,7 @@ applications such as editors. ox's full-screen Bubble Tea screens follow
   on by default, announce it at first run (and on the website), and offer a simple
   way to switch it off. *Source: [clig.dev § Analytics](https://clig.dev/#analytics).*
   - **ox:** opt-out. A notice appears once per install, only to a person at a
-    terminal — never in an AI coworker's transcript or `--json` output.
+    terminal — never in an AI teammate's transcript or `--json` output.
     `ox config get telemetry` lists what is sent and what never is;
     `ox config set telemetry off`, `DO_NOT_TRACK=1`, or `SAGEOX_TELEMETRY=false`
     turns it off. Events carry a random per-install ID, with PostHog's GeoIP
@@ -742,7 +742,7 @@ this ADR (§6).
 | RUN-4 | HTTP timeouts are fixed per client and cannot be configured. | `internal/api`, `internal/auth`, `internal/lfs` |
 | RUN-5 | `ox plan review` shuts its HTTP server down with no timeout. | `cmd/ox/plan_review.go` |
 | CONF-3 | Only daemon logs use `XDG_STATE_HOME`, and some paths are hard-coded under `~/.local/share` and ignore `XDG_DATA_HOME` (trusted endpoints, redact-history backups, the adapters directory `~/.local/share/ox/adapters`). Any path change is a Required Review. | `internal/paths/`; `cmd/ox/login_trusted_endpoints.go`; `cmd/ox/adapter.go` |
-| CONF-4 | `ox init` lists none of the files it changes and has no `--dry-run`; without a TTY it configures every detected AI coworker. The hooks it adds to `.claude/settings.json` carry no marker (ox recognizes them by command text), and its `.gitattributes` block has a start comment but no end marker. | `cmd/ox/init.go`; `internal/hooks/claude/detect.go`; `cmd/ox/doctor_sageox.go` |
+| CONF-4 | `ox init` lists none of the files it changes and has no `--dry-run`; without a TTY it configures every detected AI teammate. The hooks it adds to `.claude/settings.json` carry no marker (ox recognizes them by command text), and its `.gitattributes` block has a start comment but no end marker. | `cmd/ox/init.go`; `internal/hooks/claude/detect.go`; `cmd/ox/doctor_sageox.go` |
 | CONF-5 | Documented customer-facing variables use `OX_*`, which `CLAUDE.md` calls an anti-pattern: `OX_USER_CONFIG`, `OX_SESSION_RECORDING`, `OX_PROJECT_ROOT`, `OX_JSON`. Renaming one is a Required Review and follows CHANGE-3. | `internal/config/` |
 | CONF-6 | `DEBUG` is not read; ox's equivalent is `--verbose` / `OX_VERBOSE`. | — |
 | CHANGE-5 | With telemetry on and a login present, every command waits up to 3 s at exit to flush its timing traces. | `observability.Shutdown` in `internal/observability/otel.go` |
@@ -754,9 +754,9 @@ this ADR (§6).
 ### Positive
 
 - One set of guidelines, with stable IDs, of what an ox command owes a person and
-  an AI coworker. A review cites `INPUT-4` instead of re-arguing confirmation
+  an AI teammate. A review cites `INPUT-4` instead of re-arguing confirmation
   levels.
-- Contributors and AI coworkers read the baseline in the repository instead of
+- Contributors and AI teammates read the baseline in the repository instead of
   fetching a web page mid-review.
 - Deviations are listed with reasons, so the next reviewer can tell a choice from
   an accident.
@@ -774,7 +774,7 @@ this ADR (§6).
 ## Alternatives considered
 
 1. **Link clig.dev from `cli-design-system.md` and stop there.** A link binds no
-   one and gives reviewers nothing to cite, and it leaves the AI-coworker reading
+   one and gives reviewers nothing to cite, and it leaves the AI-teammate reading
    of "human-first" undecided.
 2. **Vendor clig.dev's text, or mark this file CC BY-SA 4.0.** CC BY-SA is on
    `CLAUDE.md`'s banned list.
@@ -786,7 +786,7 @@ this ADR (§6).
 4. **Ask the clig.dev authors for permission.** An outside request with no
    deadline, and unnecessary once the expression is ox's own.
 5. **Write ox guidelines with no reference baseline.** Reinvents ideas that
-   contributors — and the models behind AI coworkers — already know
+   contributors — and the models behind AI teammates — already know
    (`agent-ux-principles.md` §5).
 6. **Adopt an older or narrower guide** — the POSIX utility conventions, the GNU
    coding standards, Heroku's CLI style guide, or 12 Factor CLI Apps. clig.dev

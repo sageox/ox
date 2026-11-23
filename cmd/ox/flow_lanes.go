@@ -21,7 +21,7 @@ import (
 )
 
 // Flow lanes outside the Claude Code plugin: what each ox call moved between
-// SageOx and the AI coworker's session, drawn by internal/flowlane under
+// SageOx and the AI teammate's session, drawn by internal/flowlane under
 // each ox call in Codex and in Conductor's turn-end notice
 // (statusline_digest.go), and live in `ox statusline --watch`
 // (statusline_watch.go).
@@ -139,7 +139,7 @@ func recordFlowStart(projectRoot string, input *agentx.HookInput, now time.Time)
 	}
 	marker, err := ReadSessionMarker(input.SessionID)
 	if err != nil || marker == nil {
-		return // not primed: no AI coworker to file it under
+		return // not primed: no AI teammate to file it under
 	}
 	path := flowMarkerPath(projectRoot, marker.AgentID)
 	if path == "" || !flowLanesEnabled() {

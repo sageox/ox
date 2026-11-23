@@ -303,7 +303,7 @@ func TestCodexEnable_IsIdempotent(t *testing.T) {
 	require.Len(t, entries, 1, "no staging folder left behind")
 }
 
-// TestCodexStatus_Guidance covers what status tells an AI coworker to say.
+// TestCodexStatus_Guidance covers what status tells an AI teammate to say.
 func TestCodexStatus_Guidance(t *testing.T) {
 	t.Run("stale after an ox upgrade", func(t *testing.T) {
 		in := newCodexInstaller(t)

@@ -185,7 +185,7 @@ func TestSaveState_SurfacesFileWriteFailure(t *testing.T) {
 }
 
 // TestState_BumpDedupsRefs counts each item once per session and routes every
-// ref_type to its bucket. Failure prevented: an AI coworker re-reading one
+// ref_type to its bucket. Failure prevented: an AI teammate re-reading one
 // plan five times shows "5 plans", or a doc-kind ref lands in no bucket.
 func TestState_BumpDedupsRefs(t *testing.T) {
 	t.Parallel()

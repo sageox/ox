@@ -40,7 +40,7 @@ func TestCollectSkillsStatus_DistinguishesTheFailureModes(t *testing.T) {
 	t.Run("no team context configured", func(t *testing.T) {
 		out := collectSkillsStatus(t.TempDir())
 		require.Contains(t, strings.Join(out.Problems, "\n"), "no Team Context is configured")
-		require.NotEmpty(t, out.Guidance, "an AI coworker reading the JSON gets no next action")
+		require.NotEmpty(t, out.Guidance, "an AI teammate reading the JSON gets no next action")
 	})
 
 	t.Run("team context configured but not cloned", func(t *testing.T) {

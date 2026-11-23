@@ -28,13 +28,13 @@ const (
 	EventConsulted EventType = "consulted"
 	// EventInfluenced is emitted when the agent attributes a decision to specific context.
 	EventInfluenced EventType = "influenced"
-	// EventInvoked is emitted for an ox call the AI coworker made (recorded
+	// EventInvoked is emitted for an ox call the AI teammate made (recorded
 	// deterministically by the post-tool hook, or by prime for itself). It
 	// measures volume — what ox put in front of the model — and is NOT a
 	// consultation: posting a murmur is not reading team knowledge. Readers
 	// that switch on Type (recap, knowledgeflow) ignore it by construction.
 	EventInvoked EventType = "invoked"
-	// EventUsed is emitted when there is evidence the AI coworker actually used
+	// EventUsed is emitted when there is evidence the AI teammate actually used
 	// a specific piece of surfaced context — not merely received it. Evidence
 	// names how that was established (see the Evidence* constants) and so
 	// fixes its grade: retrieval/citation evidence is provable, a self-report
@@ -51,7 +51,7 @@ const (
 //   - reported (self-report): EvidenceReported, EvidenceNone
 //   - inferred (judge): EvidenceJudged
 //
-// EvidenceNone is the AI coworker explicitly reporting that no surfaced
+// EvidenceNone is the AI teammate explicitly reporting that no surfaced
 // context was used; it carries no ref.
 const (
 	EvidenceRead        = "read"         // read a surfaced doc / ledger path
@@ -81,7 +81,7 @@ const (
 	// non-deterministic grade — there is no server-side classifier.
 	MechanismSelfReport Mechanism = "self-report"
 	// MechanismCitation — deterministic, provable: the surfaced ref appears by
-	// name in the AI coworker's own output or in a commit message.
+	// name in the AI teammate's own output or in a commit message.
 	MechanismCitation Mechanism = "citation"
 	// MechanismJudge — inferred, the weakest grade: an LLM judge read the
 	// session and concluded the ref was used. Never treated as provable.

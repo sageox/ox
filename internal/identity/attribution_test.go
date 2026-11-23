@@ -124,7 +124,7 @@ func TestResolveAttribution_BogusEndpoint(t *testing.T) {
 	assert.NotEmpty(t, attr.DisplayName)
 }
 
-// --- F. AI coworker of a team token ---
+// --- F. AI teammate of a team token ---
 
 // Failure prevented: a coworker's work is attributed to its machine's git
 // identity, or its name is abbreviated like a person's.

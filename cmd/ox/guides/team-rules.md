@@ -1,19 +1,19 @@
 ---
 title: Team Rules
-description: How to share AI coworker conventions across your whole team via SageOx team context.
+description: How to share AI teammate conventions across your whole team via SageOx team context.
 audience: both
 ---
 
 # Team Rules
 
-Team rules are conventions, policies, and decisions that apply to **every AI coworker** working on your team's repos — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Cursor, Goose, and any other supported coding agent. They live in your team's SageOx team context, not in any single repo.
+Team rules are conventions, policies, and decisions that apply to **every AI teammate** working on your team's repos — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Cursor, Goose, and any other supported coding agent. They live in your team's SageOx team context, not in any single repo.
 
 ## Scope: who they reach
 
 A SageOx team rule applies to:
 
 - **All teammates who run `ox`** in a repo associated with the team. Teammates who don't use `ox` will not see it (same as `.claude/rules/` only reaching Claude users).
-- **All AI coworkers those teammates use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. ox selects a native projection or `ox agent prime` fallback for each tool.
+- **All AI teammates those coworkers use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. ox selects a native projection or `ox agent prime` fallback for each tool.
 
 ## When to use a team rule vs. a project-local rule
 
@@ -23,7 +23,7 @@ A SageOx team rule applies to:
 | `<team-context>/agents/rules/<topic>.md` (team) | Rule applies to your team's work generally: testing philosophy, security policy, escalation rules, code review conventions, language idioms. |
 | `~/.claude/rules/<topic>.md` (personal) | Rule is a personal preference that shouldn't be imposed on teammates. |
 
-If you're editing a `.claude/rules/` file and the rule is generally applicable (not tied to this codebase's specifics), your AI coworker should ask whether to also publish it to the team. Say yes when the answer is yes; say no for repo-specific rules.
+If you're editing a `.claude/rules/` file and the rule is generally applicable (not tied to this codebase's specifics), your AI teammate should ask whether to also publish it to the team. Say yes when the answer is yes; say no for repo-specific rules.
 
 ## File format
 
@@ -133,9 +133,9 @@ same prime fallback.
 ### Visibility tiers
 
 - **`always`** — full body is delivered every session, natively where possible and otherwise inline through `ox agent prime`. Reserve for hot, short, universally-applicable rules (security, escalation).
-- **`indexed`** (default, recommended) — only `name + description + path` appears in prime, unless `globs:` enables faithful native path activation. AI coworkers read indexed rules on demand.
+- **`indexed`** (default, recommended) — only `name + description + path` appears in prime, unless `globs:` enables faithful native path activation. AI teammates read indexed rules on demand.
 - **`hidden`** — not surfaced unless explicitly named. Use for drafts, archived rules, work-in-progress.
-- **`public`** — for a team that is public on SageOx: the rule is also published, with its name, `globs:` and body, in the project's public context, so outside contributors' AI coworkers follow it too (`ox agent prime` primes them from it in a clone of the SageOx-initialized repo; Cursor keeps the ordinary prime for now). Members get it like `indexed`. Anyone can read it, so never put anything private in a public rule. Only `visibility: public` publishes; `repos:`-scoped, `audience: human`, draft and superseded rules never do.
+- **`public`** — for a team that is public on SageOx: the rule is also published, with its name, `globs:` and body, in the project's public context, so outside contributors' AI teammates follow it too (`ox agent prime` primes them from it in a clone of the SageOx-initialized repo; Cursor keeps the ordinary prime for now). Members get it like `indexed`. Anyone can read it, so never put anything private in a public rule. Only `visibility: public` publishes; `repos:`-scoped, `audience: human`, draft and superseded rules never do.
 
 ### `valid-through:` — shelf life for knowledge that rots
 
@@ -197,7 +197,7 @@ when that tool's rule root already exists and the managed path is ignored by git
 Removing a rule, changing its `repos:` filter, or superseding it removes the derived
 projection. Do not edit a projection; edit the Team Context source.
 
-At session start, prime knows which AI coworker is active. An existing native
+At session start, prime knows which AI teammate is active. An existing native
 projection is omitted from prime; everything else keeps its inline or indexed
 fallback. This prevents duplicate native-plus-prime delivery. Scoped rules are never
 flattened into an unscoped native format.
@@ -217,7 +217,7 @@ Discipline:
 - **`indexed` rules** — can be longer; they only load when the agent decides they're relevant.
 - **One concern per file.** Same as `.claude/rules/`. Splitting big rules into focused files makes them easier to grep, supersede, and update.
 
-Run `ox agent list` to see the running cumulative token cost of context delivered into AI coworker sessions, split into three buckets:
+Run `ox agent list` to see the running cumulative token cost of context delivered into AI teammate sessions, split into three buckets:
 
 - **SageOx overhead** — what the ox tool itself injects (instructions, command lookups, attribution). SageOx is judged on this.
 - **Team content** — your team's AGENTS.md, rules (`always`-tier bodies), memory, distilled discussions. You control this.
@@ -244,7 +244,7 @@ git push
 ```
 
 The background Team Context sync applies the new rule automatically. Run `ox sync`
-for immediate convergence. At the next session boundary, every AI coworker receives
+for immediate convergence. At the next session boundary, every AI teammate receives
 the rule through its selected native, inline, or indexed path.
 
 ## See also

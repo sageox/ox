@@ -26,12 +26,12 @@ var memoryDistillCmd = &cobra.Command{
 	Short: "Distill accumulated observations into team memory summaries",
 	Long: `Distill accumulated observations into team memory summaries.
 
-This command is designed for AI coworkers. It reads pending observations
+This command is designed for AI teammates. It reads pending observations
 from the team context, sends them to the SageOx API for LLM-powered
 distillation, and updates the distill state.
 
 When run by a human, it explains the distillation process.
-When run by an AI coworker, it delegates to 'ox agent <id> distill'.`,
+When run by an AI teammate, it delegates to 'ox agent <id> distill'.`,
 	RunE: runMemoryDistill,
 }
 
@@ -41,12 +41,12 @@ When run by an AI coworker, it delegates to 'ox agent <id> distill'.`,
 func runMemoryDistill(cmd *cobra.Command, _ []string) error {
 	if errMsg := agentx.RequireAgent("ox memory distill"); errMsg != "" {
 		if !distillQuiet() {
-			fmt.Fprintln(cmd.OutOrStdout(), "Memory distillation is an automated process run by AI coworkers.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Memory distillation is an automated process run by AI teammates.")
 			fmt.Fprintln(cmd.OutOrStdout(), "")
 			fmt.Fprintln(cmd.OutOrStdout(), "How it works:")
-			fmt.Fprintln(cmd.OutOrStdout(), "  1. AI coworkers record observations via 'ox memory put'")
+			fmt.Fprintln(cmd.OutOrStdout(), "  1. AI teammates record observations via 'ox memory put'")
 			fmt.Fprintln(cmd.OutOrStdout(), "  2. Observations accumulate in the team context")
-			fmt.Fprintln(cmd.OutOrStdout(), "  3. Periodically, an AI coworker runs 'ox agent <id> distill'")
+			fmt.Fprintln(cmd.OutOrStdout(), "  3. Periodically, an AI teammate runs 'ox agent <id> distill'")
 			fmt.Fprintln(cmd.OutOrStdout(), "     to aggregate observations into team memory summaries")
 			fmt.Fprintln(cmd.OutOrStdout(), "")
 			fmt.Fprintln(cmd.OutOrStdout(), "This happens automatically — no human action needed.")

@@ -23,7 +23,7 @@ var safeSessionName = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9A-Za-z._:-]{1,1
 //
 // produceAgentTasks bridges the daemon's anti-entropy detection into the
 // project-local agent task queue (internal/agenttask). The next interactive AI
-// coworker picks the work up and runs it as a fresh-context subagent — instead
+// teammate picks the work up and runs it as a fresh-context subagent — instead
 // of the daemon forking `claude -p`, which bills against a separate account and
 // loses the developer's warm session.
 //
@@ -66,7 +66,7 @@ func (m *Manager) produceDoctorTask() {
 		}
 		// A completed inspection can clear the marker after this chore was
 		// queued. Retire only this producer's still-ready chore; never cancel
-		// work already claimed by an AI coworker.
+		// work already claimed by an AI teammate.
 		store, err := agenttask.NewStore(m.projectRoot)
 		if err != nil {
 			m.logger.Debug("task producer: open doctor task store failed", "error", err)
