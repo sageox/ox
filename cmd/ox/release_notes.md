@@ -20,15 +20,14 @@ See team context reach your AI coworker in Claude Code's terminal, Codex and Con
 
 ### Improved
 
-- **Sessions started from another session group under it** on SageOx.
 - **`ox brief` is gone** — use `ox session report`, which takes the same flags.
 - **`ox init` and `ox doctor` no longer claim other coding agents are untested.**
 
 ### Fixed
 
 - **The ox daemon no longer blocks your git commits** with `index.lock: File exists`.
-- **Sessions reach the Ledger whole** — after `/exit`, from Git worktrees, and with Claude's last answer. Long imports succeed, recordings are never overwritten, and a failed stop says how to recover.
-- **A paused session stays paused** for AI coworkers launched from it, even through `/clear`.
+- **Sessions reach the Ledger whole** — after `/exit`, from Git worktrees, and with Claude's last answer. Long imports succeed and recordings are never overwritten.
+- **AI coworkers launched from a recorded session get their own recording** and stay paused while it is paused, even through `/clear`.
 - **Codex, Goose and OpenCode record correctly** — each ChatGPT desktop chat is its own session, and Goose and OpenCode hooks run.
 - **The status line's "used" count updates every turn** and matches `/ox-session-report`.
 - **Team Context and Ledger sync more reliably** — `ox addons` and `ox memory put` changes reach the team, and AI coworker commits stay credited despite a global `author.email`.
