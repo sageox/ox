@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -34,13 +36,93 @@ import (
 const maxFrictionRetries = 1
 
 // ansiStripper wraps a writer and strips ANSI escape codes on Write.
+//
+// Writes arrive in arbitrary chunks (io.Copy hands over 32 KiB at a time), so a
+// multi-byte UTF-8 character or an escape sequence can straddle two Writes.
+// Stripping each half on its own turns a character into two U+FFFD marks and
+// leaks an escape's tail ("m") as text, so the unfinished tail is held back and
+// prepended to the next Write; Flush emits whatever is left at EOF.
 type ansiStripper struct {
-	w io.Writer
+	w       io.Writer
+	pending []byte // an unfinished UTF-8 or escape sequence the last Write ended in
 }
 
 func (s *ansiStripper) Write(p []byte) (int, error) {
-	_, err := s.w.Write([]byte(ansi.Strip(string(p))))
+	data := p
+	if len(s.pending) > 0 {
+		data = append(s.pending, p...)
+		s.pending = nil
+	}
+	cut := len(data) - max(incompleteUTF8Tail(data), incompleteEscapeTail(data))
+	if cut < len(data) {
+		s.pending = append([]byte(nil), data[cut:]...)
+	}
+	if cut == 0 {
+		return len(p), nil
+	}
+	_, err := s.w.Write([]byte(ansi.Strip(string(data[:cut]))))
 	return len(p), err // report original length to caller
+}
+
+// Flush writes any bytes still held back. Call it once the source is drained;
+// a sequence still unfinished at EOF is invalid input and passes through as is.
+func (s *ansiStripper) Flush() error {
+	if len(s.pending) == 0 {
+		return nil
+	}
+	b := s.pending
+	s.pending = nil
+	_, err := s.w.Write([]byte(ansi.Strip(string(b))))
+	return err
+}
+
+// maxEscapeHold bounds how far back an unterminated escape is held. Real CSI
+// and OSC sequences (colors, hyperlinks) are far shorter; a lone ESC in
+// garbage input must not make the stripper buffer without limit.
+const maxEscapeHold = 256
+
+// incompleteEscapeTail reports how many trailing bytes of b are an escape
+// sequence b does not finish: ESC alone, a CSI (ESC [) without its final byte
+// 0x40-0x7E, or an OSC (ESC ]) without BEL or ST (ESC \).
+func incompleteEscapeTail(b []byte) int {
+	start := bytes.LastIndexByte(b, 0x1b)
+	if start < 0 || len(b)-start > maxEscapeHold {
+		return 0
+	}
+	seq := b[start:]
+	if len(seq) == 1 {
+		return len(seq)
+	}
+	switch seq[1] {
+	case '[':
+		for _, c := range seq[2:] {
+			if c >= 0x40 && c <= 0x7e {
+				return 0
+			}
+		}
+		return len(seq)
+	case ']':
+		if bytes.IndexByte(seq[2:], 0x07) >= 0 {
+			return 0
+		}
+		return len(seq)
+	default:
+		return 0 // a two-byte escape, already complete
+	}
+}
+
+// incompleteUTF8Tail reports how many trailing bytes of b start a UTF-8
+// sequence that b does not finish (0 when b ends on a rune boundary).
+func incompleteUTF8Tail(b []byte) int {
+	for i := 1; i < utf8.UTFMax && i <= len(b); i++ {
+		if utf8.RuneStart(b[len(b)-i]) {
+			if utf8.FullRune(b[len(b)-i:]) {
+				return 0
+			}
+			return i
+		}
+	}
+	return 0
 }
 
 // stdoutDone reports the copy result so main can fail if output was lost.
@@ -89,7 +171,11 @@ func init() {
 			go func() {
 				// Keep Go's default SIGPIPE behavior for early-closing consumers
 				// such as head; other write errors are reported by main.
-				_, err := io.Copy(&ansiStripper{realStdout}, pr)
+				stripper := &ansiStripper{w: realStdout}
+				_, err := io.Copy(stripper, pr)
+				if flushErr := stripper.Flush(); err == nil {
+					err = flushErr
+				}
 				// Unblock a producer still writing after the destination failed.
 				_ = pr.Close()
 				stdoutDone <- err
@@ -106,7 +192,9 @@ func init() {
 			go func() {
 				defer stderrWg.Done()
 				defer pr.Close()
-				io.Copy(&ansiStripper{realStderr}, pr) //nolint:errcheck // best-effort
+				stripper := &ansiStripper{w: realStderr}
+				io.Copy(stripper, pr) //nolint:errcheck // best-effort
+				_ = stripper.Flush()
 			}()
 		}
 	}
