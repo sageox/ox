@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.27.1] - 2026-11-23
 
-Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Every session now reaches your team, and ox never gets in the way of a commit.
+Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Sessions reach your team more reliably, and ox no longer blocks your commits.
 
 *0.27.1 is 0.27.0 re-released: 0.27.0 was published without downloadable binaries.*
 
@@ -29,7 +29,7 @@ Know what your team's knowledge is doing for your AI coworker, in Claude Code's 
 ### Fixed
 
 - **Commit without interruptions** — git no longer fails with `index.lock: File exists` while ox runs.
-- **Every session reaches your team** — after `/exit`, from Git worktrees, and with the final answer intact. Long imports succeed, and recordings are never overwritten.
+- **Fewer sessions get stuck on your machine** — they upload after `/exit` and from Git worktrees, with the final answer intact. Long imports succeed, and existing recordings are protected.
 - **Paused means paused** — AI coworkers launched from a paused session stay paused, even through `/clear`.
 - **Codex, Goose and OpenCode sessions record correctly** — each ChatGPT desktop chat is its own session.
 - **Trust the "used" count** — the status line updates every turn and matches `/ox-session-report`.
