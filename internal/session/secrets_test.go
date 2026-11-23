@@ -444,6 +444,18 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "apostrophe in password still redacted",
+			input:    "postgres://app:secr'etpass@db.example.com/prod",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "apostrophe in username still redacted",
+			input:    "mongodb://o'brien:secretpass@db.internal.example.com/app",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
 			name:     "host and port without password keep a later email",
 			input:    `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
 			expected: `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
