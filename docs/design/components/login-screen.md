@@ -26,7 +26,7 @@ Foreground operations with predictable durations — use inline [Spinner](spinne
 | State | What prints | Source |
 |---|---|---|
 | Waiting for approval | `Visit:` link, `Code:` line (always), then the [Spinner](spinner.md) | `cli.DeviceCodeLines` |
-| Approved, at a color terminal | Three lines (who, where, next) with the SageOx mark beside them | `cli.LoginArrival`, `ui.RenderMark` |
+| Approved, at a color terminal | Three lines (who, where, next) with the SageOx mark beside them, or Oxy's confetti still until the `new_logo` rollout is on | `cli.LoginArrival`, `ui.RenderMark` |
 | Approved, piped / CI / `--quiet` / `--json` | The same three lines, no art | `cli.LoginArrival` |
 | Denied or expired | The error, then one retry line | `loginFailure` in `cmd/ox/login_arrival.go` |
 

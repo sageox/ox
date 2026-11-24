@@ -48,6 +48,11 @@ type Flags struct {
 	// phase). Server-evaluated rollout, default off, no FEATURE_* env override:
 	// nothing local can start sending live session content to the cloud.
 	SessionStreamingEnabled bool
+	// NewLogoEnabled draws the v5 SageOx mark in the terminal (bare `ox`, the
+	// `ox login` success block). It is the same server-evaluated `new_logo`
+	// rollout the web and desktop apps follow, so every surface flips at once.
+	// Default off; FEATURE_NEW_LOGO overrides it locally for previewing.
+	NewLogoEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -76,6 +81,7 @@ type Patch struct {
 	GitHubMirrorEnabled *bool
 	// SessionStreamingEnabled has no EnvProvider mapping by design.
 	SessionStreamingEnabled *bool
+	NewLogoEnabled          *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -127,6 +133,8 @@ func Defaults() Flags {
 		GitHubMirrorEnabled: false, // server-evaluated rollout; no env override by design
 
 		SessionStreamingEnabled: false, // server-evaluated rollout; no env override by design
+
+		NewLogoEnabled: false, // server-evaluated `new_logo` brand rollout; FEATURE_NEW_LOGO previews it
 	}
 }
 

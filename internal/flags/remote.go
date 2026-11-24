@@ -46,6 +46,9 @@ type CLIFeatures struct {
 	// SessionStreaming gates real-time session streaming (ADR-247). Server-
 	// evaluated, default off, no env override.
 	SessionStreaming *bool `json:"session_streaming,omitempty"`
+	// NewLogo is the brand rollout flag shared with the web and desktop apps:
+	// on, the terminal draws the v5 SageOx mark. Absent or null is no opinion.
+	NewLogo *bool `json:"new_logo,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -81,6 +84,7 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		BulletinEnabled:         r.Features.Bulletin,
 		GitHubMirrorEnabled:     r.Features.GitHubMirror,
 		SessionStreamingEnabled: r.Features.SessionStreaming,
+		NewLogoEnabled:          r.Features.NewLogo,
 		DisableFileDeleteTools:  boolPtr(r.Killswitches.DisableFileDeleteTools),
 		DisableShellExecTools:   boolPtr(r.Killswitches.DisableShellExecTools),
 		PrimeAppend:             strPtr(r.PrimeAppend),

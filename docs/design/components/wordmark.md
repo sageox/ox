@@ -35,7 +35,7 @@ ui.RenderMark() []string
 
 Pass `version=""` to render the wordmark alone (no version line). Pass `fixMode=true` to append a dim `— fix mode` tag to the version.
 
-`RenderMark` is the SageOx mark on its own: 6 rows of 21 columns, in braille, for a spot beside other text (`ox login`'s success block). It is drawn from a 42 by 24 bitmap in the same file; edit the bitmap, not the braille.
+`RenderMark` is the SageOx mark on its own: 6 rows of 21 columns, in braille, for a spot beside other text (`ox login`'s success block, and the header of bare `ox`). Both show it only under the `new_logo` brand rollout (`flags.Get().NewLogoEnabled`; `FEATURE_NEW_LOGO=1` previews it). It is drawn from a 42 by 24 bitmap in the same file; edit the bitmap, not the braille.
 
 ## Accessibility & fallbacks
 

@@ -36,6 +36,7 @@ Error: authentication failed: authorization was denied
 - **Success is three lines.** Who, where, what's next. Next is always `ox init`: no rotating tip, no disclaimer, no wordmark. Login is a step, not a destination. The mark beside the block is six rows and adds none.
 - **"Welcome back" is earned.** Only when ox held a stored login for this account on this endpoint before the flow ran.
 - **The SageOx mark is for a person at a color terminal.** Everyone else gets the same three lines, byte for byte.
+- **The mark follows the `new_logo` brand rollout,** the same server flag the web and desktop apps follow. Until it is on, the art is Oxy's confetti still. `FEATURE_NEW_LOGO=1` previews it locally.
 - **Failures get one retry line.** Denied and expired both end with the command to run again.
 
 <details>

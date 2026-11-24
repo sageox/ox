@@ -22,11 +22,17 @@ func rootHeaderLines() []string {
 }
 
 // rootHeaderArt is the SageOx mark for the root help header, or nil when it
-// may not be drawn: the same audience rule as `ox login` (a person at a color
-// terminal, never a pipe, CI, an AI coworker, --json or NO_COLOR), and only
-// when the header still fits beside it in width columns.
+// may not be drawn.
 func rootHeaderArt(out io.Writer, width int) []string {
-	if !currentLoginArtEnv(out).allowed() {
+	return rootHeaderArtFor(currentLoginArtEnv(out), width)
+}
+
+// rootHeaderArtFor is rootHeaderArt for a given audience: only under the
+// `new_logo` brand rollout, only for a person at a color terminal (the same
+// rule as `ox login`: never a pipe, CI, an AI coworker, --json or NO_COLOR),
+// and only when the header still fits beside it in width columns.
+func rootHeaderArtFor(env loginArtEnv, width int) []string {
+	if !env.NewLogo || !env.allowed() {
 		return nil
 	}
 	art := ui.RenderMark()

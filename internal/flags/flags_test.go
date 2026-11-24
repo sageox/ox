@@ -714,3 +714,41 @@ func TestSessionStreamingFlagHasNoEnvOverride(t *testing.T) {
 		t.Fatal("env var enabled session streaming")
 	}
 }
+
+// TestNewLogoFlagResolves walks the `new_logo` brand rollout through the real
+// startup path — a settings payload from the server, then FEATURE_NEW_LOGO
+// layered on top — and checks which mark the terminal would draw.
+//
+// Failure prevented: the CLI flipping to the v5 mark before the web and
+// desktop apps (absent/null read as on), never flipping when the server turns
+// the rollout on, or the local preview override being silently ignored.
+func TestNewLogoFlagResolves(t *testing.T) {
+	tests := []struct {
+		name     string
+		features string
+		env      string
+		want     bool
+	}{
+		{name: "absent key stays on the old mark", features: `{}`, want: false},
+		{name: "null stays on the old mark", features: `{"new_logo":null}`, want: false},
+		{name: "server off", features: `{"new_logo":false}`, want: false},
+		{name: "server on", features: `{"new_logo":true}`, want: true},
+		{name: "env previews it before the server", features: `{}`, env: "1", want: true},
+		{name: "env turns it off over the server", features: `{"new_logo":true}`, env: "false", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FEATURE_NEW_LOGO", tt.env)
+			raw := `{"features":` + tt.features + `,"killswitches":{},"fetched_at":"` +
+				time.Now().UTC().Format(time.RFC3339) + `"}`
+			var resp flags.CLISettingsResponse
+			if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+			f := flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: &resp}, flags.EnvProvider{})
+			if f.NewLogoEnabled != tt.want {
+				t.Errorf("NewLogoEnabled = %v, want %v", f.NewLogoEnabled, tt.want)
+			}
+		})
+	}
+}

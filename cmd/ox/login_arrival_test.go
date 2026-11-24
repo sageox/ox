@@ -160,15 +160,22 @@ func TestLoginArt_NeverDrawsToAWriterThatIsNotATerminal(t *testing.T) {
 	assert.Nil(t, loginArt(io.Discard, arrival, 80))
 }
 
-// TestLoginArtFor verifies the SageOx mark reaches the success block for a
+// TestLoginArtFor verifies the success block's art follows the `new_logo`
+// rollout — Oxy's confetti still before it, the SageOx mark under it — for a
 // person at a color terminal, and is left out when the block would not fit
 // beside it.
-// Failure prevented: a long email pushing the block past the terminal's edge,
-// so the mark wraps into noise above the one line the person needs.
+// Failure prevented: login showing the v5 mark before launch (or Oxy after),
+// or a long email pushing the block past the terminal's edge so the art wraps
+// into noise above the one line the person needs.
 func TestLoginArtFor(t *testing.T) {
 	person := loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.TrueColor}
 	arrival := cli.NewLoginArrival("Person A", "person.a@company.test", "sageox.ai", true)
 
+	oxy := loginArtFor(person, arrival, 80)
+	require.Len(t, oxy, loginArtRows, "rollout off: Oxy, one string per terminal row")
+	assert.NotContains(t, ansi.Strip(strings.Join(oxy, "")), "⣿", "rollout off: not the mark")
+
+	person.NewLogo = true
 	lines := loginArtFor(person, arrival, 80)
 	require.Len(t, lines, ui.MarkRows, "one string per terminal row")
 	assert.Contains(t, ansi.Strip(lines[len(lines)/2]), "⣿", "something is drawn")
@@ -176,7 +183,7 @@ func TestLoginArtFor(t *testing.T) {
 	assert.Nil(t, loginArtFor(person, arrival, 60), "a terminal too narrow for both gets the text alone")
 	long := cli.NewLoginArrival("Person A", strings.Repeat("a", 50)+"@company.test", "sageox.ai", true)
 	assert.Nil(t, loginArtFor(person, long, 80), "a block too wide for the mark gets the text alone")
-	assert.Nil(t, loginArtFor(loginArtEnv{StdoutTerminal: true, Interactive: true, Quiet: true, Profile: colorprofile.TrueColor}, arrival, 80),
+	assert.Nil(t, loginArtFor(loginArtEnv{StdoutTerminal: true, Interactive: true, Quiet: true, Profile: colorprofile.TrueColor, NewLogo: true}, arrival, 80),
 		"--quiet gets the text alone")
 }
 

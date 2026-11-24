@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/colorprofile"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/pet"
 	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/ui"
 )
@@ -19,6 +22,15 @@ import (
 // login_arrival.go — the parts of `ox login`'s two attention moments that need
 // ox's state: the device-code response, the stored login, the terminal. The
 // text itself is internal/cli/login_arrival.go.
+
+// Oxy's celebration beside the success block while the `new_logo` rollout is
+// off: one still from the confetti loop, arms up, small enough that login
+// stays a step and not a destination.
+const (
+	loginArtAnimation = "confetti"
+	loginArtPosition  = 0.35
+	loginArtRows      = 6
+)
 
 // writeDeviceInstructions prints where to go and the code to match there.
 func writeDeviceInstructions(out io.Writer, deviceCode *auth.DeviceCodeResponse) {
@@ -70,7 +82,7 @@ func isReturningLogin(prior *auth.StoredToken, now auth.UserInfo) bool {
 	return false
 }
 
-// loginArtEnv is everything that decides whether the mark may appear.
+// loginArtEnv is everything that decides whether art may appear, and which.
 type loginArtEnv struct {
 	StdoutTerminal bool
 	Interactive    bool // cli.IsInteractive: a TTY on stdin, and no --no-input, --no-interactive or CI
@@ -78,6 +90,7 @@ type loginArtEnv struct {
 	JSON           bool
 	AgentContext   bool
 	Profile        colorprofile.Profile
+	NewLogo        bool // the `new_logo` brand rollout: the SageOx mark instead of Oxy
 }
 
 // allowed is true only for a person at a color terminal. A pipe, CI, an AI
@@ -94,6 +107,7 @@ func currentLoginArtEnv(out io.Writer) loginArtEnv {
 		Interactive:    cli.IsInteractive(),
 		AgentContext:   agentx.IsAgentContext(),
 		Profile:        theme.Profile,
+		NewLogo:        flags.Get().NewLogoEnabled,
 	}
 	if cfg != nil {
 		env.Quiet, env.JSON = cfg.Quiet, cfg.JSON
@@ -101,9 +115,10 @@ func currentLoginArtEnv(out io.Writer) loginArtEnv {
 	return env
 }
 
-// loginArt is the SageOx mark for the success block, one string per terminal
-// row, or nil when it may not be drawn or the block would not fit beside it in
-// width columns. A wrapped mark is worse than none.
+// loginArt is the art for the success block, one string per terminal row, or
+// nil when it may not or cannot be drawn: the SageOx mark under the `new_logo`
+// rollout, Oxy's confetti still before it. Art is never worth failing a login
+// over, and a wrapped picture is worse than none.
 func loginArt(out io.Writer, arrival cli.LoginArrival, width int) []string {
 	return loginArtFor(currentLoginArtEnv(out), arrival, width)
 }
@@ -113,9 +128,22 @@ func loginArtFor(env loginArtEnv, arrival cli.LoginArrival, width int) []string 
 	if !env.allowed() {
 		return nil
 	}
-	art := ui.RenderMark()
-	if arrival.WidthBeside(art) > width {
+	art := oxyLoginArt()
+	if env.NewLogo {
+		art = ui.RenderMark()
+	}
+	if art == nil || arrival.WidthBeside(art) > width {
 		return nil
 	}
 	return art
+}
+
+// oxyLoginArt is Oxy's confetti still, or nil when it cannot be drawn.
+func oxyLoginArt() []string {
+	art, err := pet.TerminalFrame(loginArtAnimation, loginArtPosition, loginArtRows)
+	if err != nil {
+		slog.Debug("login: Oxy art unavailable", "error", err)
+		return nil
+	}
+	return art.Lines
 }

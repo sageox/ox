@@ -20,6 +20,9 @@ func (EnvProvider) Patch(_ context.Context) (*Patch, Source, error) {
 		TUIEnabled:     envBoolPtr("FEATURE_TUI"),
 		AttestEnabled:  envBoolPtr("FEATURE_ATTEST"),
 		TraceEnabled:   envBoolPtr("FEATURE_TRACE"),
+		// NewLogoEnabled previews the brand rollout before the server turns it
+		// on: it only changes which mark the terminal draws.
+		NewLogoEnabled: envBoolPtr("FEATURE_NEW_LOGO"),
 		// BulletinEnabled and GitHubMirrorEnabled are deliberately absent: they are
 		// server-evaluated rollouts, and a local env var must not be able to turn
 		// on a command or relay that publishes to the team's board.
@@ -58,6 +61,7 @@ func allNil(p *Patch) bool {
 		p.BulletinEnabled == nil &&
 		p.GitHubMirrorEnabled == nil &&
 		p.SessionStreamingEnabled == nil &&
+		p.NewLogoEnabled == nil &&
 		p.DisableFileDeleteTools == nil &&
 		p.DisableShellExecTools == nil &&
 		p.PrimeAppend == nil
