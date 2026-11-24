@@ -243,3 +243,53 @@ func TestOrphanedStubSweepKeepsAQuarantinedRecording(t *testing.T) {
 		t.Fatalf("the sweep must still reap an ordinary dead header-only stub: %+v", res)
 	}
 }
+
+// Release by name trusts only markers ox wrote. A marker committed to the
+// repository's legacy sessions/ folder, or one claiming another folder, is not
+// a quarantined recording that can be released.
+func TestLoadQuarantinedRecordingNamed_OnlyFromCachesOxWrites(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	state, err := StartRecording(project, StartRecordingOptions{AgentID: "OxNamed", AdapterName: "claude-code", Username: "testuser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SourceRejected = true
+	if err := SaveRecordingState(project, state); err != nil {
+		t.Fatal(err)
+	}
+	name := GetSessionName(state.SessionPath)
+
+	found, err := LoadQuarantinedRecordingNamed(project, name)
+	if err != nil || found == nil || found.SessionID != state.SessionID {
+		t.Fatalf("the cache recording must be found: %+v, %v", found, err)
+	}
+
+	forge := func(dir string, sessionPath string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		forged := *state
+		forged.AgentID = "OxForged"
+		forged.SessionPath = sessionPath
+		data, err := json.Marshal(forged)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, recordingFile), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyName := "2001-02-03T04-05-testuser-OxForged"
+	legacy := filepath.Join(project, "sessions", legacyName)
+	forge(legacy, legacy)
+	if found, err := LoadQuarantinedRecordingNamed(project, legacyName); err != nil || found != nil {
+		t.Fatalf("a marker in the in-repo legacy folder must be skipped: %+v, %v", found, err)
+	}
+
+	elsewhereName := "2001-02-03T04-06-testuser-OxForged"
+	forge(filepath.Join(filepath.Dir(state.SessionPath), elsewhereName), legacy)
+	if found, err := LoadQuarantinedRecordingNamed(project, elsewhereName); err != nil || found != nil {
+		t.Fatalf("a marker claiming another folder must be skipped: %+v, %v", found, err)
+	}
+}

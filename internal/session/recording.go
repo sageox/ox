@@ -730,6 +730,41 @@ func LoadQuarantinedRecordingsForAgent(projectRoot, agentID string) ([]*Recordin
 	return held, nil
 }
 
+// LoadQuarantinedRecordingNamed returns the quarantined recording in the session
+// folder named name, or nil when there is none. It reads only the caches ox
+// writes recordings to: markers in the in-repo legacy sessions/ folder are
+// skipped, since anyone who can commit to the repository controls them and ox
+// never quarantines there. A marker whose SessionPath names a folder other than
+// the one it was found in is skipped too.
+func LoadQuarantinedRecordingNamed(projectRoot, name string) (*RecordingState, error) {
+	if name == "" {
+		return nil, fmt.Errorf("%w: session name", ErrEmptyPath)
+	}
+	legacy := filepath.Clean(filepath.Join(projectRoot, "sessions"))
+	var found *RecordingState
+	err := walkRecordingMarkers(projectRoot, false, func(dir string, state *RecordingState) bool {
+		if !state.SourceRejected || filepath.Base(dir) != name || filepath.Clean(filepath.Dir(dir)) == legacy {
+			return true
+		}
+		if !samePath(dir, state.SessionPath) {
+			return true
+		}
+		found = state
+		return false
+	})
+	return found, err
+}
+
+// samePath reports whether a and b name the same existing file or directory.
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ai, aErr := os.Stat(a)
+	bi, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(ai, bi)
+}
+
 // LoadRecordingStateForWorkspace finds the recording whose WorkspacePath
 // matches the given workspace. Returns nil, nil if no match.
 // Use this for human (non-agent) commits where SAGEOX_AGENT_ID is not set —

@@ -121,14 +121,12 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot, sessionName st
 // quarantinedRecordingNamed returns the quarantined recording whose folder is
 // sessionName, as 'ox doctor' lists it.
 func quarantinedRecordingNamed(projectRoot, sessionName string) (*session.RecordingState, error) {
-	states, err := session.LoadAllRecordingStates(projectRoot)
+	state, err := session.LoadQuarantinedRecordingNamed(projectRoot, sessionName)
 	if err != nil {
 		return nil, fmt.Errorf("no recording state found: %w", err)
 	}
-	for _, s := range states {
-		if s.SourceRejected && session.GetSessionName(s.SessionPath) == sessionName {
-			return s, nil
-		}
+	if state != nil {
+		return state, nil
 	}
 	return nil, fmt.Errorf("no quarantined recording named %s\nRun 'ox doctor' to list quarantined recordings", sessionName)
 }
@@ -158,21 +156,44 @@ func runForExpiredQuarantineOwner(cmd *cobra.Command, agentID string, args []str
 	if err != nil {
 		return false, nil
 	}
-	if sessionName != "" {
-		// only the agent's own quarantined recording, never another session
-		// that shares the name
-		named, err := quarantinedRecordingNamed(projectRoot, sessionName)
-		if err != nil || named.AgentID != agentID {
+	inst := &agentinstance.Instance{AgentID: agentID}
+	if sessionName == "" {
+		held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+		if err != nil || len(held) == 0 {
 			return false, nil
 		}
-	} else if held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID); err != nil || len(held) == 0 {
+		if len(held) > 1 {
+			return true, fmt.Errorf("agent %s has %d quarantined recordings; name the one to release: ox agent %s session recover --release-quarantine <session>\nRun 'ox doctor' to list them", agentID, len(held), agentID)
+		}
+		return true, releaseAndRecover(inst, projectRoot, "")
+	}
+	// only the agent's own quarantined recording, never another session that
+	// shares the name
+	named, err := quarantinedRecordingNamed(projectRoot, sessionName)
+	if err != nil || named.AgentID != agentID {
 		return false, nil
 	}
-	inst := &agentinstance.Instance{AgentID: agentID}
 	if args[1] == "abort" {
+		if err := abortResolvesTo(projectRoot, sessionName, named.SessionPath); err != nil {
+			return true, err
+		}
 		return true, runAgentSessionAbort(inst, cmd, []string{sessionName})
 	}
 	return true, releaseAndRecover(inst, projectRoot, sessionName)
+}
+
+// abortResolvesTo refuses a discard by name unless the name resolves to the
+// quarantined recording at want, so another folder sharing the name in a
+// higher-priority store is never deleted under the expired owner's check.
+func abortResolvesTo(projectRoot, sessionName, want string) error {
+	_, got, err := resolveSessionForAbort(projectRoot, sessionName)
+	if err == nil && sameDir(got, want) {
+		return nil
+	}
+	if got == "" {
+		got = "nothing on this machine"
+	}
+	return fmt.Errorf("session %s resolves to %s, not the quarantined recording at %s; nothing was removed", sessionName, got, want)
 }
 
 // firstPositional returns args' leading positional argument, or "" when it is
