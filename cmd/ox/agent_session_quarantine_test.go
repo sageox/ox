@@ -758,3 +758,99 @@ func TestPublishPaths_RefuseAHeldSession(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(dir, "summary.json"), "nothing is written into a held session")
 	assert.DirExists(t, dir, "and nothing is removed")
 }
+
+// setReleaseQuarantineFlag sets --release-quarantine as cobra would.
+func setReleaseQuarantineFlag(t *testing.T) {
+	t.Helper()
+	require.NoError(t, agentCmd.ParseFlags(nil)) // merges persistent flags into Flags(), as cobra's dispatch does
+	require.NoError(t, agentCmd.PersistentFlags().Set("release-quarantine", "true"))
+	t.Cleanup(func() { _ = agentCmd.PersistentFlags().Set("release-quarantine", "false") })
+}
+
+// quarantinedWithoutInstance quarantines a recording whose source passes the
+// re-check, for an AI coworker whose instance has expired out of the store.
+func quarantinedWithoutInstance(t *testing.T) (projectRoot, agentID, sessionName string) {
+	t.Helper()
+	projectRoot, agentID, _ = setupHandleAfterToolTest(t)
+	t.Setenv("SAGEOX_ENDPOINT", "http://127.0.0.1:9")
+	t.Setenv("DO_NOT_TRACK", "1")
+	t.Setenv("SAGEOX_TELEMETRY", "false")
+	isolateSessionMarkerDir(t)
+	t.Chdir(projectRoot)
+	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+	held := heldRecording(t, projectRoot, agentID)
+	_, err := resolveInstance(agentID)
+	require.ErrorContains(t, err, "instance not found", "the recording's AI coworker must be gone from the instance store")
+	return projectRoot, agentID, session.GetSessionName(held.SessionPath)
+}
+
+// An instance expires a day after its AI coworker exits, while its quarantined
+// recording waits indefinitely. The command 'ox doctor' prints names that
+// recording's agent ID, so it must still work once the instance is gone.
+// Failure prevented: every recording quarantined more than a day ago could only
+// be discarded (sageox/ox#2029).
+func TestReleaseQuarantine_WorksAfterTheInstanceExpires(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args func(sessionName string) []string
+	}{
+		{"without a session name", func(string) []string { return []string{"session", "recover"} }},
+		{"with the session name", func(name string) []string { return []string{"session", "recover", name} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, agentID, sessionName := quarantinedWithoutInstance(t)
+			setReleaseQuarantineFlag(t)
+
+			require.NoError(t, runWithAgentID(agentCmd, agentID, tt.args(sessionName)))
+
+			remaining, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			assert.Empty(t, remaining, "a recording whose source passes the re-check is recovered")
+		})
+	}
+}
+
+// A coworker with a live AI coworker passes the session name 'ox doctor'
+// listed. The release must act on that recording, whichever agent made it.
+func TestReleaseQuarantine_ByNameFromAnotherAgent(t *testing.T) {
+	projectRoot, agentID, sessionName := quarantinedWithoutInstance(t)
+	registerTestInstance(t, projectRoot, "OxLive")
+	setReleaseQuarantineFlag(t)
+
+	err := runWithAgentID(agentCmd, "OxLive", []string{"session", "recover", "2001-02-03T04-05-testuser-OxNope"})
+	require.ErrorContains(t, err, "no quarantined recording named 2001-02-03T04-05-testuser-OxNope")
+	require.Equal(t, agentID, heldRecording(t, projectRoot, agentID).AgentID, "a name that matches nothing leaves the recording alone")
+
+	require.NoError(t, runWithAgentID(agentCmd, "OxLive", []string{"session", "recover", sessionName}))
+	remaining, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// The other way out 'ox doctor' offers, discarding by name, must also work
+// under the recording's agent ID once its instance has expired.
+func TestAbortQuarantinedByNameAfterTheInstanceExpires(t *testing.T) {
+	projectRoot, agentID, sessionName := quarantinedWithoutInstance(t)
+	held := heldRecording(t, projectRoot, agentID)
+	setForceFlag(t, true)
+
+	require.NoError(t, runWithAgentID(agentCmd, agentID, []string{"session", "abort", sessionName}))
+
+	_, statErr := os.Stat(held.SessionPath)
+	assert.True(t, os.IsNotExist(statErr), "the quarantined recording is discarded")
+}
+
+// The fallback stands only on a quarantined recording. An unknown agent ID, or
+// any other command under an expired one, still fails at the instance lookup.
+func TestExpiredInstanceFallbackIsLimitedToQuarantinedRecordings(t *testing.T) {
+	_, agentID, _ := quarantinedWithoutInstance(t)
+
+	err := runWithAgentID(agentCmd, agentID, []string{"session", "recover"})
+	require.ErrorContains(t, err, "instance not found", "recover without a release has nothing to fall back on")
+	err = runWithAgentID(agentCmd, agentID, []string{"session", "stop"})
+	require.ErrorContains(t, err, "instance not found")
+
+	setReleaseQuarantineFlag(t)
+	err = runWithAgentID(agentCmd, "OxNone", []string{"session", "recover"})
+	require.ErrorContains(t, err, "instance not found: OxNone", "an agent with no quarantined recording is still unknown")
+}

@@ -782,17 +782,22 @@ func (c *SessionQuarantineCheck) Run(_ context.Context, _ bool) CheckResult {
 		}
 	}
 
-	agentIDs := make([]string, 0, len(status.QuarantinedRecordings))
+	names := make([]string, 0, len(status.QuarantinedRecordings))
 	for _, state := range status.QuarantinedRecordings {
-		agentIDs = append(agentIDs, state.AgentID)
+		names = append(names, filepath.Base(state.SessionPath))
 	}
 	first := status.QuarantinedRecordings[0]
+	firstName := filepath.Base(first.SessionPath)
+	fix := fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine %s' to re-check ownership and upload if it now passes, or 'ox agent %s session abort %s' to discard the captured data", first.AgentID, firstName, first.AgentID, firstName)
+	if len(names) > 1 {
+		fix += "; do the same for each session listed"
+	}
 
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarn,
-		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
-		Fix:     fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine' to re-check ownership and upload if it now passes, or 'ox agent %s session abort %s' to discard the captured data", first.AgentID, first.AgentID, filepath.Base(first.SessionPath)),
+		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(names), strings.Join(names, ", ")),
+		Fix:     fix,
 	}
 }
 

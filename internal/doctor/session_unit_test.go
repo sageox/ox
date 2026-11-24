@@ -522,7 +522,8 @@ func TestSessionQuarantineCheck_NamesRecordingsAndANonDestructiveWayOut(t *testi
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "OxFirst")
 	assert.Contains(t, result.Message, "OxSecond")
-	assert.Contains(t, result.Fix, "ox agent OxFirst session recover --release-quarantine")
+	assert.Contains(t, result.Fix, "ox agent OxFirst session recover --release-quarantine 2026-01-06T14-30-user-OxFirst", "the release names the session so it works after the agent's instance expires")
+	assert.Contains(t, result.Fix, "each session listed")
 	assert.Contains(t, result.Fix, "ox agent OxFirst session abort 2026-01-06T14-30-user-OxFirst", "discarding names the held session, not whichever the agent is recording now")
 	assert.Contains(t, result.Fix, "Nothing is lost")
 }
