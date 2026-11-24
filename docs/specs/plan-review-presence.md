@@ -26,7 +26,7 @@ sequenceDiagram
   S->>H2: peer {id, name, user, revision, at, sel?}
   H2->>D: locate [{key, at}], selections [{color, sel}] (no names)
   D->>H2: located [{key, x, y}]
-  Note over H2: draws the cursor and name over the plan; the document tints the selected words
+  Note over H2: draws the cursor and name over the plan, and the document tints the selected words
 ```
 
 ## 1. A pointer is content, not a screen position
