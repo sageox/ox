@@ -563,7 +563,10 @@ test-release-unit: check-test-tiers ## Release stage: one slot of the full tier 
 	@$(MAKE) --no-print-directory test-split-slot TEST_SPLIT_ONLY="$(TEST_SPLIT_ONLY)" TEST_SPLIT_EXTRA=--require-tests
 
 test-release-acceptance: check-test-tiers ## Release stage: acceptance journeys through an instrumented ox, with coverage
-	@$(MAKE) --no-print-directory test-acceptance-cover coverage-integration-profile
+	@# Two recipe lines, not two goals: under `make -j` goals of one sub-make run
+	@# side by side, and the conversion would read counters still being written.
+	@$(MAKE) --no-print-directory test-acceptance-cover
+	@$(MAKE) --no-print-directory coverage-integration-profile
 
 test-release-twins: check-test-tiers ## Release stage: the digital twins, with coverage
 	@$(MAKE) --no-print-directory test-digital-twin-cover

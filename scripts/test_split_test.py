@@ -472,8 +472,8 @@ class TagOnlyTest(unittest.TestCase):
 
     def listing(self, plain, tagged, go_adds=None):
         """Fake the file diff; go_adds is what `go test -list` says the tag adds (default: agree with the files)."""
-        def fake(go, package, tag):
-            return [Path(name) for name in (tagged if tag else plain)]
+        def fake(go, package, flags):
+            return [Path(name) for name in (tagged if "-tags=slow" in flags else plain)]
         patch = mock.patch.object(test_split, "_test_files", side_effect=fake)
         self._go_adds = go_adds
         return patch
@@ -481,7 +481,8 @@ class TagOnlyTest(unittest.TestCase):
     def go_list(self, regex_names):
         adds = regex_names if self._go_adds is None else self._go_adds
         return mock.patch.object(test_split, "_listed_names",
-                                 side_effect=lambda go, package, tag: ["TestOrdinary", *adds] if tag else ["TestOrdinary"])
+                                 side_effect=lambda go, package, flags, tolerate_excluded=False:
+                                 ["TestOrdinary", *adds] if "-tags=slow" in flags else ["TestOrdinary"])
 
     def test_selects_tests_from_files_only_the_tag_builds(self):
         """Failure prevented: the slow tier re-runs every ordinary test and takes 30 minutes."""
@@ -517,6 +518,42 @@ class TagOnlyTest(unittest.TestCase):
                     self.assertIn("disagrees with `go test -list`", str(error.exception))
                     self.assertIn(missing, str(error.exception))
                     self.assertIn(extra, str(error.exception))
+
+    def test_discovery_uses_the_tiers_build_context(self):
+        """Failure prevented: a file gated on `slow && race` is absent from the selection the slow tier would run."""
+        seen = []
+
+        def fake(go, package, flags):
+            seen.append(flags)
+            return []
+        with mock.patch.object(test_split, "_test_files", side_effect=fake):
+            with self.assertRaises(SystemExit):
+                test_split.tag_only_tests(["go"], "slow", "./pkg", ["-race", "-tags=extra"])
+        self.assertEqual([["-race", "-tags=extra"], ["-race", "-tags=extra,slow"]], seen)
+        self.assertEqual(["-race", "-tags=slow"], test_split._with_tag(["-race"], "slow"))
+        self.assertEqual(["-race"], test_split._without_tag(["-race", "-tags=slow"], "slow"))
+        self.assertEqual(["-tags=slow", "-race"], test_split.build_context(["-tags=slow", "-race", "-count=1", "-p", "1"]))
+
+    def test_package_whose_every_file_needs_the_tag_is_planned(self):
+        """Failure prevented: package discovery without the tag aborts the slot before any test is selected."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "go.mod").write_text("module example.com/m\n\ngo 1.21\n", encoding="utf-8")
+            for name, files in {"gated": {"only_test.go": "//go:build slow\n\npackage gated\n\nimport \"testing\"\n\nfunc TestGated(t *testing.T) {}\n"},
+                                "mixed": {"plain_test.go": "package mixed\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) {}\n",
+                                          "slow_test.go": "//go:build slow\n\npackage mixed\n\nimport \"testing\"\n\nfunc TestMixedSlow(t *testing.T) {}\n"}}.items():
+                (root / name).mkdir()
+                for filename, content in files.items():
+                    (root / name / filename).write_text(content, encoding="utf-8")
+            go = ["go", "-C", str(root)]
+            jobs = test_split.build_jobs(test_split.Layout([], []), "rest", go, ["gotestsum"], ["-tags=slow", "-count=1"],
+                                         ["./gated", "./mixed"], {}, root / "work", False, "slow")
+            self.assertEqual(1, len(jobs))
+            self.assertEqual({"example.com/m/gated": ["TestGated"], "example.com/m/mixed": ["TestMixedSlow"]}, jobs[0].expected)
+            # named (split) packages resolve the same way
+            jobs = test_split.build_jobs(test_split.Layout(["./gated=1"], []), "gated-1", go, ["gotestsum"], ["-tags=slow"],
+                                         ["./gated", "./mixed"], {}, root / "work", False, "slow")
+            self.assertEqual({"example.com/m/gated": ["TestGated"]}, jobs[0].expected)
 
     def test_package_without_tagged_files_is_an_error(self):
         """Failure prevented: dropping the build tag turns the stage into a green no-op."""
@@ -574,7 +611,18 @@ class RequireTestsTest(unittest.TestCase):
         """Failure prevented: a -run that matches nothing passes the shard."""
         result, errors = self.run_slot("", {"p": ["TestA"]})
         self.assertEqual(1, result)
-        self.assertIn("no test passed", errors)
+        self.assertIn("no test reported a result", errors)
+
+    def test_all_skipped_shard_passes_locally_and_fails_on_ci(self):
+        """Failure prevented: OX_SKIP_DOCKER=1 fails a local shard whose every test reports a skip; CI must not pass on skips alone."""
+        events = self.event("TestA", "skip") + self.event("TestB", "skip")
+        with mock.patch.dict("os.environ", {"CI": ""}):
+            result, errors = self.run_slot(events, {"p": ["TestA", "TestB"]})
+        self.assertEqual(0, result, errors)
+        with mock.patch.dict("os.environ", {"CI": "true"}):
+            result, errors = self.run_slot(events, {"p": ["TestA", "TestB"]})
+        self.assertEqual(1, result)
+        self.assertIn("every reported test was skipped", errors)
 
     def test_an_owed_test_that_never_reported_fails(self):
         result, errors = self.run_slot(self.event("TestA", "pass"), {"p": ["TestA", "TestB"]})
