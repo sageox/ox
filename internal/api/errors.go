@@ -29,5 +29,12 @@ var ErrCLISettingsUnsupported = errors.New("CLI settings endpoint unsupported by
 // ErrForbidden is returned when the API returns 403 Forbidden
 var ErrForbidden = errors.New("access denied: you are not a member of this team — request an invite URL from a team admin")
 
+// forbiddenError keeps a server's 403 message as its text while letting
+// callers match it with errors.Is(err, ErrForbidden).
+type forbiddenError struct{ err error }
+
+func (e *forbiddenError) Error() string   { return e.err.Error() }
+func (e *forbiddenError) Unwrap() []error { return []error{e.err, ErrForbidden} }
+
 // ErrReadOnly is returned when the user has viewer (read-only) access to a public repo
 var ErrReadOnly = errors.New("read-only access: you are a viewer on this public repo")
