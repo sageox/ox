@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recover a quarantined recording after its AI coworker has gone** — `ox doctor` now names each held session, and `ox agent <id> session recover --release-quarantine <session>` or `session abort <session>` works even after the AI coworker's instance has expired, instead of failing with "instance not found" (#2029).
+
 ## [0.27.2] - 2026-11-23
 
 Know what your team's knowledge is doing for your AI coworker, in Claude Code's terminal, Codex and Conductor. Sessions reach your team more reliably, and ox no longer blocks your commits.
