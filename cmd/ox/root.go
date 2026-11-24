@@ -350,9 +350,8 @@ func brandedHelp(cmd *cobra.Command, args []string) {
 	fmt.Println()
 
 	if isRoot {
-		// root command header
-		fmt.Println(cli.StyleBrand.Render("ox") + " - Shared team context for AI and human coworkers")
-		fmt.Println(cli.StyleDim.Render("Making agentic engineering multiplayer."))
+		// root command header, with the SageOx mark beside it for a person at a color terminal
+		fmt.Print(rootHelpHeader(rootHeaderArt(os.Stdout, terminalWidth())))
 		fmt.Println()
 	} else {
 		// subcommand header
