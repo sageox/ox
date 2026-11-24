@@ -120,13 +120,15 @@ jobs:
           echo "release_id=$(jq -r '.databaseId' <<<"$release")" >> "$GITHUB_OUTPUT"
 
   # Reads the release gate's stages from the Makefile at the tag, so the
-  # verify-inrepo jobs run exactly the stages `make test-release` runs, and
-  # records the commit the tag names so every later job can refuse a moved tag.
+  # verify-inrepo jobs run exactly the stages `make test-release` runs (and
+  # verify-coverage its final stage), and records the commit the tag names so
+  # every later job can refuse a moved tag.
   plan-release-stages:
     if: github.repository == 'sageox/ox'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       stages: ${{ steps.plan.outputs.stages }}
+      final: ${{ steps.plan.outputs.final }}
       sha: ${{ steps.plan.outputs.sha }}
     steps:
       - name: Checkout
@@ -142,24 +144,34 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      # A stage must be a plain target name: "-n" or "V=1" would let
-      # `make "$STAGE"` exit 0 without running any tests.
+      # A stage is a plain target name, or target:slot for one slot of a split
+      # tier: "-n" or "V=1" would let `make "$TARGET"` exit 0 without running
+      # any tests.
       - name: Plan release stages
         id: plan
         run: |
           stages=$(make -s release-stages) || stages=""
           echo "Release stages: $stages"
-          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[a-z][a-z0-9-]*$"))' <<<"$stages" >/dev/null || {
-            echo "::error::make release-stages did not return a non-empty list of target names. A tag cut before release stages existed cannot be released; release a new version from main."
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[a-z][a-z0-9-]*(:[a-z0-9-]+)?$"))' <<<"$stages" >/dev/null || {
+            echo "::error::make release-stages did not return a non-empty list of target[:slot] names. A tag cut before release stages existed cannot be released; release a new version from main."
             exit 1
           }
-          echo "stages=$stages" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          final=$(make -s release-final-stage) || final=""
+          echo "Final release stage: $final"
+          [[ "$final" =~ ^[a-z][a-z0-9-]*$ ]] || {
+            echo "::error::make release-final-stage did not return a target name. A tag cut before it existed cannot be released; release a new version from main."
+            exit 1
+          }
+          {
+            echo "stages=$stages"
+            echo "final=$final"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
   verify-inrepo:
     if: github.repository == 'sageox/ox'
     needs: [verify-draft, plan-release-stages]
-    # 8 vCPU: release gate stages run the -race suite at -p 8; one stage is ~3400s at worst on 4 vCPU
+    # 8 vCPU: stages run the -race suite at -p 8, one split slot per runner
     runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       # Every stage reports even when another fails, and re-running failed
@@ -193,15 +205,21 @@ jobs:
           go-version-file: 'go.mod'
           # Under setup-go's shared entry the ~2-minute fuzz stage would save
           # first and pin the cache to a near-empty build. Read the entry
-          # ci.yml's test job owns instead, without writing.
+          # ci.yml's main job owns instead, without writing (restore below).
           cache: false
 
+      # Same entry ci.yml's main job saves (keyed per commit, newest prefix
+      # wins), restored without writing. Keyed on go.sum alone this job missed
+      # every time and fetched ~200 modules and recompiled the -race build.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
 
       - name: Configure git identity for tests
         run: |
@@ -211,55 +229,132 @@ jobs:
       - name: Install pinned test runner
         run: go install gotest.tools/gotestsum@v1.13.0
 
-      - name: Run release stage
+      # "target" or "target:slot". Both come from the Makefile at the tag and
+      # were checked by plan-release-stages; the slot reaches make as one
+      # TEST_SPLIT_ONLY word, never through a shell expression.
+      - name: Split stage
+        id: stage
         env:
           STAGE: ${{ matrix.stage }}
-        # Split slots each own a runner in PR CI. Packing all eight processes
-        # onto this one runner oversubscribes indexing and preview timeouts.
-        # One full-suite process preserves every package, flag, and coverage gate.
-        # Unsplit, cmd/ox runs as one package against a timeout sized for a
-        # quarter of it: v0.24.0's attempt hit 25m after #1434's redaction
-        # slowdown. The flags still come from the tagged tier config; only the
-        # per-package timeout changes. Drop the override once sageox/ox#1457
-        # brings cmd/ox back under the tier timeout.
         run: |
-          if [ "$STAGE" = test-release-coverage ]; then
-            full_flags="$(python3 scripts/test_tiers.py flags full)"
-            timeout="$(grep -oE '(^| )-timeout=[^ ]+' <<<"$full_flags" | head -n 1 | sed -E 's/^ ?-timeout=//')"
-            if [ -z "$timeout" ]; then
-              echo "::error::full tier flags carry no -timeout to raise: $full_flags"
-              exit 1
-            fi
-            # Sum the Go duration (test_tiers.py SAFE_TIMEOUT: integer parts in
-            # h/m/s/ms/us/µs/ns) in nanoseconds; anything else fails closed.
-            rest="$timeout"; ns=0
-            while [[ "$rest" =~ ^([0-9]+)(ns|us|µs|ms|h|m|s)(.*)$ ]]; do
-              n="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[3]}"
-              case "${BASH_REMATCH[2]}" in
-                h) ns=$((ns + 10#$n * 3600000000000)) ;;
-                m) ns=$((ns + 10#$n * 60000000000)) ;;
-                s) ns=$((ns + 10#$n * 1000000000)) ;;
-                ms) ns=$((ns + 10#$n * 1000000)) ;;
-                us|µs) ns=$((ns + 10#$n * 1000)) ;;
-                ns) ns=$((ns + 10#$n)) ;;
-              esac
-            done
-            if [ -n "$rest" ]; then
-              echo "::error::cannot parse full tier -timeout=$timeout"
-              exit 1
-            fi
-            # Raise only: a tier timeout of 50m or more stays as configured.
-            if [ "$ns" -lt 3000000000000 ]; then
-              full_flags="$(sed -E 's/(^| )-timeout=[^ ]+/\1-timeout=50m/' <<<"$full_flags")"
-            fi
-            make "$STAGE" TEST_SPLIT_LAYOUT= FULL_TEST_FLAGS="$full_flags"
+          echo "target=${STAGE%%:*}" >> "$GITHUB_OUTPUT"
+          slot=""
+          case "$STAGE" in *:*) slot="${STAGE#*:}" ;; esac
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+
+      # Each split slot has its own runner, as in PR CI: the slots' flags,
+      # packages, and coverage gates are exactly `make test-release`'s, and a
+      # slot that runs nothing fails.
+      - name: Run release stage
+        env:
+          TARGET: ${{ steps.stage.outputs.target }}
+          SLOT: ${{ steps.stage.outputs.slot }}
+        run: |
+          if [ -n "$SLOT" ]; then
+            make "$TARGET" TEST_SPLIT_ONLY="$SLOT"
           else
-            make "$STAGE"
+            make "$TARGET"
           fi
+
+      # Profiles the coverage stages write; verify-coverage merges them. A
+      # missing file fails the upload rather than the merge, where the cause
+      # is harder to see. retention-days: 3 on all three uploads: re-running
+      # verify-coverage after the artifacts expire fails closed on the
+      # download, so dispatch the release again instead.
+      - name: Upload unit coverage
+        if: steps.stage.outputs.target == 'test-release-unit'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unit-coverage-${{ steps.stage.outputs.slot }}
+          path: tmp/unit-parts/coverage-${{ steps.stage.outputs.slot }}.out
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
+      - name: Upload acceptance coverage
+        if: steps.stage.outputs.target == 'test-release-acceptance'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: acceptance-coverage
+          path: |
+            tmp/coverage/integration.out
+            tmp/coverage/integration-test.out
+            tmp/coverage/slow-test.out
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
+      - name: Upload twins coverage
+        if: steps.stage.outputs.target == 'test-release-twins'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: twins-coverage
+          path: tmp/coverage/twins/*.out
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
+  # Runs the release gate's final stage over the coverage profiles the
+  # verify-inrepo stages wrote: merge, then the same ratchets as before the
+  # stages were split. Needs every stage to pass, so a failed or missing slot
+  # leaves the release without a verdict instead of a partial one.
+  verify-coverage:
+    if: github.repository == 'sageox/ox'
+    needs: [plan-release-stages, verify-inrepo]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Require the planned commit
+        env:
+          PLANNED_SHA: ${{ needs.plan-release-stages.outputs.sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ -z "$PLANNED_SHA" ] || [ "$head" != "$PLANNED_SHA" ]; then
+            echo "::error::$RELEASE_TAG names $head, but this release was planned for ${PLANNED_SHA:-no commit}. Dispatch the release again."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unit-coverage-*
+          merge-multiple: true
+          path: tmp/unit-parts
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: acceptance-coverage
+          path: tmp/coverage
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: twins-coverage
+          path: tmp/coverage/twins
+
+      - name: Run final release stage
+        env:
+          FINAL_STAGE: ${{ needs.plan-release-stages.outputs.final }}
+        run: make "$FINAL_STAGE"
 
   build-release-assets:
     if: github.repository == 'sageox/ox'
-    needs: [verify-draft, verify-inrepo, plan-release-stages]
+    needs: [verify-draft, verify-inrepo, verify-coverage, plan-release-stages]
     # SAGEOX_CLI_SIGNING_KEY lives in the cli-release environment, whose
     # deployment rules keep it from workflow runs on other branches. The
     # environment only sees the dispatch ref, so "Require the tagged commit
