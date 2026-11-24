@@ -12,8 +12,10 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/livesession"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -373,14 +375,10 @@ func resolveSessionForAbort(projectRoot, nameArg string) (string, string, error)
 	repoID := getRepoIDOrDefault(projectRoot)
 	addStore(session.GetContextPath(repoID))
 
-	// Quarantined recordings, wherever they are cached: 'ox doctor' tells the
-	// coworker to discard them by name, even when no Ledger resolves.
-	if states, err := session.LoadAllRecordingStates(projectRoot); err == nil {
-		for _, s := range states {
-			if s.SourceRejected && s.SessionPath != "" {
-				addStore(filepath.Dir(filepath.Dir(s.SessionPath)))
-			}
-		}
+	// The Ledger session cache recordings are written to, which 'ox doctor'
+	// tells the coworker to discard from by name even when no Ledger resolves.
+	if projectCfg, err := config.LoadProjectConfig(projectRoot); err == nil && projectCfg != nil {
+		addStore(paths.LedgerSessionCacheBase(config.GetRepoID(projectRoot), projectCfg.Endpoint))
 	}
 
 	// 2. Ledger cache, then the other caches a held session can live in
