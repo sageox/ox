@@ -130,6 +130,17 @@ class LayoutTest(unittest.TestCase):
             (parts / "coverage-ox-9.out").write_text("mode: atomic\n", encoding="utf-8")
             self.assertEqual(1, test_split.merge_slots(args))
 
+    def test_merge_slots_refuses_a_part_with_no_coverage_blocks(self):
+        """Failure prevented: a slot that recorded nothing merges as if it had covered its share."""
+        for content in ("", "mode: atomic\n"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                parts = Path(directory)
+                (parts / "coverage-rest.out").write_text("mode: atomic\nx.go:1.1,2.2 1 1\n", encoding="utf-8")
+                (parts / "coverage-ox-1.out").write_text(content, encoding="utf-8")
+                args = test_split.argparse.Namespace(split=["./cmd/ox=1"], group=[], parts=str(parts), out=str(parts / "all.out"))
+                self.assertEqual(1, test_split.merge_slots(args))
+                self.assertFalse((parts / "all.out").exists())
+
 
 class DiagnosticArtifactsTest(unittest.TestCase):
     """Exercise the package-only failure that lean summaries used to hide."""
@@ -315,7 +326,7 @@ class DiagnosticArtifactsTest(unittest.TestCase):
             "sys.exit(1)\n", encoding="utf-8")
         job.command = test_split.gotestsum_command([sys.executable, str(producer)], job, [], [], ["./internal/daemon"])
         args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
-                                            only="rest", go_flags=[], packages=[], coverprofile=str(self.root / "cover.out"), junit=None, timings=str(self.path))
+                                            only="rest", go_flags=[], packages=[], coverprofile=str(self.root / "cover.out"), junit=None, timings=str(self.path), tag_only=None, require_tests=False)
         console, errors = io.StringIO(), io.StringIO()
         original_read_text = Path.read_text
 
@@ -368,7 +379,7 @@ class DiagnosticArtifactsTest(unittest.TestCase):
                 cover = self.root / "merged.cover"
                 junit = self.root / "merged.junit.xml"
                 args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
-                                                    only="rest", go_flags=[], packages=[], coverprofile=str(cover), junit=str(junit), timings=str(self.path))
+                                                    only="rest", go_flags=[], packages=[], coverprofile=str(cover), junit=str(junit), timings=str(self.path), tag_only=None, require_tests=False)
                 finalize = test_split.finalize_test_events
 
                 def interrupted_finalization(path, failed):
@@ -429,7 +440,7 @@ class CoverageOptionalTest(unittest.TestCase):
             args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
                                                 only="rest", go_flags=[], packages=[],
                                                 coverprofile=None if coverprofile is None else str(root / coverprofile),
-                                                junit=None, timings=None)
+                                                junit=None, timings=None, tag_only=None, require_tests=False)
             with mock.patch.object(test_split, "build_jobs", return_value=[job]), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
                 result = test_split.run(args)
@@ -454,6 +465,126 @@ class CoverageOptionalTest(unittest.TestCase):
         self.assertIn(f"-coverprofile={job.cover}", with_cover)
         self.assertFalse(any(arg.startswith("-coverprofile=") for arg in without))
         self.assertEqual(["-race", "./..."], without[without.index("--") + 1:])
+
+
+class TagOnlyTest(unittest.TestCase):
+    """The slow tier runs only what its tag adds, and refuses to run on nothing."""
+
+    def listing(self, plain, tagged, go_adds=None):
+        """Fake the file diff; go_adds is what `go test -list` says the tag adds (default: agree with the files)."""
+        def fake(go, package, tag):
+            return [Path(name) for name in (tagged if tag else plain)]
+        patch = mock.patch.object(test_split, "_test_files", side_effect=fake)
+        self._go_adds = go_adds
+        return patch
+
+    def go_list(self, regex_names):
+        adds = regex_names if self._go_adds is None else self._go_adds
+        return mock.patch.object(test_split, "_listed_names",
+                                 side_effect=lambda go, package, tag: ["TestOrdinary", *adds] if tag else ["TestOrdinary"])
+
+    def test_selects_tests_from_files_only_the_tag_builds(self):
+        """Failure prevented: the slow tier re-runs every ordinary test and takes 30 minutes."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plain_test.go").write_text("func TestOrdinary(t *testing.T) {}\n", encoding="utf-8")
+            (root / "slow_test.go").write_text(
+                "func TestAlpha(t *testing.T) {}\n"
+                "func TestAlpha(t *testing.T) {}\n"
+                "func (s *suite) TestMethod(t *testing.T) {}\n"
+                "func Testlower(t *testing.T) {}\n"
+                "func TestMain(m *testing.M) {}\n"
+                "func ExampleNoOutput() {}\n"
+                "func helperTest(t *testing.T) {}\n"
+                "func FuzzParse(f *testing.F) {}\n"
+                "func Test_Underscore(t *testing.T) {}\n"
+                "func TestBeta(_ *testing.T) {}\n", encoding="utf-8")
+            with self.listing([root / "plain_test.go"], [root / "plain_test.go", root / "slow_test.go"]), \
+                    self.go_list(["TestAlpha", "FuzzParse", "Test_Underscore", "TestBeta"]):
+                names = test_split.tag_only_tests(["go"], "slow", "./pkg")
+        self.assertEqual(["TestAlpha", "FuzzParse", "Test_Underscore", "TestBeta"], names)
+
+    def test_regex_and_go_disagreeing_is_an_error_naming_both_sides(self):
+        """Failure prevented: a test shape the regex misses is silently dropped from the slow tier."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "slow_test.go").write_text("func TestAlpha(t *testing.T) {}\n", encoding="utf-8")
+            for go_adds, missing, extra in ((["TestAlpha", "TestGenerated"], "TestGenerated", "[]"),
+                                            ([], "[]", "TestAlpha")):
+                with self.subTest(go_adds=go_adds), self.listing([], [root / "slow_test.go"], go_adds), self.go_list([]):
+                    with self.assertRaises(SystemExit) as error:
+                        test_split.tag_only_tests(["go"], "slow", "./pkg")
+                    self.assertIn("disagrees with `go test -list`", str(error.exception))
+                    self.assertIn(missing, str(error.exception))
+                    self.assertIn(extra, str(error.exception))
+
+    def test_package_without_tagged_files_is_an_error(self):
+        """Failure prevented: dropping the build tag turns the stage into a green no-op."""
+        with self.listing(["a_test.go"], ["a_test.go"]):
+            with self.assertRaises(SystemExit) as error:
+                test_split.tag_only_tests(["go"], "slow", "./pkg")
+        self.assertIn("no test files that build only with -tags=slow", str(error.exception))
+
+    def test_tagged_files_without_tests_are_an_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "helper_test.go"
+            helper.write_text("func helper() {}\n", encoding="utf-8")
+            with self.listing([], [helper]):
+                with self.assertRaises(SystemExit) as error:
+                    test_split.tag_only_tests(["go"], "slow", "./pkg")
+        self.assertIn("no tests in its -tags=slow files", str(error.exception))
+
+
+class RequireTestsTest(unittest.TestCase):
+    """`go test` exits 0 on a -run that matches nothing; a release shard must not."""
+
+    def run_slot(self, events, expected, jobs=1):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            producer = root / "gotestsum.py"
+            producer.write_text(
+                "import pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                f"pathlib.Path(args[args.index('--jsonfile')+1]).write_text({events!r})\n", encoding="utf-8")
+            planned = []
+            for index in range(jobs):
+                job = test_split.Job("slot", work, f"slot{index}")
+                job.command = test_split.gotestsum_command([sys.executable, str(producer)], job, [], [], ["./p"], False)
+                job.expected = expected
+                planned.append(job)
+            args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
+                                                only="slot", go_flags=[], packages=[], coverprofile=None, junit=None,
+                                                timings=None, tag_only="slow", require_tests=True)
+            with mock.patch.object(test_split, "build_jobs", return_value=planned), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+                result = test_split.run(args)
+            return result, errors.getvalue()
+
+    @staticmethod
+    def event(test, action):
+        return json.dumps({"Action": action, "Package": "p", "Test": test}) + "\n"
+
+    def test_slot_that_plans_no_process_fails(self):
+        result, errors = self.run_slot("", {}, jobs=0)
+        self.assertEqual(1, result)
+        self.assertIn("planned no tests", errors)
+
+    def test_exit_zero_with_no_test_events_fails(self):
+        """Failure prevented: a -run that matches nothing passes the shard."""
+        result, errors = self.run_slot("", {"p": ["TestA"]})
+        self.assertEqual(1, result)
+        self.assertIn("no test passed", errors)
+
+    def test_an_owed_test_that_never_reported_fails(self):
+        result, errors = self.run_slot(self.event("TestA", "pass"), {"p": ["TestA", "TestB"]})
+        self.assertEqual(1, result)
+        self.assertIn("1 of 2 expected tests in p never reported (first: TestB)", errors)
+
+    def test_every_owed_test_reporting_passes_and_a_skip_counts_as_reported(self):
+        events = self.event("TestA", "pass") + self.event("TestB", "skip") + self.event("TestB/sub", "pass")
+        result, errors = self.run_slot(events, {"p": ["TestA", "TestB"]})
+        self.assertEqual(0, result, errors)
 
 
 class WeightsTest(unittest.TestCase):

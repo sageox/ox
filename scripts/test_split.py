@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -44,6 +45,12 @@ MAX_RUN_BYTES = 100_000
 RUNNABLE_PREFIXES = ("Test", "Example", "Fuzz")
 JUNIT_SUM_ATTRIBUTES = ("tests", "failures", "errors", "skipped", "time")
 DIAGNOSTIC_OUTPUT_BYTES = 64 * 1024
+# `func TestName(t *testing.T)` and `func FuzzName(f *testing.F)`. Go ignores
+# Testfoo (a lowercase letter after the prefix), so the name group refuses one.
+# Examples are left out on purpose: one without an `// Output:` comment is
+# listed but never run, which would read as a test that went missing.
+TEST_FUNCTION = re.compile(r"^func (Test|Fuzz)([^a-z\s(]\w*)?\(([^)]*)\)", re.MULTILINE)
+TAG_FILE_FORMAT = '{{.Dir}}\t{{join .TestGoFiles ","}}\t{{join .XTestGoFiles ","}}'
 
 
 def parse_list_output(text: str) -> list[str]:
@@ -192,9 +199,83 @@ def list_tests(go: list[str], flags: list[str], package: str) -> list[str]:
     return names
 
 
+def _test_files(go: list[str], package: str, tag: str | None) -> list[Path]:
+    """Test files of `package` under an optional build tag (go list -e: an excluded package lists nothing)."""
+    command = [*go, "list", "-e", *([f"-tags={tag}"] if tag else []), "-f", TAG_FILE_FORMAT, package]
+    result = subprocess.run(command, text=True, capture_output=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout + result.stderr)
+        raise SystemExit(f"go list failed for {package}")
+    files: list[Path] = []
+    for line in result.stdout.splitlines():
+        directory, _, rest = line.partition("\t")
+        for group in rest.split("\t"):
+            files.extend(Path(directory) / name for name in group.split(",") if name)
+    return files
+
+
+def tag_only_tests(go: list[str], tag: str, package: str) -> list[str]:
+    """Top-level tests defined in files that build only under `-tags=<tag>`, in run order.
+
+    The slow tier compiles every ordinary test too, so running it as a whole
+    repeats the full tier. This lists just the tests the tag adds, by diffing
+    the package's test files with and without the tag and reading the test
+    functions out of the difference (no test binary is compiled to list them).
+    Fails closed: a package with no such file or no such test is an error, not
+    an empty selection, because `go test -run` over nothing exits 0.
+    """
+    plain = set(_test_files(go, package, None))
+    added = sorted(path for path in _test_files(go, package, tag) if path not in plain)
+    if not added:
+        raise SystemExit(f"{package} has no test files that build only with -tags={tag}")
+    names: list[str] = []
+    for path in added:
+        for prefix, rest, parameters in TEST_FUNCTION.findall(path.read_text(encoding="utf-8")):
+            if "testing." + ("T" if prefix == "Test" else "F") in parameters:
+                names.append(prefix + rest)
+    names = list(dict.fromkeys(names))
+    if not names:
+        raise SystemExit(f"{package} has no tests in its -tags={tag} files: {[path.name for path in added]}")
+    # The regex is a shortcut, Go is the authority: a test shape it misses would
+    # otherwise be dropped with nothing left to notice.
+    authoritative = set(_listed_names(go, package, tag)) - set(_listed_names(go, package, None))
+    if authoritative != set(names):
+        missing, extra = sorted(authoritative - set(names)), sorted(set(names) - authoritative)
+        raise SystemExit(f"{package}: -tags={tag} test selection disagrees with `go test -list`; "
+                         f"missing from selection: {missing[:10]}, not listed by go: {extra[:10]}")
+    return names
+
+
+def _listed_names(go: list[str], package: str, tag: str | None) -> list[str]:
+    """Runnable Test/Fuzz names `go test -list` reports (one test-binary compile)."""
+    command = [*go, "test", *([f"-tags={tag}"] if tag else []), "-list", ".", package]
+    result = subprocess.run(command, text=True, capture_output=True)
+    # A package whose every file needs the tag lists nothing without it.
+    if result.returncode != 0 and tag is None and "build constraints exclude all Go files" in result.stdout + result.stderr:
+        return []
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout + result.stderr)
+        raise SystemExit(f"go test -list failed for {package}")
+    return [name for name in parse_list_output(result.stdout) if name.startswith(("Test", "Fuzz"))]
+
+
+def executed_tests(path: Path) -> tuple[dict[str, set[str]], int]:
+    """Top-level tests that reported a result per package, and how many passed."""
+    seen: dict[str, set[str]] = {}
+    passed = 0
+    for _, event in _test_event_records(path):
+        test, action = event.get("Test"), event.get("Action")
+        if test and "/" not in test and action in ("pass", "fail", "skip"):
+            seen.setdefault(event.get("Package", ""), set()).add(test)
+            passed += action == "pass"
+    return seen, passed
+
+
 class Job:
     def __init__(self, label: str, work_dir: Path, slug: str):
         self.label = label
+        # import path -> tests that must report a result (tag-only mode)
+        self.expected: dict[str, list[str]] = {}
         self.cover = work_dir / f"{slug}.cov"
         self.junit = work_dir / f"{slug}.junit.xml"
         self.timings = work_dir / f"{slug}.timings.json"
@@ -323,24 +404,39 @@ class Layout:
 
 
 def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, PackageWeights], work_dir: Path,
-               cover: bool = True) -> list[Job]:
-    """Plan the processes for every slot (or only one), each with its own artifact paths."""
+               cover: bool = True, tag_only: str | None = None) -> list[Job]:
+    """Plan the processes for every slot (or only one), each with its own artifact paths.
+
+    tag_only restricts every package to the tests only its `-tags=<tag>` files
+    add (see tag_only_tests); each process then carries the names it owes.
+    """
     if only is not None and only not in layout.slots():
         raise SystemExit(f"unknown slot {only!r}; slots are {layout.slots()}")
     wanted = lambda slot: only is None or only == slot  # noqa: E731
     jobs: list[Job] = []
+
+    def whole_packages(job: Job, group: list[str]) -> list[str]:
+        """-run arguments for a process that owns whole packages."""
+        if tag_only is None:
+            return []
+        for package in group:
+            job.expected[package] = tag_only_tests(go, tag_only, package)
+        # One pattern covers the group: a name shared with an ordinary test in
+        # another package only runs that test twice, it can never drop one.
+        union = dict.fromkeys(name for names in job.expected.values() for name in names)
+        return ["-run", run_pattern(list(union))]
 
     named = [package for package, _ in layout.splits] + [package for _, group in layout.groups for package in group]
     if wanted("rest"):
         excluded = set(go_list(go, named)) if named else set()
         rest = [package for package in go_list(go, packages) if package not in excluded]
         job = Job(f"rest ({len(rest)} packages)", work_dir, "rest")
-        job.command = gotestsum_command(gotestsum, job, go_flags, [], rest, cover)
+        job.command = gotestsum_command(gotestsum, job, go_flags, whole_packages(job, rest), rest, cover)
         jobs.append(job)
     for name, group in layout.groups:
         if wanted(name):
             job = Job(f"{name} ({', '.join(group)})", work_dir, name)
-            job.command = gotestsum_command(gotestsum, job, go_flags, [], group, cover)
+            job.command = gotestsum_command(gotestsum, job, go_flags, whole_packages(job, group), group, cover)
             jobs.append(job)
 
     # List a split package before starting anything: the listing compiles the
@@ -352,7 +448,8 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
             continue
         import_path = go_list(go, [package])[0]
         known = weights.get(import_path, PackageWeights())
-        shards = plan(list_tests(go, go_flags, package), known.tests, count, known.default_seconds)
+        names = tag_only_tests(go, tag_only, import_path) if tag_only else list_tests(go, go_flags, package)
+        shards = plan(names, known.tests, count, known.default_seconds)
         for index in slots:
             slot = layout.split_slot(package, index)
             if index >= len(shards):
@@ -360,8 +457,28 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
                 continue
             job = Job(f"{slot} ({package} slice {index + 1}/{len(shards)}, {len(shards[index])} tests)", work_dir, slot)
             job.command = gotestsum_command(gotestsum, job, go_flags, ["-run", run_pattern(shards[index])], [package], cover)
+            if tag_only:
+                job.expected[import_path] = shards[index]
             jobs.append(job)
     return jobs
+
+
+def missing_results(job: Job) -> str:
+    """Why a process that exited 0 still did not run what it owed ("" when it did).
+
+    `go test` exits 0 for a -run that matches nothing, so exit status alone
+    cannot tell a shard that ran its tests from one that ran none.
+    """
+    if not job.timings.is_file():
+        return "wrote no test events"
+    seen, passed = executed_tests(job.timings)
+    if not passed:
+        return "no test passed"
+    for package, names in job.expected.items():
+        absent = [name for name in names if name not in seen.get(package, set())]
+        if absent:
+            return f"{len(absent)} of {len(names)} expected tests in {package} never reported (first: {', '.join(absent[:5])})"
+    return ""
 
 
 def run(args: argparse.Namespace) -> int:
@@ -376,7 +493,10 @@ def run(args: argparse.Namespace) -> int:
     layout = Layout(args.split, args.group)
     weights = load_weights(Path(args.weights) if args.weights else None)
     cover = args.coverprofile is not None
-    jobs = build_jobs(layout, args.only, go, gotestsum, list(args.go_flags), args.packages, weights, work_dir, cover)
+    jobs = build_jobs(layout, args.only, go, gotestsum, list(args.go_flags), args.packages, weights, work_dir, cover, args.tag_only)
+    if args.require_tests and not jobs:
+        print(f"test-split: slot {args.only or '(all)'} planned no tests; refusing to pass on nothing", file=sys.stderr)
+        return 1
     for job in jobs:
         job.start()
 
@@ -390,7 +510,8 @@ def run(args: argparse.Namespace) -> int:
             pending.remove(job)
             job.handle.close()
             elapsed = time.monotonic() - job.started
-            status = "ok" if job.process.returncode == 0 else f"FAILED (exit {job.process.returncode})"
+            shortfall = missing_results(job) if args.require_tests and job.process.returncode == 0 else ""
+            status = "ok" if job.process.returncode == 0 and not shortfall else f"FAILED (exit {job.process.returncode})"
             print(f"\n── {job.label}: {status} in {elapsed:.0f}s", flush=True)
             sys.stdout.write(job.log.read_text(encoding="utf-8", errors="replace"))
             sys.stdout.flush()
@@ -404,7 +525,9 @@ def run(args: argparse.Namespace) -> int:
                 print(f"Package-level failure context (full events retained in {job.timings}):", flush=True)
                 sys.stdout.write(diagnostic)
                 sys.stdout.flush()
-            if job.process.returncode != 0:
+            if shortfall:
+                print(f"test-split: {job.label}: {shortfall}", file=sys.stderr, flush=True)
+            if job.process.returncode != 0 or shortfall:
                 failed.append(job.label)
         time.sleep(0.5)
 
@@ -443,6 +566,13 @@ def merge_slots(args: argparse.Namespace) -> int:
     extra = sorted(path.name for path in directory.glob("coverage-*.out") if path not in expected.values())
     if missing or extra:
         print(f"test-split: coverage parts missing {missing}, unexpected {extra}", file=sys.stderr)
+        return 1
+    # A part is the `mode:` header plus at least one block; a header-only or
+    # zero-byte file is a slot that recorded nothing.
+    empty = [slot for slot, path in expected.items()
+             if not any(line and not line.startswith("mode:") for line in path.read_text(encoding="utf-8").splitlines())]
+    if empty:
+        print(f"test-split: coverage parts with no coverage blocks: {empty}", file=sys.stderr)
         return 1
     merge_cover(list(expected.values()), Path(args.out))
     return 0
@@ -502,10 +632,15 @@ def main() -> int:
     run_parser.add_argument("--junit")
     run_parser.add_argument("--timings")
     run_parser.add_argument("--packages", nargs="+", default=["./..."])
+    run_parser.add_argument("--tag-only", metavar="TAG",
+                            help="run only the tests that files built with -tags=TAG add to each package")
+    run_parser.add_argument("--require-tests", action="store_true",
+                            help="fail a slot that plans no process, or whose processes pass without running the tests they owe")
     run_parser.add_argument("go_flags", nargs=argparse.REMAINDER, help="-- then go test flags")
 
     slots_parser = sub.add_parser("slots", help="print the slot names as a JSON array (the CI matrix)")
     layout_arguments(slots_parser)
+    slots_parser.add_argument("--words", action="store_true", help="print space-separated names instead (for make)")
 
     merge_parser = sub.add_parser("merge-slots", help="merge coverage-<slot>.out parts, one per slot")
     layout_arguments(merge_parser)
@@ -524,7 +659,8 @@ def main() -> int:
             args.go_flags = args.go_flags[1:]
         return run(args)
     if args.command == "slots":
-        print(json.dumps(Layout(args.split, args.group).slots()))
+        slots = Layout(args.split, args.group).slots()
+        print(" ".join(slots) if args.words else json.dumps(slots))
         return 0
     if args.command == "merge-slots":
         return merge_slots(args)

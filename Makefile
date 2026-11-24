@@ -2,7 +2,7 @@
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
 .PHONY: test-all-split test-split-slots test-split-slot test-fast-split-slots test-fast-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-agents-scoping test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage test-release-unit test-release-acceptance test-release-twins test-release-slow test-slow-slot check-release-stages release-stages release-final-stage test-agents test-agents-scoping test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -371,13 +371,15 @@ FAST_SPLIT_LAYOUT := --split ./cmd/ox=5 --split ./internal/daemon=2 \
 test-fast-split-slots test-fast-split-slot: TEST_SPLIT_LAYOUT := $(FAST_SPLIT_LAYOUT)
 test-fast-split-slot: TEST_SPLIT_WEIGHTS := .config/test-split-weights-fast.json
 TEST_SPLIT_ONLY ?=
+TEST_SPLIT_EXTRA ?=
 TEST_SPLIT_PARTS := tmp/unit-parts
 TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
 		--go "$(GO)" \
 		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
 		--weights $(TEST_SPLIT_WEIGHTS) \
 		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
-		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
+		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",) \
+		$(TEST_SPLIT_EXTRA)
 
 test-all-split: check-test-tiers test-public-modules ## Full tier (same as test-all) with every split slot running at once
 	$(call say,"Running all tests split into slots...")
@@ -439,9 +441,30 @@ test-calm: check-test-tiers test-public-modules ## Run the full test tier at red
 	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
+# The slow tier compiles every ordinary test in these packages too, and the
+# full tier already runs those. Only the tests that `slow`-tagged files add are
+# selected (scripts/test_split.py --tag-only), cut into slots that each get a
+# runner in release.yml. Within a slot the tier's -p 1 -parallel 1 still holds:
+# these tests spawn the real ox binary and daemons, and nothing shows they are
+# isolation-safe side by side. A package with no slow tests, or a slot that
+# runs none of what it owes, fails instead of passing on "no tests to run".
+SLOW_SPLIT_LAYOUT := --split ./cmd/ox=3 --split ./internal/daemon=2
+SLOW_SLOTS = $(shell python3 scripts/test_split.py slots --words $(SLOW_SPLIT_LAYOUT))
+SLOW_SPLIT_RUN = python3 scripts/test_split.py run $(SLOW_SPLIT_LAYOUT) \
+		--go "$(GO)" \
+		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
+		--packages $(SLOW_TEST_PACKAGES) --tag-only slow --require-tests \
+		--work-dir tmp/slow-split
+
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
+	@test -n "$(strip $(SLOW_SLOTS))" || { echo "ERROR: no slow-tier slots"; exit 1; }
 	$(call say,"Running slow tests (requires built ox binary)...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- $(SLOW_TEST_FLAGS) $(SLOW_TEST_PACKAGES)
+	@# One slot at a time: a laptop is not a runner per slot.
+	@for slot in $(SLOW_SLOTS); do $(MAKE) --no-print-directory test-slow-slot TEST_SPLIT_ONLY=$$slot || exit 1; done
+
+test-slow-slot: check-test-tiers ## Run one slot of the slow tier: make test-slow-slot TEST_SPLIT_ONLY=<slot>
+	@test -n "$(TEST_SPLIT_ONLY)" || { echo "Set TEST_SPLIT_ONLY to one of: $(SLOW_SLOTS)"; exit 1; }
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(SLOW_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" -- $(SLOW_TEST_FLAGS)
 
 test-fuzz: ## Run bounded fuzz smoke gates over untrusted parsers
 	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseLayerName$$' -fuzztime=5s ./internal/conversation/format
@@ -496,23 +519,72 @@ test-acceptance-run:
 		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_SLOW_TESTS))))$$' \
 		./cmd/ox
 
-# The release gate's independent stages. `make test-release` runs them in order;
-# release.yml reads this list with `make release-stages` and runs each stage as
-# its own parallel job, so CI cannot skip a stage that `make test-release` runs.
-RELEASE_STAGES := test-release-coverage test-slow test-fuzz
+# The release gate. A stage is a make target, or `target:slot` for a target that
+# runs one slot of a split tier (TEST_SPLIT_ONLY=slot). Stages are independent,
+# so release.yml reads this list with `make release-stages` and gives each its
+# own parallel job; `make test-release` runs the same list in order. CI cannot
+# skip anything `make test-release` runs, and no stage depends on another's
+# output except the final one:
+#
+#   unit:<slot>   the full tier, one slot per runner (the layout PR CI uses),
+#                 each writing a coverage part under $(TEST_SPLIT_PARTS)
+#   acceptance    compiled-binary journeys through an instrumented ox
+#   twins         the digital twins, with coverage
+#   slow:<slot>   only what the slow tag adds, cut into slots (SLOW_SPLIT_LAYOUT)
+#   test-fuzz     bounded fuzz smoke gates
+#
+# RELEASE_FINAL_STAGE then merges the parts and applies the ratchets. Slot lists are
+# recursive (=) so plain make invocations do not pay for two python calls. Each
+# split stage fails when its slot runs nothing (--require-tests).
+RELEASE_UNIT_SLOTS = $(shell python3 scripts/test_split.py slots --words $(TEST_SPLIT_LAYOUT))
+RELEASE_STAGES = $(addprefix test-release-unit:,$(RELEASE_UNIT_SLOTS)) \
+	test-release-acceptance test-release-twins \
+	$(addprefix test-release-slow:,$(SLOW_SLOTS)) \
+	test-fuzz
+RELEASE_FINAL_STAGE := test-release-coverage
 
-test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
-	@for stage in $(RELEASE_STAGES); do $(MAKE) $$stage || exit 1; done
+# $(shell ...) swallows a failed command, so an empty slot list would quietly
+# drop a whole tier from the gate.
+check-release-stages:
+	@test -n "$(strip $(RELEASE_UNIT_SLOTS))" || { echo "ERROR: no full-tier slots; release stages would skip the unit tier"; exit 1; }
+	@test -n "$(strip $(SLOW_SLOTS))" || { echo "ERROR: no slow-tier slots; release stages would skip the slow tier"; exit 1; }
 
-# One stage, not three: the ratchet reads the profile merged from the full,
-# acceptance, and digital-twin runs.
-test-release-coverage: check-test-tiers ## Release stage: full, acceptance, and digital-twin tiers under the merged coverage ratchets
+test-release: check-test-tiers check-release-stages ## Run every enforceable in-repo release tier sequentially
+	@# Stale parts from an earlier run would satisfy the merge.
+	@rm -rf $(TEST_SPLIT_PARTS) $(COVERDIR)/twins coverage.out coverage-all.out coverage-all.out.provenance.json
+	@rm -f $(COVERDIR)/*.out
+	@for stage in $(RELEASE_STAGES); do \
+	   target=$${stage%%:*}; slot=$${stage#*:}; [ "$$slot" = "$$stage" ] && slot=; \
+	   $(MAKE) $$target $${slot:+TEST_SPLIT_ONLY=$$slot} || exit 1; \
+	 done
+	@$(MAKE) $(RELEASE_FINAL_STAGE)
+
+test-release-unit: check-test-tiers ## Release stage: one slot of the full tier with coverage: make test-release-unit TEST_SPLIT_ONLY=<slot>
+	@$(MAKE) --no-print-directory test-split-slot TEST_SPLIT_ONLY="$(TEST_SPLIT_ONLY)" TEST_SPLIT_EXTRA=--require-tests
+
+test-release-acceptance: check-test-tiers ## Release stage: acceptance journeys through an instrumented ox, with coverage
+	@$(MAKE) --no-print-directory test-acceptance-cover coverage-integration-profile
+
+test-release-twins: check-test-tiers ## Release stage: the digital twins, with coverage
+	@$(MAKE) --no-print-directory test-digital-twin-cover
+
+test-release-slow: check-test-tiers ## Release stage: one slot of the slow tier: make test-release-slow TEST_SPLIT_ONLY=<slot>
+	@$(MAKE) --no-print-directory test-slow-slot TEST_SPLIT_ONLY="$(TEST_SPLIT_ONLY)"
+
+# Final stage: merges the unit parts, acceptance, and twin profiles the stages
+# above wrote and applies the ratchet to the merge. coverage-merge-unit refuses
+# a missing or unexpected slot, and coverage-merge a missing profile.
+test-release-coverage: check-test-tiers ## Release stage: merge every coverage profile and enforce the coverage ratchets
 	@$(MAKE) coverage-ratchet-test
-	@$(MAKE) coverage-integration
+	@$(MAKE) --no-print-directory coverage-merge-unit
+	@$(MAKE) --no-print-directory coverage-merge
 	@python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
 
-release-stages: ## Print the release gate's stages as a JSON array (the release workflow's job matrix)
+release-stages: check-release-stages ## Print the release gate's stages as a JSON array (the release workflow's job matrix)
 	@python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' $(RELEASE_STAGES)
+
+release-final-stage: ## Print the stage that runs after every release stage passed (the release workflow's merge job)
+	@echo $(RELEASE_FINAL_STAGE)
 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
