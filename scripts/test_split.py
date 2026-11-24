@@ -472,7 +472,9 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
     for name, group in layout.groups:
         if wanted(name):
             job = Job(f"{name} ({', '.join(group)})", work_dir, name)
-            job.command = gotestsum_command(gotestsum, job, go_flags, whole_packages(job, group), group, cover)
+            # expectations key on import paths: go test reports events under them, not ./pkg
+            owed = go_list(go, group, context) if tag_only else group
+            job.command = gotestsum_command(gotestsum, job, go_flags, whole_packages(job, owed), group, cover)
             jobs.append(job)
 
     # List a split package before starting anything: the listing compiles the

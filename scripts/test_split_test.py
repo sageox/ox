@@ -554,6 +554,11 @@ class TagOnlyTest(unittest.TestCase):
             jobs = test_split.build_jobs(test_split.Layout(["./gated=1"], []), "gated-1", go, ["gotestsum"], ["-tags=slow"],
                                          ["./gated", "./mixed"], {}, root / "work", False, "slow")
             self.assertEqual({"example.com/m/gated": ["TestGated"]}, jobs[0].expected)
+            # grouped packages too: go test reports events under the import path, so a
+            # relative key would make --require-tests reject a shard whose tests all passed
+            jobs = test_split.build_jobs(test_split.Layout([], ["slow=./gated,./mixed"]), "slow", go, ["gotestsum"], ["-tags=slow"],
+                                         ["./gated", "./mixed"], {}, root / "work", False, "slow")
+            self.assertEqual({"example.com/m/gated": ["TestGated"], "example.com/m/mixed": ["TestMixedSlow"]}, jobs[0].expected)
 
     def test_package_without_tagged_files_is_an_error(self):
         """Failure prevented: dropping the build tag turns the stage into a green no-op."""
