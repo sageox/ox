@@ -843,14 +843,23 @@ func TestAbortQuarantinedByNameAfterTheInstanceExpires(t *testing.T) {
 // The fallback stands only on a quarantined recording. An unknown agent ID, or
 // any other command under an expired one, still fails at the instance lookup.
 func TestExpiredInstanceFallbackIsLimitedToQuarantinedRecordings(t *testing.T) {
-	_, agentID, _ := quarantinedWithoutInstance(t)
+	projectRoot, agentID, _ := quarantinedWithoutInstance(t)
 
 	err := runWithAgentID(agentCmd, agentID, []string{"session", "recover"})
 	require.ErrorContains(t, err, "instance not found", "recover without a release has nothing to fall back on")
 	err = runWithAgentID(agentCmd, agentID, []string{"session", "stop"})
 	require.ErrorContains(t, err, "instance not found")
 
+	other := filepath.Join(session.GetContextPath(getRepoIDOrDefault(projectRoot)), "sessions", "2026-03-15T10-00-testuser-OxOthr")
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	setForceFlag(t, true)
+	err = runWithAgentID(agentCmd, agentID, []string{"session", "abort", filepath.Base(other)})
+	require.ErrorContains(t, err, "instance not found", "an expired agent may discard only its own quarantined recording")
+	assert.DirExists(t, other)
+
 	setReleaseQuarantineFlag(t)
 	err = runWithAgentID(agentCmd, "OxNone", []string{"session", "recover"})
 	require.ErrorContains(t, err, "instance not found: OxNone", "an agent with no quarantined recording is still unknown")
+	err = runWithAgentID(agentCmd, agentID, []string{"session", "recover", filepath.Base(other)})
+	require.ErrorContains(t, err, "instance not found", "nor release a session that is not its quarantined recording")
 }

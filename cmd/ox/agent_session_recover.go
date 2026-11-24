@@ -158,8 +158,14 @@ func runForExpiredQuarantineOwner(cmd *cobra.Command, agentID string, args []str
 	if err != nil {
 		return false, nil
 	}
-	held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
-	if err != nil || len(held) == 0 {
+	if sessionName != "" {
+		// only the agent's own quarantined recording, never another session
+		// that shares the name
+		named, err := quarantinedRecordingNamed(projectRoot, sessionName)
+		if err != nil || named.AgentID != agentID {
+			return false, nil
+		}
+	} else if held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID); err != nil || len(held) == 0 {
 		return false, nil
 	}
 	inst := &agentinstance.Instance{AgentID: agentID}
