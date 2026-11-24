@@ -673,3 +673,41 @@ func TestRegisterRepo_HTTPFailureKind(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("register repo HTTP %d", tt.status), errkind.DetailOf(err))
 	}
 }
+
+// A 403 from registration means "not a member of this repository's team";
+// ox init branches on errors.Is(err, ErrForbidden) to explain that sessions
+// will not upload, so the sentinel must survive with or without a body while
+// the server's message stays in the text.
+func TestRegisterRepo_HTTP403_IsErrForbidden(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{"", "you don't have access to this repository"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(body))
+		}))
+		client := &RepoClient{baseURL: server.URL, httpClient: &http.Client{Timeout: 10 * time.Second}, version: "test-version"}
+		_, err := client.RegisterRepo(&RepoInitRequest{RepoID: "repo_test123", Type: "git", InitAt: "2025-01-01T00:00:00Z"})
+		server.Close()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrForbidden, "body %q", body)
+		assert.Equal(t, errkind.Auth, errkind.Of(err))
+		assert.Contains(t, err.Error(), "HTTP 403")
+		assert.Contains(t, err.Error(), body)
+		assert.NotContains(t, err.Error(), ErrForbidden.Error(), "the sentinel's own text must not be appended")
+	}
+}
+
+// Other failures must not be mistaken for a membership refusal.
+func TestRegisterRepo_NonForbiddenIsNotErrForbidden(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusBadRequest, http.StatusInternalServerError} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		client := &RepoClient{baseURL: server.URL, httpClient: &http.Client{Timeout: 10 * time.Second}, version: "test-version"}
+		_, err := client.RegisterRepo(&RepoInitRequest{RepoID: "repo_test123", Type: "git", InitAt: "2025-01-01T00:00:00Z"})
+		server.Close()
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrForbidden, "HTTP %d", status)
+	}
+}

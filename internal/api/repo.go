@@ -322,10 +322,20 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		kind, detail := errkind.HTTPStatus(resp.StatusCode), fmt.Sprintf("register repo HTTP %d", resp.StatusCode)
+		var httpErr error
 		if errMsg == "" {
-			return nil, errkind.WithDetail(kind, detail, fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL))
+			httpErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL)
+		} else {
+			httpErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg)
 		}
-		return nil, errkind.WithDetail(kind, detail, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg))
+		if resp.StatusCode == http.StatusForbidden {
+			// 403 here means the caller is not an active member of the team the
+			// repo is linked to (or of the team they asked for); the server
+			// answers 403 rather than 404 so ox does not mistake it for an
+			// undeployed endpoint. Callers match it with errors.Is(err, ErrForbidden).
+			httpErr = &forbiddenError{err: httpErr}
+		}
+		return nil, errkind.WithDetail(kind, detail, httpErr)
 	}
 
 	// log the raw response for debugging
