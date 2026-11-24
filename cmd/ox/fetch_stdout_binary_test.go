@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/testguard"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,4 +45,21 @@ func TestFetchStdoutWritesBinaryBytesUnchanged(t *testing.T) {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	require.NoError(t, cmd.Run(), "stderr: %s", stderr.String())
 	assert.True(t, bytes.Equal(content, stdout.Bytes()), "got %d bytes, want %d; stderr: %s", stdout.Len(), len(content), stderr.String())
+}
+
+// A writer a caller set on the command wins (tests, embedding); otherwise the
+// real stdout is used, never the ANSI-stripping pipe that os.Stdout points at.
+func TestFetchStdoutTarget(t *testing.T) {
+	var real bytes.Buffer
+	old := binaryStdout
+	binaryStdout = &real
+	t.Cleanup(func() { binaryStdout = old })
+
+	plain := &cobra.Command{}
+	assert.Same(t, &real, fetchStdout(plain).(*bytes.Buffer), "no writer set: the real stdout")
+
+	var own bytes.Buffer
+	set := &cobra.Command{}
+	set.SetOut(&own)
+	assert.Same(t, &own, fetchStdout(set).(*bytes.Buffer), "a writer set on the command wins")
 }

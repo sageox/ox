@@ -64,3 +64,15 @@ func TestANSIStripperUnfinishedTailPassesThrough(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, []byte("end \xe2\x80"), []byte(streamStrip(t, "end \xe2\x80")))
 }
+
+// utf8ByteLen must agree with the lead-byte ranges ansi.Strip uses; -1 marks
+// a byte that cannot start a sequence (a stray continuation or 0xf8+).
+func TestUTF8ByteLen(t *testing.T) {
+	t.Parallel()
+	for b, want := range map[byte]int{
+		'a': 1, 0x7f: 1, 0xc3: 2, 0xdf: 2, 0xe2: 3, 0xef: 3, 0xf0: 4, 0xf7: 4,
+		0x80: -1, 0xbf: -1, 0xf8: -1, 0xff: -1,
+	} {
+		assert.Equal(t, want, utf8ByteLen(b), "byte %#x", b)
+	}
+}
