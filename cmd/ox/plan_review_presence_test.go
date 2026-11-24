@@ -37,12 +37,14 @@ type fakePresence struct {
 	people map[string]fakePerson // by token
 	mux    *http.ServeMux
 
-	mu     sync.Mutex
-	refuse int // answer every join with this status, when set
-	conns  map[string]*fakeConn
-	seq    int
-	joins  int
-	moves  []fakeMove
+	mu        sync.Mutex
+	refuse    int  // answer every join with this status, when set
+	refuseSel bool // refuse every move carrying sel, as a service from before selections does
+	refused   int  // moves refused for carrying sel
+	conns     map[string]*fakeConn
+	seq       int
+	joins     int
+	moves     []fakeMove
 }
 
 type fakePerson struct{ name, user string }
@@ -176,6 +178,11 @@ func (f *fakePresence) move(w http.ResponseWriter, r *http.Request) {
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.At == nil {
 		http.Error(w, "at", http.StatusBadRequest)
+		return
+	}
+	if f.refuseSel && body.Sel != nil {
+		f.refused++
+		http.Error(w, `invalid request body: json: unknown field "sel"`, http.StatusBadRequest)
 		return
 	}
 	// a move is the connection's whole state: one without sel clears it
@@ -521,6 +528,39 @@ func TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer(t *testing.T) {
 	waitFor(t, "the current pointer", func() bool { _, m := fake.count(); return len(m) == 1 })
 	if _, moves := fake.count(); moves[0].conn != again || moves[0].at != current {
 		t.Fatalf("the rejoined connection must get the current pointer, once: %v", moves)
+	}
+}
+
+// TestPresenceBridge_SelectionsFallBackOnAnOlderService selects words on a
+// page whose room is served by a service that refuses every move carrying
+// sel, as one from before selections does.
+// Failure prevented: a newer ox against an older service loses the reviewer's
+// pointer for as long as words are selected.
+func TestPresenceBridge_SelectionsFallBackOnAnOlderService(t *testing.T) {
+	setPresenceTimings(t, 20*time.Millisecond, time.Hour, time.Hour)
+	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}})
+	fake.mu.Lock()
+	fake.refuseSel = true
+	fake.mu.Unlock()
+	review, _ := presenceReview(t, base, "tok-devon")
+	page, _ := pageEvents(t, review.URL, "page-devon-1")
+	nextEvent(t, page, "the page's welcome", presenceOf("welcome"))
+
+	sel := `{"start":{"anchor":"h1234abcd","text":0},"end":{"anchor":"h1234abcd","text":4}}`
+	for i := 1; i <= 2; i++ {
+		at := fmt.Sprintf(`{"anchor":"h1234abcd","x":0.%d,"y":0.5}`, i)
+		if code := reviewPOST(t, review.URL+"/presence", "secret", `{"key":"page-devon-1","at":`+at+`,"sel":`+sel+`}`); code != http.StatusNoContent {
+			t.Fatalf("move %d with words selected: HTTP %d", i, code)
+		}
+		waitFor(t, fmt.Sprintf("pointer %d in the room with words selected", i), func() bool {
+			_, m := fake.count()
+			return len(m) == i && m[i-1].at == at && m[i-1].sel == ""
+		})
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.refused != 1 {
+		t.Fatalf("an older service must be offered a selection once per connection, then sent pointers alone: %d refused", fake.refused)
 	}
 }
 

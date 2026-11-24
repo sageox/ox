@@ -56,6 +56,9 @@ var (
 	presenceRevisionRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	presenceAnchorRE   = regexp.MustCompile(`^h[0-9a-f]{8}$`)
 	errPresenceRefused = errors.New("presence refused")
+	// errPresenceSelRefused is a move carrying a selection the service
+	// refused, as one from before selections refuses every such move.
+	errPresenceSelRefused = errors.New("presence refused the selection")
 	// presenceStream reads the room's event stream, which stays open for the
 	// whole review; presenceSilence ends a dead one instead of a timeout.
 	presenceStream = &http.Client{}
@@ -223,6 +226,7 @@ type presenceTab struct {
 	at    json.RawMessage // where the page's pointer rests
 	sel   json.RawMessage // the words the page has selected
 	fresh bool            // at and sel are not yet sent on conn
+	bare  bool            // conn refused a selection: send it pointers alone
 }
 
 // open joins the room for a page that shows revision and names itself key,
@@ -378,9 +382,11 @@ func (t *presenceTab) forward(v any) {
 	t.emit(b)
 }
 
+// setConn records the service's id for this page's connection; a new
+// connection is asked to take selections again.
 func (t *presenceTab) setConn(id string) {
 	t.mu.Lock()
-	t.conn = id
+	t.conn, t.bare = id, false
 	t.mu.Unlock()
 }
 
@@ -399,11 +405,25 @@ func (t *presenceTab) send(ctx context.Context) {
 		if conn != "" {
 			t.fresh = false
 		}
+		if t.bare {
+			sel = json.RawMessage("null")
+		}
 		t.mu.Unlock()
 		if conn == "" || !fresh {
 			continue
 		}
-		if err := t.b.post(ctx, conn, at, sel); err != nil {
+		err := t.b.post(ctx, conn, at, sel)
+		if errors.Is(err, errPresenceSelRefused) {
+			// a service from before selections refuses every move carrying
+			// one: the pointer still goes, alone, as it did before them
+			t.mu.Lock()
+			if t.conn == conn {
+				t.bare = true
+			}
+			t.mu.Unlock()
+			err = t.b.post(ctx, conn, at, json.RawMessage("null"))
+		}
+		if err != nil {
 			slog.Debug("plan review: presence move not sent", "plan_id", t.b.planID, "error", err)
 		}
 		select {
@@ -438,6 +458,9 @@ func (b *presenceBridge) post(ctx context.Context, conn string, at, sel json.Raw
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusBadRequest && string(sel) != "null" {
+		return errPresenceSelRefused
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}

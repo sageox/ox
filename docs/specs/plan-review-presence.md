@@ -78,7 +78,9 @@ is not markable, is shared from the first markable words after it. The
 document places each end on its own render, a start just before the character
 `text` counts to and an end just past the one before it, and tints the range
 between them with the CSS Custom Highlight API, so the tint follows the words
-through any scroll or reflow without being placed again. A selection is not
+through any scroll or reflow without being placed again; when the plan's own
+content changes, the sender shares the selection again under the anchors the
+change gives its elements, once its anchor index is rebuilt. A selection is not
 tinted when an end names an element this render lacks, one whose anchor
 occurs a different number of times than for the sender, or one with fewer
 characters, or when its ends are inverted. Selected words inside content
@@ -238,6 +240,10 @@ the user signed in with `ox login`:
   (Approve, idle, Ctrl-C), the server closes the pages' streams, so they leave
   the room and the command exits even with a tab open. A pointer move writes
   nothing, reloads nothing, and does not keep an idle review loop open.
+- A service from before selections refuses a move carrying `sel`. The server
+  then sends that move again without it, and only the pointer for the rest of
+  the connection, so the pointer never stalls while words are selected; a new
+  connection offers selections again.
 - With no login for the project's endpoint, or no `pln_` id (a plan saved
   before ids existed), the server makes no presence request at all, and the
   page carries none of it. A declined join is asked again only after five
@@ -265,6 +271,8 @@ review` pages on one markdown plan see each other's pointers and selections.
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves, selections and leaves between a page and a hosted viewer, under the service's names; a move with nothing selected carries no `sel`; a second tab leaves alone; live reloads share the stream |
 | `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields (the selected words among them), out-of-range values, half a selection, a key with no open stream, and oversized bodies |
 | `TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer` | A dropped connection says `lost`, rejoins, and sends only the current pointer |
+| `TestPresenceBridge_SelectionsFallBackOnAnOlderService` | A service that refuses `sel` still gets every pointer, and is offered a selection once per connection |
+| `TestBrowser_SelectionFollowsARewrittenParagraph` | A selection is shared again under its paragraph's new anchor after each rewrite, including one that lands while the anchor index waits to be rebuilt |
 | `TestPresenceBridge_ReconnectingPageReplacesItsConnection` | A page reconnecting under its key leaves the room once, not twice |
 | `TestPresenceBridge_JoinsWithTheCurrentLogin` | A rejoin uses the login on disk, so signing in anew takes effect |
 | `TestBrowser_PointerMovesNeverOverlap` | The controls send one move at a time, then the latest |

@@ -158,8 +158,11 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
       const s = JSON.stringify(at);
       if (s !== sent) { sent = s; moved(at); }
       if (!selDirty) return;
-      selDirty = false;
       const sel = selectionNow(), j = JSON.stringify(sel);
+      // read through an anchor index still waiting to be rebuilt, the
+      // selection may name an anchor its element no longer has: read it
+      // again when the rebuild's relayout comes
+      selDirty = stale;
       if (j !== selSent) { selSent = j; selected(sel); }
     }, Math.max(0, last + STEP - Date.now()));
   }

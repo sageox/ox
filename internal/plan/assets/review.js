@@ -896,8 +896,8 @@
           moved(at);
         }
         if (!selDirty) return;
-        selDirty = false;
         const sel = selectionNow(), j = JSON.stringify(sel);
+        selDirty = stale;
         if (j !== selSent) {
           selSent = j;
           selected(sel);

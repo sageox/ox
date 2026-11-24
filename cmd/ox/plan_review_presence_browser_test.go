@@ -502,6 +502,52 @@ func TestBrowser_PointerMovesNeverOverlap(t *testing.T) {
 	}
 }
 
+// TestBrowser_SelectionFollowsARewrittenParagraph runs the document tools on
+// a plan whose own script rewrites the selected paragraph twice: once after
+// the anchor index's rebuild interval, and again the moment the tools report
+// that first rewrite, while the index rebuilt for it still waits out the
+// interval.
+// Failure prevented: the selection keeps naming an anchor its paragraph no
+// longer has, and teammates whose plan shows the rewrite lose its tint.
+func TestBrowser_SelectionFollowsARewrittenParagraph(t *testing.T) {
+	ctx := frameBrowser(t)
+	tools, err := os.ReadFile(filepath.Join(packageDir, "..", "..", "packages", "plan-review", "dist", "document-tools.js"))
+	if err != nil {
+		t.Skip("no packages/plan-review/dist — run `make plan-review` first")
+	}
+	page := `<!doctype html><html><body><h1>Plan</h1><p id="p">The retry path can fire twice.</p><script type="module">import { startDocumentTools } from '/tools.js';` +
+		`const p = document.getElementById('p'); window.sels = [];` +
+		`startDocumentTools({ send(m) { if (m.type === 'ready') window.ready = true; if (m.type !== 'selection') return;` +
+		` window.sels.push(m.sel && m.sel.start.anchor); if (window.sels.length === 2) p.append(' Twice.'); }, listen() {} });</script></body></html>`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(page)) })
+	mux.HandleFunc("/tools.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write(tools)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv.URL+"/")); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.ready`, 5*time.Second) {
+		t.Fatal("the document tools never started")
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(()=>{const t=document.getElementById('p').firstChild,r=document.createRange();r.setStart(t,4);r.setEnd(t,15);getSelection().addRange(r)})()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.sels.length === 1`, 2*time.Second) {
+		t.Fatalf("the selection was never shared: %s", evalString(t, ctx, `JSON.stringify(window.sels)`))
+	}
+	time.Sleep(400 * time.Millisecond) // past the 250 ms rebuild interval: the first rewrite rebuilds the index
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('p').append(' Once.')`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.sels.length === 3 && new Set(window.sels).size === 3`, 3*time.Second) {
+		t.Fatalf("each rewrite must be shared under the paragraph's new anchor; shared anchors %s", evalString(t, ctx, `JSON.stringify(window.sels)`))
+	}
+}
+
 // TestBrowser_ChangingPlanIsNotRehashedEveryFrame serves a plan whose own
 // script rewrites a clock every 16 ms while a teammate's pointer is on it.
 // Failure prevented: every change hashes every anchor in the plan again, once
