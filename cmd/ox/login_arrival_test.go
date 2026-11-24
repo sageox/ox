@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,8 +21,10 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/ui"
 )
 
 // TestIsReturningLogin pins what "Welcome back" means: this account already
@@ -117,13 +120,13 @@ func TestLoginFailure(t *testing.T) {
 	}
 }
 
-// TestLoginArtEnv_Allowed verifies Oxy appears for exactly one audience and
+// TestLoginArtEnv_Allowed verifies the mark appears for exactly one audience and
 // each condition alone keeps him away.
 // Failure prevented: art in a pipe, CI log, --json or --quiet run, or an AI
 // coworker's captured output, where DESIGN.md promises calm, precise text.
 func TestLoginArtEnv_Allowed(t *testing.T) {
 	person := loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.TrueColor}
-	require.True(t, person.allowed(), "a person at a truecolor terminal sees Oxy")
+	require.True(t, person.allowed(), "a person at a truecolor terminal sees the mark")
 	assert.True(t, loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.ANSI256}.allowed(),
 		"256 colors is enough for the half-block picture")
 
@@ -152,29 +155,34 @@ func TestLoginArtEnv_Allowed(t *testing.T) {
 // TestLoginArt_NeverDrawsToAWriterThatIsNotATerminal is the guard on the real
 // wiring: a buffer is not a terminal, so no art, whatever else is true.
 func TestLoginArt_NeverDrawsToAWriterThatIsNotATerminal(t *testing.T) {
-	assert.Nil(t, loginArt(&bytes.Buffer{}))
-	assert.Nil(t, loginArt(io.Discard))
+	arrival := cli.NewLoginArrival("Person A", "person.a@company.test", "sageox.ai", true)
+	assert.Nil(t, loginArt(&bytes.Buffer{}, arrival, 80))
+	assert.Nil(t, loginArt(io.Discard, arrival, 80))
 }
 
-// TestLoginArtFor verifies Oxy's still reaches the success block for a person
-// at a color terminal, and that a missing animation costs the art, not the login.
-// Failure prevented: a failure to draw the art being returned as a failed login
-// after the credential was already stored.
+// TestLoginArtFor verifies the SageOx mark reaches the success block for a
+// person at a color terminal, and is left out when the block would not fit
+// beside it.
+// Failure prevented: a long email pushing the block past the terminal's edge,
+// so the mark wraps into noise above the one line the person needs.
 func TestLoginArtFor(t *testing.T) {
 	person := loginArtEnv{StdoutTerminal: true, Interactive: true, Profile: colorprofile.TrueColor}
+	arrival := cli.NewLoginArrival("Person A", "person.a@company.test", "sageox.ai", true)
 
-	lines := loginArtFor(person, loginArtAnimation)
-	require.Len(t, lines, loginArtRows, "one string per terminal row")
-	assert.Contains(t, lines[len(lines)/2], "▀", "something is drawn")
+	lines := loginArtFor(person, arrival, 80)
+	require.Len(t, lines, ui.MarkRows, "one string per terminal row")
+	assert.Contains(t, ansi.Strip(lines[len(lines)/2]), "⣿", "something is drawn")
 
-	assert.Nil(t, loginArtFor(person, "no-such-animation"), "art that cannot be drawn is left out")
-	assert.Nil(t, loginArtFor(loginArtEnv{StdoutTerminal: true, Interactive: true, Quiet: true, Profile: colorprofile.TrueColor}, loginArtAnimation),
+	assert.Nil(t, loginArtFor(person, arrival, 60), "a terminal too narrow for both gets the text alone")
+	long := cli.NewLoginArrival("Person A", strings.Repeat("a", 50)+"@company.test", "sageox.ai", true)
+	assert.Nil(t, loginArtFor(person, long, 80), "a block too wide for the mark gets the text alone")
+	assert.Nil(t, loginArtFor(loginArtEnv{StdoutTerminal: true, Interactive: true, Quiet: true, Profile: colorprofile.TrueColor}, arrival, 80),
 		"--quiet gets the text alone")
 }
 
 // TestCurrentLoginArtEnv_FollowsTheOutputFlags verifies --quiet and --json,
 // which arrive through the global config, reach the art decision.
-// Failure prevented: Oxy appearing in a --json or --quiet run because the flags
+// Failure prevented: the mark appearing in a --json or --quiet run because the flags
 // were read from somewhere the command never set.
 func TestCurrentLoginArtEnv_FollowsTheOutputFlags(t *testing.T) {
 	prev := cfg

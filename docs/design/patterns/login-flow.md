@@ -9,7 +9,7 @@ flowchart TD
     A["Visit: link + Code: line<br/>the code always prints"] --> B["Spinner<br/>Waiting for authorization..."]
     B -->|approved in the browser| C["Success block: who, where, next"]
     B -->|denied or expired| D["Error + one retry line"]
-    C -.->|color terminal only| E["Oxy, half-block, beside the block"]
+    C -.->|color terminal only| E["SageOx mark, in braille, beside the block"]
 ```
 
 What a person sees, with the code to match and the three lines after it:
@@ -33,28 +33,28 @@ Error: authentication failed: authorization was denied
 ## Key decisions
 
 - **The code always prints.** The approval page says "allow only if it matches the code your terminal shows" (RFC 8628). Hiding it turns that check into a click.
-- **Success is three lines.** Who, where, what's next. Next is always `ox init`: no rotating tip, no disclaimer, no wordmark. Login is a step, not a destination.
+- **Success is three lines.** Who, where, what's next. Next is always `ox init`: no rotating tip, no disclaimer, no wordmark. Login is a step, not a destination. The mark beside the block is six rows and adds none.
 - **"Welcome back" is earned.** Only when ox held a stored login for this account on this endpoint before the flow ran.
-- **Oxy is for a person at a color terminal.** Everyone else gets the same three lines, byte for byte.
+- **The SageOx mark is for a person at a color terminal.** Everyone else gets the same three lines, byte for byte.
 - **Failures get one retry line.** Denied and expired both end with the command to run again.
 
 <details>
-<summary>More: spinner, browser, Oxy's rules</summary>
+<summary>More: spinner, browser, the mark's rules</summary>
 
 - **Bubbletea, but minimal.** `loginSpinnerModel` is one spinner, one message, one `Ctrl+C` handler. On success it leaves no line behind: the success block prints right after it.
 - **Browser-first.** `cli.OpenInBrowser` opens the URL (headless-safe). The spinner only polls; it has no UI to redirect to.
 - **Ctrl+C means cancel, not "kill ox".** The model exits cleanly and the person can retry.
 - **A different account is a new person.** Same machine, same endpoint, different user: "Welcome", not "Welcome back".
-- **No Oxy in** a pipe, CI, an AI coworker's run, `--quiet`, `--json`, `--no-input`, `--no-interactive`, or under `NO_COLOR`. The art is one half-block confetti still from `internal/pet`.
+- **No mark in** a pipe, CI, an AI coworker's run, `--quiet`, `--json`, `--no-input`, `--no-interactive`, or under `NO_COLOR`, or when the block would not fit beside it in 80 columns (`COLUMNS` overrides). The art is `ui.RenderMark`: the 42 by 24 mark at 21 by 6 braille cells.
 
 </details>
 
 ## Source
 
 - [`cmd/ox/login.go`](../../../cmd/ox/login.go) — `runLoginFlow`, `loginSpinnerModel`
-- [`cmd/ox/login_arrival.go`](../../../cmd/ox/login_arrival.go) — retry lines, the "Welcome back" signal, when Oxy may appear
+- [`cmd/ox/login_arrival.go`](../../../cmd/ox/login_arrival.go) — retry lines, the "Welcome back" signal, when the mark may appear
 - [`internal/cli/login_arrival.go`](../../../internal/cli/login_arrival.go) — the code lines and the success block
-- [`internal/pet/terminal.go`](../../../internal/pet/terminal.go) — `TerminalFrame`, Oxy as half-block text
+- [`internal/ui/wordmark.go`](../../../internal/ui/wordmark.go) — `RenderMark`, the SageOx mark as braille text
 - [`internal/cli/output.go`](../../../internal/cli/output.go) — `OpenInBrowser`
 
 ## Components used

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/colorprofile"
@@ -13,21 +12,13 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/pet"
 	"github.com/sageox/ox/internal/theme"
+	"github.com/sageox/ox/internal/ui"
 )
 
 // login_arrival.go — the parts of `ox login`'s two attention moments that need
 // ox's state: the device-code response, the stored login, the terminal. The
 // text itself is internal/cli/login_arrival.go.
-
-// Oxy's celebration beside the success block: one still from the confetti
-// loop, arms up, small enough that login stays a step and not a destination.
-const (
-	loginArtAnimation = "confetti"
-	loginArtPosition  = 0.35
-	loginArtRows      = 6
-)
 
 // writeDeviceInstructions prints where to go and the code to match there.
 func writeDeviceInstructions(out io.Writer, deviceCode *auth.DeviceCodeResponse) {
@@ -79,7 +70,7 @@ func isReturningLogin(prior *auth.StoredToken, now auth.UserInfo) bool {
 	return false
 }
 
-// loginArtEnv is everything that decides whether Oxy may appear.
+// loginArtEnv is everything that decides whether the mark may appear.
 type loginArtEnv struct {
 	StdoutTerminal bool
 	Interactive    bool // cli.IsInteractive: a TTY on stdin, and no --no-input, --no-interactive or CI
@@ -110,22 +101,21 @@ func currentLoginArtEnv(out io.Writer) loginArtEnv {
 	return env
 }
 
-// loginArt is Oxy's still for the success block, one string per terminal row,
-// or nil when it may not or cannot be drawn. Art is never worth failing a login
-// over.
-func loginArt(out io.Writer) []string {
-	return loginArtFor(currentLoginArtEnv(out), loginArtAnimation)
+// loginArt is the SageOx mark for the success block, one string per terminal
+// row, or nil when it may not be drawn or the block would not fit beside it in
+// width columns. A wrapped mark is worse than none.
+func loginArt(out io.Writer, arrival cli.LoginArrival, width int) []string {
+	return loginArtFor(currentLoginArtEnv(out), arrival, width)
 }
 
-// loginArtFor is loginArt for a given audience and animation.
-func loginArtFor(env loginArtEnv, animation string) []string {
+// loginArtFor is loginArt for a given audience.
+func loginArtFor(env loginArtEnv, arrival cli.LoginArrival, width int) []string {
 	if !env.allowed() {
 		return nil
 	}
-	art, err := pet.TerminalFrame(animation, loginArtPosition, loginArtRows)
-	if err != nil {
-		slog.Debug("login: Oxy art unavailable", "error", err)
+	art := ui.RenderMark()
+	if arrival.WidthBeside(art) > width {
 		return nil
 	}
-	return art.Lines
+	return art
 }

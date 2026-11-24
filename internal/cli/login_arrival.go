@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // login_arrival.go — the text of the two moments `ox login` has a person's
@@ -15,7 +17,7 @@ import (
 // not a rotating tip: the person just arrived and needs a first step.
 const LoginNextCommand = "ox init"
 
-// loginArtGap separates Oxy's picture from the success lines beside it.
+// loginArtGap separates the SageOx mark from the success lines beside it.
 const loginArtGap = "  "
 
 // DeviceCodeLines is where to go and the code to match there.
@@ -80,9 +82,21 @@ func (a LoginArrival) Lines() []string {
 	}
 }
 
-// Render draws the block, with Oxy's picture beside it when art is given: one
-// string per terminal row, all the same width. The text sits level with the
-// middle of the figure.
+// WidthBeside is how many columns the block needs with art drawn beside it.
+func (a LoginArrival) WidthBeside(art []string) int {
+	width := 0
+	for _, line := range a.Lines() {
+		width = max(width, ansi.StringWidth(line))
+	}
+	if len(art) == 0 {
+		return width
+	}
+	return ansi.StringWidth(art[0]) + ansi.StringWidth(loginArtGap) + width
+}
+
+// Render draws the block, with the SageOx mark beside it when art is given:
+// one string per terminal row, all the same width. The text sits level with
+// the middle of the figure.
 func (a LoginArrival) Render(art []string) string {
 	text := a.Lines()
 	var b strings.Builder

@@ -452,10 +452,10 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		return fmt.Errorf("authentication succeeded but failed to retrieve token: %w", err)
 	}
 
-	// three lines: who, where, what's next, with Oxy beside them on a color terminal
+	// three lines: who, where, what's next, with the SageOx mark beside them on a color terminal
 	fmt.Fprintln(out)
 	arrival := cli.NewLoginArrival(token.UserInfo.Name, token.UserInfo.Email, endpoint.NormalizeSlug(authClient.Endpoint()), isReturningLogin(priorLogin, token.UserInfo))
-	fmt.Fprint(out, arrival.Render(loginArt(out)))
+	fmt.Fprint(out, arrival.Render(loginArt(out, arrival, terminalWidth())))
 	fmt.Fprintln(out)
 
 	// fetch git credentials from /api/v1/cli/repos (source of truth for team context URLs)

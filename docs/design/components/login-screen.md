@@ -26,7 +26,7 @@ Foreground operations with predictable durations — use inline [Spinner](spinne
 | State | What prints | Source |
 |---|---|---|
 | Waiting for approval | `Visit:` link, `Code:` line (always), then the [Spinner](spinner.md) | `cli.DeviceCodeLines` |
-| Approved, at a color terminal | Three lines (who, where, next) with a half-block Oxy beside them | `cli.LoginArrival`, `pet.TerminalFrame` |
+| Approved, at a color terminal | Three lines (who, where, next) with the SageOx mark beside them | `cli.LoginArrival`, `ui.RenderMark` |
 | Approved, piped / CI / `--quiet` / `--json` | The same three lines, no art | `cli.LoginArrival` |
 | Denied or expired | The error, then one retry line | `loginFailure` in `cmd/ox/login_arrival.go` |
 
@@ -34,4 +34,4 @@ The catalog snapshot draws every state with the functions `ox login` calls, so i
 
 ## Source
 
-[`cmd/ox/login.go`](../../../cmd/ox/login.go) — `loginSpinnerModel` · [`cmd/ox/login_arrival.go`](../../../cmd/ox/login_arrival.go) — failure lines, "Welcome back" signal, when Oxy may appear · [`internal/cli/login_arrival.go`](../../../internal/cli/login_arrival.go) — the text
+[`cmd/ox/login.go`](../../../cmd/ox/login.go) — `loginSpinnerModel` · [`cmd/ox/login_arrival.go`](../../../cmd/ox/login_arrival.go) — failure lines, "Welcome back" signal, when the mark may appear · [`internal/cli/login_arrival.go`](../../../internal/cli/login_arrival.go) — the text
