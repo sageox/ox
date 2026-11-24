@@ -286,6 +286,9 @@ service for one plan, used by these tests.
 - **Off-screen peers** are listed in the bar but have no edge indicator.
 - **Words outside every markable element** at a selection's edge are not
   shared, the same content a pointer cannot name.
+- **A selection is one range.** Dragged across content collapsed on the
+  reviewer's page, such as a closed `<details>` or a hidden tab, it still
+  covers that content, and a teammate who has it open sees it tinted.
 - **A selection in review mode** is shared only while it lasts: once the
   reviewer clicks into the note it opened, the page has no selection, and
   teammates see none, though the note is about those words.
