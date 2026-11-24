@@ -76,11 +76,13 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     (capture, rect, anchor) => port.send({ type: 'capture', capture, rect, anchor }),
     (reason) => port.send({ type: 'refused', reason }),
     () => paint(items, drawings));
-  // Live pointers: share this reviewer's as the content under it, and place
-  // the ones the host sends, which the host names and draws.
+  // Live pointers and selections: share this reviewer's as the content under
+  // them, place the pointers the host sends, which the host names and draws,
+  // and tint the selections in the colors it gives.
   const pointers = pointerLayer(SELECTOR, NOT_PLAN,
     (at) => port.send({ type: 'pointer', at }),
-    (points) => port.send({ type: 'located', points }));
+    (points) => port.send({ type: 'located', points }),
+    (sel) => port.send({ type: 'selection', sel }));
 
   function paint(next: PaintItem[], nextDrawings: DrawingPaint[]) {
     items = next;
@@ -420,6 +422,9 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
         break;
       case 'locate':
         pointers.locate(m.points);
+        break;
+      case 'selections':
+        pointers.selections(m.items);
         break;
     }
   });

@@ -1,7 +1,7 @@
 //go:build browser
 
 // plan_review_presence_browser_test.go proves, in real Chrome, live pointers
-// between review pages: a local `ox plan review` page and a host that frames
+// and selections between review pages: a local `ox plan review` page and a host that frames
 // the plan with the npm build, as a hosted viewer does, and two local pages on
 // different revisions. fakePresence stands in for SageOx's presence service.
 // The framed host reads the npm build: run `make plan-review` first; it skips
@@ -35,14 +35,18 @@ const presencePlan = `<!doctype html><html><head><meta charset="utf-8"><title>Pr
 	`<p>Ship behind a flag.</p></section><div style="height:1600px"></div></body></html>`
 
 // presenceProbe runs in the framed plan before the document tools: it reports
-// when pointer input first reaches the frame, where each data-probe part is,
-// on load and when asked, and every message the host sends the document,
-// which a plan's own script can read.
+// when pointer input first reaches the frame, where each data-probe part is
+// and the words each live selection tint covers, on load and when asked, and
+// every message the host sends the document, which a plan's own script can
+// read. Asked to, it selects the collapsible section's words, as Avery would.
 const presenceProbe = `<script>document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);var MC=MessageChannel;window.MessageChannel=function(){var c=new MC();` +
 	`c.port1.addEventListener('message',function(e){parent.postMessage({heard:JSON.stringify(e.data)},'*')});return c};` +
 	`function probe(){var p={};document.querySelectorAll('[data-probe]').forEach(function(el){var r=el.getBoundingClientRect();` +
-	`p[el.getAttribute('data-probe')]={x:r.left+r.width/2,y:r.top+r.height/2,left:r.left,top:r.top,right:r.right,bottom:r.bottom}});parent.postMessage({probe:p},'*')}` +
-	`window.addEventListener('load',probe);window.addEventListener('message',function(e){if(e.source===parent&&e.data&&e.data.reprobe)probe()})</script>`
+	`p[el.getAttribute('data-probe')]={x:r.left+r.width/2,y:r.top+r.height/2,left:r.left,top:r.top,right:r.right,bottom:r.bottom}});` +
+	`var tints={};CSS.highlights.forEach(function(h,n){if(n.indexOf('rev-sel-')===0)tints[n]=Array.from(h).map(function(r){return r.toString()})});parent.postMessage({probe:p,tints:tints},'*')}` +
+	`window.addEventListener('load',probe);window.addEventListener('message',function(e){if(e.source!==parent||!e.data)return;if(e.data.reprobe)probe();` +
+	`if(e.data.select){var r=document.createRange(),c=document.querySelector('[data-probe=inside]').firstChild;r.setStart(document.querySelector('[data-probe=summary]').firstChild,0);` +
+	`r.setEnd(c,c.data.length);getSelection().removeAllRanges();getSelection().addRange(r)}})</script>`
 
 // presenceHost serves, on one origin, the presence service f and a host page
 // that frames doc at an offset beside its own navigation, mounting the review
@@ -68,8 +72,9 @@ func presenceHost(t *testing.T, f *fakePresence, doc []byte, revision, token, re
 		`#doc{position:fixed;left:200px;top:60px;width:760px;height:800px;border:12px solid #333}</style></head><body>` +
 		`<iframe id="doc" sandbox="allow-scripts"></iframe><script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.heard = [];` +
-		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) window.probe = d.probe; if (d.heard) window.heard.push(d.heard); if (d.input) window.input = true; });` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) { window.probe = d.probe; window.tints = d.tints; } if (d.heard) window.heard.push(d.heard); if (d.input) window.input = true; });` +
 		`window.reprobe = () => { window.probe = null; frame.contentWindow.postMessage({ reprobe: true }, '*'); };` +
+		`window.selectInFrame = () => frame.contentWindow.postMessage({ select: true }, '*');` +
 		`const room = '` + room + `', auth = 'access_token=` + token + `';` +
 		`const presence = { join(revision, on) { let self = '';` +
 		` const es = new EventSource(room + '?revision=' + encodeURIComponent(revision) + '&' + auth);` +
@@ -77,7 +82,7 @@ func presenceHost(t *testing.T, f *fakePresence, doc []byte, revision, token, re
 		` es.addEventListener('peer', (e) => on({ type: 'peer', peer: JSON.parse(e.data) }));` +
 		` es.addEventListener('leave', (e) => on({ type: 'leave', id: JSON.parse(e.data).id }));` +
 		` es.onerror = () => on({ type: 'lost' });` +
-		` return { move(at) { if (self) fetch(room + '/' + self + '?' + auth, { method: 'POST', body: JSON.stringify({ at }) }); }, leave() { es.close(); } }; } };` +
+		` return { move(at, sel) { if (self) fetch(room + '/' + self + '?' + auth, { method: 'POST', body: JSON.stringify(sel ? { at, sel } : { at }) }); }, leave() { es.close(); } }; } };` +
 		`mountHostControls(connectFrame(frame, '` + frameInstance + `'), { account: 'acct', plan: '` + f.plan + `', slug: 'presence', committed: [], reviewer: '` + reviewer + `', frame,` +
 		` transport: { send: () => Promise.resolve({ state: 'offline' }) }, revision: '` + revision + `', presence });` +
 		`frame.src = '/doc';</script></body></html>`
@@ -178,6 +183,43 @@ func waitCursor(t *testing.T, ctx context.Context, name, what string, within fun
 	t.Fatalf("%s: %d cursor(s) named %s, at %v; want one within %+v; cursors %s", what, n, name, at, b, evalString(t, ctx, `[...document.querySelectorAll('.rev-cursor')].map((c)=>c.textContent+'@'+c.style.transform).join(' ')+' | here '+document.querySelector('.rev-here').textContent+' | vw '+innerWidth+'x'+innerHeight`))
 }
 
+// tintsOf is the words each live selection tint covers on a page, by
+// highlight name: read on the local page directly, and through the probe in
+// the framed plan, which its host cannot read across the frame.
+func tintsOf(t *testing.T, ctx context.Context, framed bool) map[string][]string {
+	t.Helper()
+	js := `JSON.stringify(Object.fromEntries([...CSS.highlights].filter(([n])=>n.startsWith('rev-sel-')).map(([n,h])=>[n,[...h].map((r)=>r.toString())])))`
+	if framed {
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`window.reprobe()`, nil)); err != nil {
+			t.Fatal(err)
+		}
+		if !waitJS(ctx, `window.probe`, 5*time.Second) {
+			t.Fatal("the framed plan never answered the probe")
+		}
+		js = `JSON.stringify(window.tints)`
+	}
+	var tints map[string][]string
+	_ = json.Unmarshal([]byte(evalString(t, ctx, js)), &tints)
+	return tints
+}
+
+// waitTint waits until a page tints exactly want, or nothing when want is
+// empty, in the color of who's chip, and fails with what it tints otherwise.
+func waitTint(t *testing.T, ctx context.Context, framed bool, who, want, what string) {
+	t.Helper()
+	var tints map[string][]string
+	var color string
+	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		color = evalString(t, ctx, `((document.querySelector('.rev-peer[title="`+who+` is here"]') || {className: ''}).className.match(/rev-c\d/) || [''])[0]`)
+		tints = tintsOf(t, ctx, framed)
+		got := tints[strings.Replace(color, "rev-c", "rev-sel-c", 1)]
+		if color != "" && ((want == "" && len(got) == 0) || (len(got) == 1 && got[0] == want)) {
+			return
+		}
+	}
+	t.Fatalf("%s: tints %q, %s's color %q; want %q", what, tints, who, color, want)
+}
+
 func localSpot(t *testing.T, ctx context.Context, part string) spot {
 	t.Helper()
 	var s spot
@@ -235,12 +277,14 @@ func pointIntoFrame(t *testing.T, ctx context.Context, part string) {
 // same revision at another width, offset in its page. Each sees the other's
 // pointer, with their name, on the same word, through a scroll; a pointer in
 // a section collapsed on the other side is not drawn until it is opened
-// there; the framed plan never hears a name; and Devon reloading leaves one
-// cursor of his, not a ghost.
+// there; each sees the words the other selects tinted in the other's color,
+// until they let go; the framed plan never hears a name; and Devon reloading
+// leaves one cursor of his, not a ghost.
 // Failure prevented: cursors are shared as screen positions and land on other
 // words at another width or scroll, a pointer is painted over a collapsed
-// section as if on what follows it, a plan's own script learns who is
-// reviewing it, or a reload leaves a stale cursor behind.
+// section as if on what follows it, a selection tints other words than the
+// ones selected or stays after it is let go, a plan's own script learns who
+// is reviewing it, or a reload leaves a stale cursor behind.
 func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	ctx := frameBrowser(t)
 	gitRoot := newPlanStatusTestRepo(t)
@@ -296,13 +340,30 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	}
 	waitCursor(t, ctx, "Devon", "Devon's pointer once the section opens", func() spot { return framedSpot(t, ctx, "inside") })
 
+	// Devon selects from one paragraph, across the open section, into the
+	// next: Avery's frame tints exactly his words, wrapped at its own width,
+	// in his color. Avery selects from the section's summary, which is no
+	// markable element, into its words: Devon's page tints them from the
+	// first words that are, in her color.
+	want := evalString(t, local, `(()=>{const ps=document.querySelectorAll('#risks > p'),a=ps[0].lastChild,b=ps[ps.length-1].firstChild,r=document.createRange();`+
+		`r.setStart(a,a.data.indexOf('prevent'));r.setEnd(b,'Ship behind'.length);getSelection().removeAllRanges();getSelection().addRange(r);return r.toString()})()`)
+	waitTint(t, ctx, true, "Devon", want, "Devon's selection in the framed plan")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.selectInFrame()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	waitTint(t, local, false, "Avery", "Restore the old consumer", "Avery's selection on the local page")
+	if err := chromedp.Run(local, chromedp.Evaluate(`getSelection().removeAllRanges()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	waitTint(t, ctx, true, "Devon", "", "Devon letting go of the words")
+
 	var heard []string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.heard`, &heard)); err != nil {
 		t.Fatal(err)
 	}
 	all := strings.Join(heard, "\n")
-	if !strings.Contains(all, `"locate"`) {
-		t.Fatalf("the probe must hear the host's locate messages for this check to mean anything: %s", all)
+	if !strings.Contains(all, `"locate"`) || !strings.Contains(all, `"selections"`) {
+		t.Fatalf("the probe must hear the host's locate and selections messages for this check to mean anything: %s", all)
 	}
 	for _, secret := range []string{"Devon", "Avery", "tok-", "u-devon", "conn-"} {
 		if strings.Contains(all, secret) {

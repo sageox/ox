@@ -2,12 +2,12 @@ package main
 
 // plan_review_presence.go joins each open `ox plan review` page to its plan's
 // live presence room on SageOx, as the user signed in to ox, so teammates on
-// the same saved plan see this reviewer's pointer and the page sees theirs.
-// The page never holds the user's credentials: it reaches only this server,
-// with the review token, and this server joins only the plan it serves, by
-// its pln_ id. Pointers are transient: nothing is written to disk or the
-// Ledger, and only a pointer's latest place is sent. The wire contract is
-// docs/specs/plan-review-presence.md.
+// the same saved plan see this reviewer's pointer and selected words, and the
+// page sees theirs. The page never holds the user's credentials: it reaches
+// only this server, with the review token, and this server joins only the
+// plan it serves, by its pln_ id. Pointers and selections are transient:
+// nothing is written to disk or the Ledger, and only the latest of each is
+// sent. The wire contract is docs/specs/plan-review-presence.md.
 
 import (
 	"bufio"
@@ -78,10 +78,7 @@ type presenceAt struct {
 // pkg/planreview/testdata/presence/pointers.json holds the cases.
 func (a *presenceAt) valid() bool {
 	unit := func(f *float64) bool { return f != nil && *f >= 0 && *f <= 1 }
-	if !presenceAnchorRE.MatchString(a.Anchor) || !unit(a.X) || !unit(a.Y) || (a.Nth == nil) != (a.Of == nil) {
-		return false
-	}
-	if a.Of != nil && (*a.Of < 2 || *a.Of > 10000 || *a.Nth < 0 || *a.Nth >= *a.Of) {
+	if !presenceAnchorRE.MatchString(a.Anchor) || !unit(a.X) || !unit(a.Y) || !presenceOccurrence(a.Nth, a.Of) {
 		return false
 	}
 	if a.Path != nil && (len(a.Path) == 0 || len(a.Path) > 16) {
@@ -95,13 +92,47 @@ func (a *presenceAt) valid() bool {
 	return a.Text == nil || (*a.Text >= 0 && *a.Text <= 1<<20)
 }
 
+// presenceOccurrence checks which occurrence of a repeated anchor a location
+// names: nth and of come together, and only when the anchor repeats.
+func presenceOccurrence(nth, of *int) bool {
+	if (nth == nil) != (of == nil) {
+		return false
+	}
+	return of == nil || (*of >= 2 && *of <= 10000 && *nth >= 0 && *nth < *of)
+}
+
+// presenceTextAt is a place in the plan's text (TextAt in packages/plan-review).
+type presenceTextAt struct {
+	Anchor string `json:"anchor"`
+	Nth    *int   `json:"nth,omitempty"`
+	Of     *int   `json:"of,omitempty"`
+	Text   *int   `json:"text"`
+}
+
+func (t *presenceTextAt) valid() bool {
+	return t != nil && presenceAnchorRE.MatchString(t.Anchor) && presenceOccurrence(t.Nth, t.Of) &&
+		t.Text != nil && *t.Text >= 0 && *t.Text <= 1<<20
+}
+
+// presenceSel is the words a reviewer has selected (SelectionAt in
+// packages/plan-review), never the words themselves.
+type presenceSel struct {
+	Start *presenceTextAt `json:"start"`
+	End   *presenceTextAt `json:"end"`
+}
+
+// valid applies selectionAt's rules in packages/plan-review/src/protocol.ts;
+// pkg/planreview/testdata/presence/selections.json holds the cases.
+func (s *presenceSel) valid() bool { return s.Start.valid() && s.End.valid() }
+
 // presencePeer is another connection in the room, as the service names it.
 type presencePeer struct {
-	ID       string      `json:"id"`
-	Name     string      `json:"name"`
-	User     string      `json:"user"`
-	Revision string      `json:"revision"`
-	At       *presenceAt `json:"at"`
+	ID       string       `json:"id"`
+	Name     string       `json:"name"`
+	User     string       `json:"user"`
+	Revision string       `json:"revision"`
+	At       *presenceAt  `json:"at"`
+	Sel      *presenceSel `json:"sel,omitempty"`
 }
 
 func presenceText(s string, n int) bool { return s != "" && utf8.RuneCountInString(s) <= n }
@@ -113,7 +144,7 @@ func parsePresencePeer(raw []byte) (presencePeer, bool) {
 		return p, false
 	}
 	ok := presenceText(p.ID, 128) && presenceText(p.Name, 200) && presenceText(p.User, 128) && presenceText(p.Revision, 128) &&
-		(p.At == nil || p.At.valid())
+		(p.At == nil || p.At.valid()) && (p.Sel == nil || p.Sel.valid())
 	return p, ok
 }
 
@@ -190,7 +221,8 @@ type presenceTab struct {
 	mu    sync.Mutex
 	conn  string          // the service's id for this connection, while joined
 	at    json.RawMessage // where the page's pointer rests
-	fresh bool            // at is not yet sent on conn
+	sel   json.RawMessage // the words the page has selected
+	fresh bool            // at and sel are not yet sent on conn
 }
 
 // open joins the room for a page that shows revision and names itself key,
@@ -201,7 +233,7 @@ func (b *presenceBridge) open(ctx context.Context, key, revision string, emit fu
 		return nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	t := &presenceTab{b: b, key: key, revision: revision, emit: emit, cancel: cancel, wake: make(chan struct{}, 1), at: json.RawMessage("null")}
+	t := &presenceTab{b: b, key: key, revision: revision, emit: emit, cancel: cancel, wake: make(chan struct{}, 1), at: json.RawMessage("null"), sel: json.RawMessage("null")}
 	b.mu.Lock()
 	// a page reconnecting under its key replaces its old connection, which
 	// leaves the room now, not when the server notices its stream is gone
@@ -227,9 +259,9 @@ func (t *presenceTab) close() {
 	t.b.mu.Unlock()
 }
 
-// move records where the page named key has its pointer; false when no page
-// of that name is connected.
-func (b *presenceBridge) move(key string, at json.RawMessage) bool {
+// move records where the page named key has its pointer and what it has
+// selected; false when no page of that name is connected.
+func (b *presenceBridge) move(key string, at, sel json.RawMessage) bool {
 	b.mu.Lock()
 	t := b.tabs[key]
 	b.mu.Unlock()
@@ -237,7 +269,7 @@ func (b *presenceBridge) move(key string, at json.RawMessage) bool {
 		return false
 	}
 	t.mu.Lock()
-	t.at, t.fresh = at, true
+	t.at, t.sel, t.fresh = at, sel, true
 	t.mu.Unlock()
 	select {
 	case t.wake <- struct{}{}:
@@ -352,9 +384,9 @@ func (t *presenceTab) setConn(id string) {
 	t.mu.Unlock()
 }
 
-// send passes the page's latest pointer to its connection, at most once every
-// presenceMoveEvery. A pointer moved while no connection is joined waits for
-// the next: the page sends where it is when it hears it joined.
+// send passes the page's latest pointer and selection to its connection, at
+// most once every presenceMoveEvery. A move made while no connection is joined
+// waits for the next: the page sends where it is when it hears it joined.
 func (t *presenceTab) send(ctx context.Context) {
 	for {
 		select {
@@ -363,7 +395,7 @@ func (t *presenceTab) send(ctx context.Context) {
 		case <-t.wake:
 		}
 		t.mu.Lock()
-		conn, at, fresh := t.conn, t.at, t.fresh
+		conn, at, sel, fresh := t.conn, t.at, t.sel, t.fresh
 		if conn != "" {
 			t.fresh = false
 		}
@@ -371,7 +403,7 @@ func (t *presenceTab) send(ctx context.Context) {
 		if conn == "" || !fresh {
 			continue
 		}
-		if err := t.b.post(ctx, conn, at); err != nil {
+		if err := t.b.post(ctx, conn, at, sel); err != nil {
 			slog.Debug("plan review: presence move not sent", "plan_id", t.b.planID, "error", err)
 		}
 		select {
@@ -382,12 +414,18 @@ func (t *presenceTab) send(ctx context.Context) {
 	}
 }
 
-func (b *presenceBridge) post(ctx context.Context, conn string, at json.RawMessage) error {
+// post sends one move. A move with nothing selected carries no sel, as moves
+// did before selections were shared.
+func (b *presenceBridge) post(ctx context.Context, conn string, at, sel json.RawMessage) error {
 	tok, err := b.token(ctx, false)
 	if err != nil {
 		return err
 	}
-	body := strings.NewReader(`{"at":` + string(at) + `}`)
+	move := `{"at":` + string(at)
+	if string(sel) != "null" {
+		move += `,"sel":` + string(sel)
+	}
+	body := strings.NewReader(move + `}`)
 	req, err := useragent.NewRequest(ctx, http.MethodPost, b.roomURL()+"/"+url.PathEscape(conn), body)
 	if err != nil {
 		return err
