@@ -39,8 +39,9 @@ type fakePresence struct {
 
 	mu        sync.Mutex
 	refuse    int  // answer every join with this status, when set
-	refuseSel bool // refuse every move carrying sel, as a service from before selections does
-	refused   int  // moves refused for carrying sel
+	refuseSel bool      // refuse every move carrying sel, as a service from before selections does
+	refused   int       // moves refused for carrying sel
+	refusedAt time.Time // when the last of them came
 	conns     map[string]*fakeConn
 	seq       int
 	joins     int
@@ -61,6 +62,7 @@ type fakeMove struct {
 	conn string
 	at   string
 	sel  string // "" when the move carried no sel
+	when time.Time
 }
 
 // newFakePresence serves a fakePresence for plan and returns it with its base URL.
@@ -182,6 +184,7 @@ func (f *fakePresence) move(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.refuseSel && body.Sel != nil {
 		f.refused++
+		f.refusedAt = time.Now()
 		http.Error(w, `invalid request body: json: unknown field "sel"`, http.StatusBadRequest)
 		return
 	}
@@ -190,7 +193,7 @@ func (f *fakePresence) move(w http.ResponseWriter, r *http.Request) {
 	if string(c.sel) == "null" {
 		c.sel = nil
 	}
-	f.moves = append(f.moves, fakeMove{c.id, string(body.At), string(body.Sel)})
+	f.moves = append(f.moves, fakeMove{c.id, string(body.At), string(body.Sel), time.Now()})
 	f.broadcast("peer", c.peer())
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -535,7 +538,8 @@ func TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer(t *testing.T) {
 // page whose room is served by a service that refuses every move carrying
 // sel, as one from before selections does.
 // Failure prevented: a newer ox against an older service loses the reviewer's
-// pointer for as long as words are selected.
+// pointer for as long as words are selected, or resends it faster than the
+// service's move rate allows.
 func TestPresenceBridge_SelectionsFallBackOnAnOlderService(t *testing.T) {
 	setPresenceTimings(t, 20*time.Millisecond, time.Hour, time.Hour)
 	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}})
@@ -557,10 +561,14 @@ func TestPresenceBridge_SelectionsFallBackOnAnOlderService(t *testing.T) {
 			return len(m) == i && m[i-1].at == at && m[i-1].sel == ""
 		})
 	}
+	_, moves := fake.count()
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if fake.refused != 1 {
 		t.Fatalf("an older service must be offered a selection once per connection, then sent pointers alone: %d refused", fake.refused)
+	}
+	if gap := moves[0].when.Sub(fake.refusedAt); gap < presenceMoveEvery {
+		t.Fatalf("the pointer resent %v after the refused move; moves are at least %v apart", gap, presenceMoveEvery)
 	}
 }
 

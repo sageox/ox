@@ -241,9 +241,10 @@ the user signed in with `ox login`:
   the room and the command exits even with a tab open. A pointer move writes
   nothing, reloads nothing, and does not keep an idle review loop open.
 - A service from before selections refuses a move carrying `sel`. The server
-  then sends that move again without it, and only the pointer for the rest of
-  the connection, so the pointer never stalls while words are selected; a new
-  connection offers selections again.
+  then sends that connection the pointer alone, starting with the refused
+  move at the next interval, so the pointer never stalls while words are
+  selected and moves stay within the rate; a new connection offers
+  selections again.
 - With no login for the project's endpoint, or no `pln_` id (a plan saved
   before ids existed), the server makes no presence request at all, and the
   page carries none of it. A declined join is asked again only after five
@@ -266,12 +267,12 @@ review` pages on one markdown plan see each other's pointers and selections.
 
 | Test | Proves |
 |---|---|
-| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; each tints exactly the words the other selects, across elements and at its own width, in the other's color, from the first markable words, and clears them when they are let go; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; a reloaded frame leaves no stale pointer; with its server gone, the page shows no one |
+| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; each tints exactly the words the other selects, across elements and at its own width, painted translucently in the other's chip color, from the first markable words, and clears them when they are let go; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; a reloaded frame leaves no stale pointer; with its server gone, the page shows no one |
 | `TestBrowser_PointerOnAnotherRevisionIsNeverDrawn` | Two local pages on one plan, on different revisions, list each other as on another revision and never draw each other's pointer |
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves, selections and leaves between a page and a hosted viewer, under the service's names; a move with nothing selected carries no `sel`; a second tab leaves alone; live reloads share the stream |
 | `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields (the selected words among them), out-of-range values, half a selection, a key with no open stream, and oversized bodies |
 | `TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer` | A dropped connection says `lost`, rejoins, and sends only the current pointer |
-| `TestPresenceBridge_SelectionsFallBackOnAnOlderService` | A service that refuses `sel` still gets every pointer, and is offered a selection once per connection |
+| `TestPresenceBridge_SelectionsFallBackOnAnOlderService` | A service that refuses `sel` still gets every pointer, no sooner than the move interval after the refusal, and is offered a selection once per connection |
 | `TestBrowser_SelectionFollowsARewrittenParagraph` | A selection is shared again under its paragraph's new anchor after each rewrite, including one that lands while the anchor index waits to be rebuilt |
 | `TestPresenceBridge_ReconnectingPageReplacesItsConnection` | A page reconnecting under its key leaves the room once, not twice |
 | `TestPresenceBridge_JoinsWithTheCurrentLogin` | A rejoin uses the login on disk, so signing in anew takes effect |

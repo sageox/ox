@@ -38,12 +38,14 @@ const presencePlan = `<!doctype html><html><head><meta charset="utf-8"><title>Pr
 // when pointer input first reaches the frame, where each data-probe part is
 // and the words each live selection tint covers, on load and when asked, and
 // every message the host sends the document, which a plan's own script can
-// read. Asked to, it selects the collapsible section's words, as Avery would.
+// read, with the color each tint paints. Asked to, it selects the collapsible
+// section's words, as Avery would.
 const presenceProbe = `<script>document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);var MC=MessageChannel;window.MessageChannel=function(){var c=new MC();` +
 	`c.port1.addEventListener('message',function(e){parent.postMessage({heard:JSON.stringify(e.data)},'*')});return c};` +
 	`function probe(){var p={};document.querySelectorAll('[data-probe]').forEach(function(el){var r=el.getBoundingClientRect();` +
 	`p[el.getAttribute('data-probe')]={x:r.left+r.width/2,y:r.top+r.height/2,left:r.left,top:r.top,right:r.right,bottom:r.bottom}});` +
-	`var tints={};CSS.highlights.forEach(function(h,n){if(n.indexOf('rev-sel-')===0)tints[n]=Array.from(h).map(function(r){return r.toString()})});parent.postMessage({probe:p,tints:tints},'*')}` +
+	`var tints={},colors={};CSS.highlights.forEach(function(h,n){if(n.indexOf('rev-sel-')===0)tints[n]=Array.from(h).map(function(r){return r.toString()})});` +
+	`for(var i=0;i<8;i++)colors['rev-sel-c'+i]=getComputedStyle(document.body,'::highlight(rev-sel-c'+i+')').backgroundColor;parent.postMessage({probe:p,tints:tints,colors:colors},'*')}` +
 	`window.addEventListener('load',probe);window.addEventListener('message',function(e){if(e.source!==parent||!e.data)return;if(e.data.reprobe)probe();` +
 	`if(e.data.select){var r=document.createRange(),c=document.querySelector('[data-probe=inside]').firstChild;r.setStart(document.querySelector('[data-probe=summary]').firstChild,0);` +
 	`r.setEnd(c,c.data.length);getSelection().removeAllRanges();getSelection().addRange(r)}})</script>`
@@ -72,7 +74,7 @@ func presenceHost(t *testing.T, f *fakePresence, doc []byte, revision, token, re
 		`#doc{position:fixed;left:200px;top:60px;width:760px;height:800px;border:12px solid #333}</style></head><body>` +
 		`<iframe id="doc" sandbox="allow-scripts"></iframe><script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.heard = [];` +
-		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) { window.probe = d.probe; window.tints = d.tints; } if (d.heard) window.heard.push(d.heard); if (d.input) window.input = true; });` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) { window.probe = d.probe; window.tints = d.tints; window.colors = d.colors; } if (d.heard) window.heard.push(d.heard); if (d.input) window.input = true; });` +
 		`window.reprobe = () => { window.probe = null; frame.contentWindow.postMessage({ reprobe: true }, '*'); };` +
 		`window.selectInFrame = () => frame.contentWindow.postMessage({ select: true }, '*');` +
 		`const room = '` + room + `', auth = 'access_token=` + token + `';` +
@@ -183,12 +185,14 @@ func waitCursor(t *testing.T, ctx context.Context, name, what string, within fun
 	t.Fatalf("%s: %d cursor(s) named %s, at %v; want one within %+v; cursors %s", what, n, name, at, b, evalString(t, ctx, `[...document.querySelectorAll('.rev-cursor')].map((c)=>c.textContent+'@'+c.style.transform).join(' ')+' | here '+document.querySelector('.rev-here').textContent+' | vw '+innerWidth+'x'+innerHeight`))
 }
 
-// tintsOf is the words each live selection tint covers on a page, by
-// highlight name: read on the local page directly, and through the probe in
-// the framed plan, which its host cannot read across the frame.
-func tintsOf(t *testing.T, ctx context.Context, framed bool) map[string][]string {
+// tintsOf is the words each live selection tint covers on a page, and the
+// color each paints, by highlight name: read on the local page directly, and
+// through the probe in the framed plan, which its host cannot read across the
+// frame.
+func tintsOf(t *testing.T, ctx context.Context, framed bool) (tints map[string][]string, colors map[string]string) {
 	t.Helper()
-	js := `JSON.stringify(Object.fromEntries([...CSS.highlights].filter(([n])=>n.startsWith('rev-sel-')).map(([n,h])=>[n,[...h].map((r)=>r.toString())])))`
+	js := `JSON.stringify({tints: Object.fromEntries([...CSS.highlights].filter(([n])=>n.startsWith('rev-sel-')).map(([n,h])=>[n,[...h].map((r)=>r.toString())])),` +
+		`colors: Object.fromEntries([0,1,2,3,4,5,6,7].map((i)=>['rev-sel-c'+i, getComputedStyle(document.body, '::highlight(rev-sel-c'+i+')').backgroundColor]))})`
 	if framed {
 		if err := chromedp.Run(ctx, chromedp.Evaluate(`window.reprobe()`, nil)); err != nil {
 			t.Fatal(err)
@@ -196,28 +200,42 @@ func tintsOf(t *testing.T, ctx context.Context, framed bool) map[string][]string
 		if !waitJS(ctx, `window.probe`, 5*time.Second) {
 			t.Fatal("the framed plan never answered the probe")
 		}
-		js = `JSON.stringify(window.tints)`
+		js = `JSON.stringify({tints: window.tints, colors: window.colors})`
 	}
-	var tints map[string][]string
-	_ = json.Unmarshal([]byte(evalString(t, ctx, js)), &tints)
-	return tints
+	var got struct {
+		Tints  map[string][]string `json:"tints"`
+		Colors map[string]string   `json:"colors"`
+	}
+	_ = json.Unmarshal([]byte(evalString(t, ctx, js)), &got)
+	return got.Tints, got.Colors
 }
 
 // waitTint waits until a page tints exactly want, or nothing when want is
-// empty, in the color of who's chip, and fails with what it tints otherwise.
+// empty, under the highlight named for who's chip color, painting that color
+// translucently, and fails with what it tints otherwise.
 func waitTint(t *testing.T, ctx context.Context, framed bool, who, want, what string) {
 	t.Helper()
 	var tints map[string][]string
-	var color string
+	var colors map[string]string
+	var chip, paint string
 	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-		color = evalString(t, ctx, `((document.querySelector('.rev-peer[title="`+who+` is here"]') || {className: ''}).className.match(/rev-c\d/) || [''])[0]`)
-		tints = tintsOf(t, ctx, framed)
-		got := tints[strings.Replace(color, "rev-c", "rev-sel-c", 1)]
-		if color != "" && ((want == "" && len(got) == 0) || (len(got) == 1 && got[0] == want)) {
+		// the chip's class and its color, as rgb(r, g, b)
+		chip = evalString(t, ctx, `(()=>{const c=document.querySelector('.rev-peer[title="`+who+` is here"]');if(!c)return '';`+
+			`const h=getComputedStyle(c).getPropertyValue('--c').trim();return c.className.match(/rev-c\d/)[0]+' rgb('+[1,3,5].map((i)=>parseInt(h.substr(i,2),16)).join(', ')+')'})()`)
+		tints, colors = tintsOf(t, ctx, framed)
+		name, rgb, _ := strings.Cut(chip, " ")
+		name = strings.Replace(name, "rev-c", "rev-sel-c", 1)
+		got := tints[name]
+		paint = colors[name]
+		if chip != "" && want == "" && len(got) == 0 {
+			return
+		}
+		// rgba(r, g, b, a): the chip's color, neither opaque nor invisible
+		if chip != "" && len(got) == 1 && got[0] == want && strings.HasPrefix(paint, "rgba("+strings.TrimSuffix(strings.TrimPrefix(rgb, "rgb("), ")")+", 0.") {
 			return
 		}
 	}
-	t.Fatalf("%s: tints %q, %s's color %q; want %q", what, tints, who, color, want)
+	t.Fatalf("%s: tints %q painting %q, %s's chip %q; want %q", what, tints, paint, who, chip, want)
 }
 
 func localSpot(t *testing.T, ctx context.Context, part string) spot {

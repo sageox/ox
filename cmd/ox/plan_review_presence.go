@@ -415,13 +415,17 @@ func (t *presenceTab) send(ctx context.Context) {
 		err := t.b.post(ctx, conn, at, sel)
 		if errors.Is(err, errPresenceSelRefused) {
 			// a service from before selections refuses every move carrying
-			// one: the pointer still goes, alone, as it did before them
+			// one: from the next interval on, this connection gets the
+			// pointer alone, as it did before them, this move included
 			t.mu.Lock()
 			if t.conn == conn {
-				t.bare = true
+				t.bare, t.fresh = true, true
 			}
 			t.mu.Unlock()
-			err = t.b.post(ctx, conn, at, json.RawMessage("null"))
+			select {
+			case t.wake <- struct{}{}:
+			default:
+			}
 		}
 		if err != nil {
 			slog.Debug("plan review: presence move not sent", "plan_id", t.b.planID, "error", err)
