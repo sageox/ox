@@ -41,14 +41,6 @@ Everything below is new since 0.26.0.
 - **`ox doctor` fixes more, touches less** — it catches a daemon missing your `SAGEOX_TOKEN` and leaves your README alone.
 - **Plan links open on the first click**, and review comments no longer cover plan text.
 
-## [0.27.1] - 2026-11-23
-
-Not published. Its changes ship in 0.27.2.
-
-## [0.27.0] - 2026-11-23
-
-Published without binaries. Its changes ship in 0.27.2.
-
 ## [0.26.0] - 2026-11-17
 
 Record Devin sessions, install ox with npx, import transcripts as discussions, and watch team context reach your AI coworker as it works. AI coworkers on disposable machines now get one complete, correctly credited session per run.
