@@ -250,6 +250,13 @@ func TestScopeClassify(t *testing.T) {
 	git(t, nested, "init", "-q")
 	unrelated := filepath.Join(base, "unrelated")
 	require.NoError(t, os.MkdirAll(unrelated, 0o755))
+	// base/link/../unrelated names other/unrelated on disk, not base/unrelated
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "sub"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "unrelated"), 0o755))
+	git(t, other, "init", "-q")
+	require.NoError(t, os.Symlink(filepath.Join(other, "sub"), filepath.Join(base, "link")))
+	throughLink := filepath.Join(base, "link") + "/../unrelated"
 
 	scope, err := NewScope(worktree)
 	require.NoError(t, err)
@@ -270,6 +277,7 @@ func TestScopeClassify(t *testing.T) {
 		{"this repo and a plain folder", []string{worktree, unrelated}, ThisRepo},
 		{"this repo and the folder above it", []string{repo, base}, MixedRepos},
 		{"this repo and a deleted folder", []string{repo, filepath.Join(base, "gone-notes")}, MixedRepos},
+		{"this repo and a dotted path through a link", []string{repo, throughLink}, MixedRepos},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -94,7 +94,9 @@ func (s *Scope) place(dir string) dirVerdict {
 	switch {
 	case s.resolve(dir):
 		v = dirMine
-	case filepath.IsAbs(dir) && claudesource.OutsideEveryProject(resolvePath(dir), s.roots...):
+	// a cwd with ".." is cleaned before its links are resolved, which can land
+	// somewhere other than the folder it names, so only a canonical one counts
+	case filepath.IsAbs(dir) && filepath.Clean(dir) == dir && claudesource.OutsideEveryProject(resolvePath(dir), s.roots...):
 		v = dirNeutral
 	}
 	s.cache[dir] = v
