@@ -510,6 +510,18 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "comma-only username still redacted",
+			input:    "postgres://,:secretpass@db.example.com/prod",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "raw double quote in password still redacted",
+			input:    `postgres://app:pa"ss@db.internal.example.com/prod`,
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
 			name:     "raw space in password still redacted",
 			input:    "postgres://user:my pass@db.example.com/app",
 			expected: "[REDACTED_CONNECTION_STRING]",
@@ -540,10 +552,10 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
-			name:     "host and port without password keep a later email",
+			name:     "host and port without password are redacted with a later email, as on main",
 			input:    `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
-			expected: `{"url":"postgres://localhost:5432","note":"ping ops@example.com"}`,
-			wantFind: false,
+			expected: `{"url":"[REDACTED_CONNECTION_STRING]"}`,
+			wantFind: true,
 		},
 		{
 			name:     "url without password not redacted",
