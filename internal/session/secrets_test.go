@@ -492,18 +492,33 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
-			name:     "shell-escaped space does not carry the match to a later email",
+			name:     "shell-escaped space after a port is redacted with a later email, as on main",
 			input:    `postgres://localhost:5432\ ops@example.com`,
-			expected: `postgres://localhost:5432\ ops@example.com`,
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "raw space in password still redacted",
+			input:    "postgres://user:my pass@db.example.com/app",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "raw space in mongodb password still redacted",
+			input:    "mongodb://app:my pass@db.internal.example.com/app",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
+			name:     "mongodb+srv without password keeps the next single-quoted field",
+			input:    `{'url':'mongodb+srv://db.internal','note':'ops@example.com'}`,
+			expected: `{'url':'mongodb+srv://db.internal','note':'ops@example.com'}`,
 			wantFind: false,
 		},
 		{
-			// Raw spaces and double quotes are not valid in URI userinfo (RFC 3986);
-			// they must be percent-encoded. Matching them is what let a password-free
-			// URI swallow later JSON fields, so they end the match by design.
-			name:     "raw space in password is not a credential (must be %20)",
-			input:    "postgres://user:my pass@db.example.com/app",
-			expected: "postgres://user:my pass@db.example.com/app",
+			name:     "mongodb+srv without password keeps a JSON-escaped path",
+			input:    `{"url":"mongodb+srv://db.internal.example.com\/team:ops@example.com"}`,
+			expected: `{"url":"mongodb+srv://db.internal.example.com\/team:ops@example.com"}`,
 			wantFind: false,
 		},
 		{
