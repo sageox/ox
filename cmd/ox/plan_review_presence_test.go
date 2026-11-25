@@ -38,7 +38,7 @@ type fakePresence struct {
 	mux    *http.ServeMux
 
 	mu        sync.Mutex
-	refuse    int  // answer every join with this status, when set
+	refuse    int       // answer every join with this status, when set
 	refuseSel bool      // refuse every move carrying sel, as a service from before selections does
 	refused   int       // moves refused for carrying sel
 	refusedAt time.Time // when the last of them came
