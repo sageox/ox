@@ -504,6 +504,12 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "username ending in a comma or apostrophe still redacted",
+			input:    "mongodb://svc,:pass123@db.example.com/prod mongodb://svc':pass123@db.example.com/prod",
+			expected: "[REDACTED_CONNECTION_STRING] [REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
 			name:     "raw space in password still redacted",
 			input:    "postgres://user:my pass@db.example.com/app",
 			expected: "[REDACTED_CONNECTION_STRING]",
