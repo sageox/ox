@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // Membership says whether a session's working directories belong to the repo.
@@ -18,13 +20,22 @@ const (
 	MixedRepos                   // some are, some are not: never imported
 )
 
+// dirVerdict places one working directory relative to this repository.
+type dirVerdict int
+
+const (
+	dirOther   dirVerdict = iota // another project's, or cannot be shown not to be
+	dirMine                      // inside one of this repository's checkouts
+	dirNeutral                   // a folder outside every project: no one's work
+)
+
 // Scope decides whether working directories belong to one repository: the one
 // whose git common dir they resolve to. That covers every worktree, including
 // worktrees that have since been deleted.
 type Scope struct {
 	commonDir string   // this repo's git common dir, resolved
 	roots     []string // main worktree and every registered worktree, resolved
-	cache     map[string]bool
+	cache     map[string]dirVerdict
 }
 
 // NewScope resolves repoRoot's git common dir and its worktrees.
@@ -34,7 +45,7 @@ func NewScope(repoRoot string) (*Scope, error) {
 		return nil, fmt.Errorf("resolve git common dir: %w", err)
 	}
 	common := resolvePath(strings.TrimSpace(string(out)))
-	s := &Scope{commonDir: common, cache: map[string]bool{}}
+	s := &Scope{commonDir: common, cache: map[string]dirVerdict{}}
 	if filepath.Base(common) == ".git" {
 		s.roots = append(s.roots, filepath.Dir(common))
 	}
@@ -52,13 +63,16 @@ func NewScope(repoRoot string) (*Scope, error) {
 	return s, nil
 }
 
-// Classify reports whether every directory belongs to this repository.
+// Classify reports whether every directory belongs to this repository. A
+// folder outside every project, such as the notes folder the Claude desktop
+// app shares between sessions, counts for neither side: it is no one's work.
 func (s *Scope) Classify(cwds []string) Membership {
 	mine, other := 0, 0
 	for _, dir := range cwds {
-		if s.contains(dir) {
+		switch s.place(dir) {
+		case dirMine:
 			mine++
-		} else {
+		case dirOther:
 			other++
 		}
 	}
@@ -72,13 +86,19 @@ func (s *Scope) Classify(cwds []string) Membership {
 	}
 }
 
-func (s *Scope) contains(dir string) bool {
-	if in, ok := s.cache[dir]; ok {
-		return in
+func (s *Scope) place(dir string) dirVerdict {
+	if v, ok := s.cache[dir]; ok {
+		return v
 	}
-	in := s.resolve(dir)
-	s.cache[dir] = in
-	return in
+	v := dirOther
+	switch {
+	case s.resolve(dir):
+		v = dirMine
+	case filepath.IsAbs(dir) && claudesource.OutsideEveryProject(resolvePath(dir), s.roots...):
+		v = dirNeutral
+	}
+	s.cache[dir] = v
+	return v
 }
 
 // resolve asks the directory itself when it still exists, because a nested

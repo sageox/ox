@@ -224,7 +224,9 @@ func TestHookCatchUpChecksTheClaudeAliasAsClaudeCode(t *testing.T) {
 	f := newCatchUpFixture(t)
 	f.spellAdapter("claude")
 	m := f.watcher(slog.Default())
-	f.sayFrom(t.TempDir(), "assistant", "a turn from another repository")
+	other := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(other, ".git"), 0o700))
+	f.sayFrom(other, "assistant", "a turn from another repository")
 	f.settle()
 
 	assert.Equal(t, 0, m.CatchUpHookRecordings(context.Background(), f.projectRoot))

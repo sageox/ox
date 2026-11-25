@@ -1146,6 +1146,29 @@ func TestImportE2E_FailedPushIsCarriedByTheNextOne(t *testing.T) {
 	})
 }
 
+// A session that also stood in a plain folder, like the notes folder the Claude
+// desktop app shares between sessions, is still this repo's history (#2041).
+//
+// Failure prevented: a worktree session that once read a shared notes folder
+// refused as "it also worked in other repositories".
+func TestImportE2E_PlainFolderVisitIsNotAnotherRepo(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC)
+	notes := filepath.Join(t.TempDir(), "Claude", "side-session-notes", "local_1")
+	require.NoError(t, os.MkdirAll(notes, 0o755))
+	other := t.TempDir()
+	runGit(t, other, "init", "-q")
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start, prompt: loginPrompt, reply: "Read the notes.", alsoIn: notes})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Both repos.", alsoIn: other})
+
+	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	assert.Equal(t, string(stateReady), r.session(t, e2eCodexA).State, "a plain folder is no other repository")
+	mixed := r.session(t, e2eCodexB)
+	assert.Equal(t, string(stateIneligible), mixed.State)
+	assert.Equal(t, "it also worked in other repositories", mixed.Reason)
+}
+
 // The preview accounts for every native file it did not list as a candidate,
 // and keeps one entry per native session.
 //

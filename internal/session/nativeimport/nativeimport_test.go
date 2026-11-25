@@ -265,7 +265,11 @@ func TestScopeClassify(t *testing.T) {
 		{"a nested repository is not this repository", []string{nested}, OtherRepo},
 		{"an unrelated directory", []string{unrelated}, OtherRepo},
 		{"a relative path proves nothing", []string{"repo"}, OtherRepo},
-		{"this repo and another", []string{repo, unrelated}, MixedRepos},
+		{"this repo and a nested repository", []string{repo, nested}, MixedRepos},
+		// a folder that is no project holds no one else's work (issue #2041)
+		{"this repo and a plain folder", []string{worktree, unrelated}, ThisRepo},
+		{"this repo and the folder above it", []string{repo, base}, MixedRepos},
+		{"this repo and a deleted folder", []string{repo, filepath.Join(base, "gone-notes")}, MixedRepos},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
