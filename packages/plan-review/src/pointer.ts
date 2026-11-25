@@ -16,6 +16,8 @@ export interface PointerLayer {
   locate(points: Array<{ key: string; at: PointerAt }>): void;
   /** Tints these selections, each in its color, until the next call. A selection this render cannot find is left out. */
   selections(items: Tinted[]): void;
+  /** The words the reviewer's open note is about, or null: shared as their selection while the page has none of its own. */
+  hold(range: Range | null): void;
   /** The page is ready to anchor on: its diagrams are drawn. Nothing is shared, placed or tinted before. */
   start(): void;
 }
@@ -147,6 +149,7 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
   let sent = 'null'; // the location last shared, as JSON
   let selDirty = false; // the selection may have changed since it was last shared
   let selSent = 'null'; // the selection last shared, as JSON
+  let held: Range | null = null; // the words the open note is about
   let timer: ReturnType<typeof setTimeout> | undefined;
   let last = 0;
   function share() {
@@ -197,13 +200,18 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
     return charsBefore(host, node, off);
   }
   // selectionNow is this reviewer's selection as two places in the plan's
-  // text: from the first selected words to the last, past whitespace and any
-  // text outside a markable element at either edge. Null when nothing is
-  // selected, or nothing selected is on the plan.
+  // text: the page's own selection, else the words the open note is about,
+  // since clicking into the note takes the page's selection away.
   function selectionNow(): SelectionAt | null {
     const s = getSelection();
-    if (!s || s.isCollapsed || !s.rangeCount) return null;
-    const r = s.getRangeAt(0), root = r.commonAncestorContainer;
+    const own = s && !s.isCollapsed && s.rangeCount ? selOf(s.getRangeAt(0)) : null;
+    return own || (held ? selOf(held) : null);
+  }
+  // selOf names a range from its first selected words to its last, past
+  // whitespace and any text outside a markable element at either edge; null
+  // when none of it is on the plan.
+  function selOf(r: Range): SelectionAt | null {
+    const root = r.commonAncestorContainer;
     const texts: Node[] = [];
     if (root.nodeType === 3) texts.push(root);
     else for (let w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), t = w.nextNode(); t; t = w.nextNode()) texts.push(t);
@@ -363,6 +371,11 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
     selections(items) {
       tinted = items;
       if (started) tint();
+    },
+    hold(range) {
+      held = range;
+      selDirty = true;
+      share();
     },
     start() {
       started = true;

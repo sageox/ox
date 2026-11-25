@@ -882,6 +882,7 @@
     let sent = "null";
     let selDirty = false;
     let selSent = "null";
+    let held = null;
     let timer;
     let last = 0;
     function share() {
@@ -937,8 +938,11 @@
     }
     function selectionNow() {
       const s = getSelection();
-      if (!s || s.isCollapsed || !s.rangeCount) return null;
-      const r = s.getRangeAt(0), root = r.commonAncestorContainer;
+      const own = s && !s.isCollapsed && s.rangeCount ? selOf(s.getRangeAt(0)) : null;
+      return own || (held ? selOf(held) : null);
+    }
+    function selOf(r) {
+      const root = r.commonAncestorContainer;
       const texts = [];
       if (root.nodeType === 3) texts.push(root);
       else for (let w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), t = w.nextNode(); t; t = w.nextNode()) texts.push(t);
@@ -1102,6 +1106,11 @@
       selections(items) {
         tinted = items;
         if (started) tint();
+      },
+      hold(range) {
+        held = range;
+        selDirty = true;
+        share();
       },
       start() {
         started = true;
@@ -1449,6 +1458,7 @@
         case "focus": {
           const h = m.anchor === null ? null : picked && picked.a === m.anchor ? picked.range : qRanges[m.anchor] ? qRanges[m.anchor].range : null;
           focusRange(h);
+          pointers.hold(h);
           break;
         }
         case "reveal":
