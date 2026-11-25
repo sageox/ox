@@ -177,3 +177,27 @@ func TestDescribeCwdShowsOnlyAValidTimestamp(t *testing.T) {
 		t.Fatalf("a numeric timestamp must not hide a foreign cwd: %v", err)
 	}
 }
+
+// An archived workspace no longer names its git dir, yet a recording made in it
+// that also visited a plain folder is still its own (daemon recovery, #2041).
+func TestValidateNeutralFolderVisitFromArchivedWorkspace(t *testing.T) {
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	outer, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(outer, "archived")
+	notes := filepath.Join(outer, "notes")
+	if err := os.Mkdir(notes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, workspace) +
+		fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, notes)
+	path := filepath.Join(t.TempDir(), id+".jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(path, workspace, id); err != nil {
+		t.Fatalf("a plain folder visit from an archived workspace must not reject it: %v", err)
+	}
+}

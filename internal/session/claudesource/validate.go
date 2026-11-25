@@ -513,10 +513,15 @@ func registeredCheckouts(commonDir string) ([]checkout, error) {
 // repoCheckouts lists repoRoot and every checkout git's registry names for its
 // repository, resolved where they stand. It is nil when the registry cannot be
 // read, since a folder above an unlisted checkout could then pass as neutral.
+// A repoRoot that names no git dir, such as an archived workspace, has no
+// registry to read, so it is the only checkout known.
 func repoCheckouts(repoRoot string) []string {
 	commonDir, ok, err := gitCommonDir(repoRoot)
-	if err != nil || !ok {
+	if err != nil {
 		return nil
+	}
+	if !ok {
+		return []string{repoRoot}
 	}
 	checkouts, err := registeredCheckouts(commonDir)
 	if err != nil {
