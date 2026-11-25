@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidateSharedNotesFolderVisit: a session that lives in this repo's
@@ -70,6 +71,10 @@ func TestValidateSharedNotesFolderVisit(t *testing.T) {
 				t.Skip("symlinks unavailable:", err)
 			}
 			return link
+		}},
+		"shared notes root that is itself a repository": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			gitRun(t, mkdir(t, notesRoot(outer)), "init", "-q")
+			return mkdir(t, filepath.Join(notesRoot(outer), "local_1"))
 		}},
 		// no project markers, but nothing says its owner shares it with this repo
 		"plain folder": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
@@ -233,25 +238,61 @@ func TestSharedNotesRootIsInsideTheAppDataFolder(t *testing.T) {
 	}
 }
 
-// The stop guidance reads the refusal as text, so a folder whose name contains
-// the "no longer exists" note must not read as a folder that is gone.
-func TestForeignCwdIsGoneSkipsTheFolderName(t *testing.T) {
-	refusal := func(cwd, note string) string {
-		return fmt.Sprintf("adapter error: %v: %s: %s%s", ErrUntrustedSource, ForeignCwdReason, describeCwd(cwd, json.RawMessage(`"2026-11-25T10:00:00Z"`)), note)
+// The notes rule also runs on paths that were resolved by text alone, where the
+// recorded spelling and the root's can differ in case on a filesystem that
+// ignores it. The walk between them is counted, so it always ends.
+func TestInSharedNotesFolderWalkIsBounded(t *testing.T) {
+	outer, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, tt := range map[string]struct {
-		message string
-		want    bool
-	}{
-		"folder that is gone":             {refusal("/work/gone", ", "+GoneCwdNote), true},
-		"folder that exists":              {refusal("/work/other", ""), false},
-		"existing folder named like it":   {refusal("/work/"+GoneCwdNote, ""), false},
-		"gone folder named like it":       {refusal("/work/"+GoneCwdNote, ", "+GoneCwdNote), true},
-		"a refusal for another reason":    {"claude source has invalid or missing repository metadata", false},
-		"folder with a quote in its name": {refusal(`/work/a", `+GoneCwdNote, ""), false},
+	useSharedNotesRoot(t, filepath.Join(outer, "Claude", "side-session-notes"))
+	for dir, want := range map[string]bool{
+		filepath.Join(outer, "Claude", "side-session-notes", "local_1"):              true,
+		filepath.Join(outer, "Claude", "side-session-notes", "local_1", "a", "b"):    true,
+		filepath.Join(outer, "Claude", "side-session-notes"):                         false,
+		filepath.Join(outer, "Claude"):                                               false,
+		filepath.Join(outer, "Claude", "side-session-notes-2", "local_1"):            false,
+		filepath.Join(outer, "Claude", "side-session-notes", "local_1") + "/../../x": false,
+		"relative/side-session-notes/local_1":                                        false,
 	} {
-		if got := ForeignCwdIsGone(tt.message); got != tt.want {
-			t.Errorf("%s: ForeignCwdIsGone(%q) = %v, want %v", name, tt.message, got, tt.want)
+		done := make(chan bool, 1)
+		go func() { done <- InSharedNotesFolder(dir) }()
+		select {
+		case got := <-done:
+			if got != want {
+				t.Errorf("InSharedNotesFolder(%q) = %v, want %v", dir, got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("InSharedNotesFolder(%q) did not return", dir)
 		}
+	}
+}
+
+// A link in a notes folder that leads nowhere cannot be followed, so a path
+// through it arrives unresolved. Where it led was never looked at, so the path
+// is not vouched for, whoever resolved it (Validate defers on it; import does not).
+func TestInSharedNotesFolderRefusesAPathThroughADeadLink(t *testing.T) {
+	outer, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(outer, "Claude", "side-session-notes")
+	useSharedNotesRoot(t, root)
+	notes := filepath.Join(root, "local_1")
+	if err := os.MkdirAll(notes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(notes, "private")
+	if err := os.Symlink(filepath.Join(outer, "deleted-checkout"), link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	for _, dir := range []string{link, filepath.Join(link, "pkg")} {
+		if InSharedNotesFolder(dir) {
+			t.Errorf("InSharedNotesFolder(%q) accepted a path through a link that leads nowhere", dir)
+		}
+	}
+	if !InSharedNotesFolder(notes) {
+		t.Errorf("InSharedNotesFolder(%q) refused the notes folder itself", notes)
 	}
 }

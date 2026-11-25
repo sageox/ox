@@ -852,11 +852,11 @@ func discoverNativeSessionFile(projectRoot string, state *session.RecordingState
 // undiscoveredSessionNextSteps says what to do with a recording whose native
 // session file was not found: the recording and cache stay, so a retry can
 // still publish it once the transcript is accepted. cause is why it was not
-// found; a transcript refused for working in another project is refused by
-// recover and import alike, so neither is offered for it. A folder that is gone
-// may still be restored, so that refusal keeps both.
+// found; a transcript refused for working in a folder outside the repo is
+// refused by recover and import alike, so neither is offered for it. That holds
+// for a folder that is gone too: it is judged by where it stood.
 func undiscoveredSessionNextSteps(state *session.RecordingState, cause error) string {
-	if cause != nil && strings.Contains(cause.Error(), claudesource.ForeignCwdReason) && !claudesource.ForeignCwdIsGone(cause.Error()) {
+	if cause != nil && strings.Contains(cause.Error(), claudesource.ForeignCwdReason) {
 		return fmt.Sprintf("The transcript also worked in the folder named above, which may hold another project's work, "+
 			"so ox does not upload it to this repo's Ledger, and recovering or importing it is refused too. "+
 			"It is kept on this machine. To end the recording: ox agent %s session abort", state.AgentID)

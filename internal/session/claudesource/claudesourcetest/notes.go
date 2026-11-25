@@ -4,6 +4,7 @@ package claudesourcetest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,8 +21,9 @@ func SharedNotesFolder(t *testing.T) string {
 	// os.UserConfigDir reads a different variable on each OS
 	t.Setenv("HOME", home)
 	t.Setenv("AppData", filepath.Join(home, "AppData", "Roaming"))
-	if os.Getenv("XDG_CONFIG_HOME") == "" {
-		// a fixture that already moved it keeps its own; Linux reads it first
+	// Linux reads XDG_CONFIG_HOME first. One a fixture already moved into the
+	// temp area is throwaway and stays; any other value is the developer's own.
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); !insideTempDir(xdg) {
 		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	}
 	config, err := os.UserConfigDir()
@@ -36,4 +38,19 @@ func SharedNotesFolder(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return notes
+}
+
+func insideTempDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	tmp := os.TempDir()
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
+	rel, err := filepath.Rel(tmp, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }

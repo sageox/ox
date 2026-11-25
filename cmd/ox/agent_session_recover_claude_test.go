@@ -140,9 +140,9 @@ func TestSessionStopJSON_ForeignCwdOffersNoDeadEnd(t *testing.T) {
 	assert.Contains(t, got.Guidance, "kept on this machine")
 }
 
-// A refusal over a folder that no longer exists may clear once the folder is
-// restored, so the guidance still offers recover rather than only abort.
-func TestSessionStopJSON_GoneForeignCwdKeepsRecover(t *testing.T) {
+// A folder that no longer exists is refused for where it stood, so restoring
+// it changes nothing: the guidance must not offer recover or import for it.
+func TestSessionStopJSON_GoneForeignCwdOffersNoDeadEnd(t *testing.T) {
 	state := &session.RecordingState{AgentID: "Oxab12", AgentSessionID: "sess-1"}
 	cause := fmt.Errorf("adapter error: session not found: %w: %s: %q, %s", claudesource.ErrUntrustedSource, claudesource.ForeignCwdReason, "/work/gone", claudesource.GoneCwdNote)
 	out := captureStdoutForPlanCLI(t, func() {
@@ -152,5 +152,7 @@ func TestSessionStopJSON_GoneForeignCwdKeepsRecover(t *testing.T) {
 		Guidance string `json:"guidance"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	assert.Contains(t, got.Guidance, "ox agent Oxab12 session recover")
+	assert.NotContains(t, got.Guidance, "session recover")
+	assert.NotContains(t, got.Guidance, "--include-aborted")
+	assert.Contains(t, got.Guidance, "ox agent Oxab12 session abort")
 }

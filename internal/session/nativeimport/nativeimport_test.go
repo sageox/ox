@@ -260,6 +260,9 @@ func TestScopeClassify(t *testing.T) {
 	throughLink := filepath.Join(base, "link") + "/../unrelated"
 
 	notes := claudesourcetest.SharedNotesFolder(t)
+	// a link in the notes folder to a checkout that has since been deleted
+	require.NoError(t, os.Symlink(filepath.Join(base, "deleted-checkout"), filepath.Join(notes, "private")))
+	throughDeadLink := filepath.Join(notes, "private", "pkg")
 
 	scope, err := NewScope(worktree)
 	require.NoError(t, err)
@@ -279,6 +282,7 @@ func TestScopeClassify(t *testing.T) {
 		// the Claude desktop app's shared notes folder is no project (issue #2041)
 		{"this repo and the shared notes folder", []string{worktree, notes}, ThisRepo},
 		{"the shared notes folder alone", []string{notes}, OtherRepo},
+		{"this repo and a dead link in the shared notes folder", []string{worktree, throughDeadLink}, MixedRepos},
 		// no project markers, but nothing says its owner shares it with this repo
 		{"this repo and a plain folder", []string{worktree, unrelated}, MixedRepos},
 		{"this repo and the folder above it", []string{repo, base}, MixedRepos},

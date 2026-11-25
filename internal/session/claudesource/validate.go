@@ -41,24 +41,9 @@ var errNonCanonicalCwd = errors.New("cwd is not in canonical form")
 // adapter's process boundary as text, where errors.Is cannot follow it.
 const ForeignCwdReason = "cwd outside repo"
 
-// GoneCwdNote follows a ForeignCwdReason whose folder no longer exists: what
-// it held cannot be looked at now, but restoring it may settle the question.
+// GoneCwdNote follows a ForeignCwdReason whose folder no longer exists, so a
+// coworker does not go looking for it. It is refused for where it stood.
 const GoneCwdNote = "which no longer exists"
-
-// ForeignCwdIsGone reports whether message, the text of a refusal that carries
-// ForeignCwdReason, says the refused folder no longer exists. The folder's own
-// quoted name is skipped first, so a folder named like the note is not taken
-// for one that is gone.
-func ForeignCwdIsGone(message string) bool {
-	_, after, ok := strings.Cut(message, ForeignCwdReason+": ")
-	if !ok {
-		return false
-	}
-	if name, err := strconv.QuotedPrefix(after); err == nil {
-		after = after[len(name):]
-	}
-	return strings.Contains(after, GoneCwdNote)
-}
 
 // Validate checks every complete native record before discovery or final upload.
 // A partial trailing record is left for the next read, like the native reader.
@@ -331,12 +316,21 @@ func InSharedNotesFolder(dir string) bool {
 	if root, err = resolveVanished(root, false); err != nil {
 		return false
 	}
-	if dir == root || !isWithin(root, dir) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false
 	}
-	// a checkout or Ox project put inside a notes folder is still a project
-	for d := dir; d != root; d = filepath.Dir(d) {
+	// Walk from dir up to the notes root, the root included, by counting steps:
+	// on a filesystem that ignores case the two spellings may never compare
+	// equal, and a walk that waits for them to would not end.
+	for d, left := dir, strings.Count(rel, string(os.PathSeparator))+2; left > 0; d, left = filepath.Dir(d), left-1 {
+		// a checkout or Ox project put inside a notes folder is still a project
 		if mayBeProject(d) {
+			return false
+		}
+		// dir is resolved, so a link left in it is one that could not be
+		// followed: where it led cannot be looked at, so it is not vouched for
+		if info, err := os.Lstat(d); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 			return false
 		}
 	}
