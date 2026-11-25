@@ -83,9 +83,13 @@ func writeDraftCommit(t *testing.T, ledger, name string, age time.Duration, push
 	dir := filepath.Join(ledger, "sessions", name)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	updated := time.Now().Add(-age).UTC()
+	agentID := name
+	if separator := strings.LastIndex(name, "-"); separator >= 0 {
+		agentID = name[separator+1:]
+	}
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 		Version: "1.0", SessionName: name, SessionID: "ses_retract_test",
-		AgentID: "OxOrphan", UserID: "test-user", CreatedAt: updated, Draft: true, TurnCount: 2,
+		AgentID: agentID, UserID: "test-user", CreatedAt: updated, Draft: true, TurnCount: 2,
 		UpdatedAt: &updated, Files: map[string]lfs.FileRef{},
 	}))
 	mustGit(t, ledger, "add", "-A", "sessions/")
