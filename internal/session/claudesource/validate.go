@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -39,6 +40,10 @@ var errNonCanonicalCwd = errors.New("cwd is not in canonical form")
 // worked somewhere that may hold another project's work. It survives the
 // adapter's process boundary as text, where errors.Is cannot follow it.
 const ForeignCwdReason = "cwd outside repo"
+
+// GoneCwdNote follows a ForeignCwdReason whose folder no longer exists: what
+// it held cannot be looked at now, but restoring it may settle the question.
+const GoneCwdNote = "which no longer exists"
 
 // Validate checks every complete native record before discovery or final upload.
 // A partial trailing record is left for the next read, like the native reader.
@@ -123,6 +128,15 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	// an offset cannot see where the block ended, so it allows none.
 	inherited, sawInherited := offset == 0, false
 	checkedCwd := make(map[string]cwdVerdict)
+	// every checkout of the repo, listed once and only if a cwd falls outside it
+	var homes []string
+	homesListed := false
+	checkouts := func() []string {
+		if !homesListed {
+			homes, homesListed = repoCheckouts(repoRoot), true
+		}
+		return homes
+	}
 	// ownershipErr is proof the source is foreign and ends the scan. A cwd that
 	// cannot be checked only defers: the scan goes on, because a later turn may
 	// still prove the session crossed repositories.
@@ -135,7 +149,7 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			Type      string          `json:"type"`
 			Cwd       json.RawMessage `json:"cwd"`
 			SessionID json.RawMessage `json:"sessionId"`
-			Timestamp string          `json:"timestamp"`
+			Timestamp json.RawMessage `json:"timestamp"`
 		}
 		if err := json.Unmarshal(line, &meta); err != nil {
 			// The adapter skips malformed JSON too. Rejecting the entire file
@@ -169,7 +183,7 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			verdict, checked := checkedCwd[cwd]
 			if !checked {
 				var judgeErr error
-				verdict, judgeErr = judgeCwd(repoRoot, cwd)
+				verdict, judgeErr = judgeCwd(repoRoot, cwd, checkouts)
 				checkedCwd[cwd] = verdict
 				if verdict == cwdUnknown && deferredErr == nil {
 					deferredErr = judgeErr
@@ -177,7 +191,11 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			}
 			switch verdict {
 			case cwdForeign:
-				ownershipErr = fmt.Errorf("%w: %s: %s", ErrUntrustedSource, ForeignCwdReason, describeCwd(cwd, meta.Timestamp))
+				where := describeCwd(cwd, meta.Timestamp)
+				if _, statErr := os.Lstat(cwd); errors.Is(statErr, fs.ErrNotExist) {
+					where += ", " + GoneCwdNote
+				}
+				ownershipErr = fmt.Errorf("%w: %s: %s", ErrUntrustedSource, ForeignCwdReason, where)
 				return nil, nil
 			case cwdOwned:
 				seenCwd = true
@@ -227,18 +245,22 @@ const (
 	cwdNeutral // a folder outside every project: it holds no one else's work
 )
 
-// describeCwd names a cwd and, when the record carries one, when the session
-// first stood there, so a coworker can find the turn in the transcript.
-func describeCwd(cwd, timestamp string) string {
-	if timestamp == "" {
+// describeCwd names a cwd and, when the record carries a valid one, when the
+// session first stood there, so a coworker can find the turn in the transcript.
+// Both reach a terminal, so neither is printed raw.
+func describeCwd(cwd string, timestamp json.RawMessage) string {
+	var stamp string
+	_ = json.Unmarshal(timestamp, &stamp)
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
 		return strconv.Quote(cwd)
 	}
-	return fmt.Sprintf("%q (first at %s)", cwd, timestamp)
+	return fmt.Sprintf("%q (first at %s)", cwd, at.Format(time.RFC3339Nano))
 }
 
 // judgeCwd decides whether a directory a session visited lies inside the repo.
 // The error is set only for cwdUnknown.
-func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
+func judgeCwd(repoRoot, cwd string, checkouts func() []string) (cwdVerdict, error) {
 	// A directory the session visited may be gone by now (a build directory, an
 	// archived workspace). Where it stood is still decidable, so it is judged by
 	// its resolved location; only a path that cannot be resolved at all defers,
@@ -259,7 +281,7 @@ func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
 	if inside {
 		return cwdOwned, nil
 	}
-	if OutsideEveryProject(resolved, repoRoot) {
+	if homes := checkouts(); homes != nil && OutsideEveryProject(resolved, homes...) {
 		return cwdNeutral, nil
 	}
 	return cwdForeign, nil
@@ -281,9 +303,44 @@ func OutsideEveryProject(dir string, homes ...string) bool {
 	if !filepath.IsAbs(dir) {
 		return false
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() || !outsideProjects(dir, homes) {
 		return false
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		child := filepath.Join(dir, entry.Name())
+		if entry.Type()&fs.ModeSymlink != 0 {
+			// a link reaches wherever it points, so its target is judged
+			// like dir itself
+			target, err := filepath.EvalSymlinks(child)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // a link to nothing holds no project
+			}
+			if err != nil {
+				return false
+			}
+			info, err := os.Stat(target)
+			if err != nil {
+				return false
+			}
+			if info.IsDir() && (!outsideProjects(target, homes) || mayBeProject(target)) {
+				return false
+			}
+			continue
+		}
+		if entry.IsDir() && mayBeProject(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// outsideProjects reports whether dir is above none of homes and neither it
+// nor any folder above it is a project.
+func outsideProjects(dir string, homes []string) bool {
 	for _, home := range homes {
 		if isWithin(dir, home) {
 			return false
@@ -295,28 +352,10 @@ func OutsideEveryProject(dir string, homes ...string) bool {
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			break
+			return true
 		}
 		d = parent
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		child := filepath.Join(dir, entry.Name())
-		if entry.Type()&fs.ModeSymlink != 0 {
-			if target, statErr := os.Stat(child); statErr != nil || !target.IsDir() {
-				continue // a link to nothing or to a file holds no project
-			}
-		} else if !entry.IsDir() {
-			continue
-		}
-		if mayBeProject(child) {
-			return false
-		}
-	}
-	return true
 }
 
 // mayBeProject reports whether dir is a checkout or an Ox project, or cannot be
@@ -407,36 +446,9 @@ func checkoutContaining(repoRoot, cwd string) (string, error) {
 	if err != nil || !ok {
 		return "", err
 	}
-	type checkout struct {
-		root string
-		main bool
-	}
-	var checkouts []checkout
-	if filepath.Base(commonDir) == ".git" {
-		checkouts = append(checkouts, checkout{root: filepath.Dir(commonDir), main: true})
-	}
-	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	checkouts, err := registeredCheckouts(commonDir)
+	if err != nil {
 		return "", err
-	}
-	for _, entry := range entries {
-		registry := filepath.Join(commonDir, "worktrees", entry.Name())
-		data, readErr := os.ReadFile(filepath.Join(registry, "gitdir"))
-		if errors.Is(readErr, fs.ErrNotExist) {
-			continue
-		}
-		if readErr != nil {
-			return "", readErr
-		}
-		dotGit := strings.TrimSpace(string(data))
-		if dotGit == "" {
-			continue
-		}
-		// git 2.48+ (--relative-paths) records it relative to the registry dir
-		if !filepath.IsAbs(dotGit) {
-			dotGit = filepath.Join(registry, dotGit)
-		}
-		checkouts = append(checkouts, checkout{root: filepath.Dir(filepath.Clean(dotGit))})
 	}
 
 	best := ""
@@ -457,6 +469,66 @@ func checkoutContaining(repoRoot, cwd string) (string, error) {
 		best = root
 	}
 	return best, nil
+}
+
+type checkout struct {
+	root string
+	main bool
+}
+
+// registeredCheckouts lists the checkouts git's registry in commonDir names:
+// the main checkout, when commonDir is one's .git directory, and every linked
+// worktree, including ones that have since been deleted.
+func registeredCheckouts(commonDir string) ([]checkout, error) {
+	var checkouts []checkout
+	if filepath.Base(commonDir) == ".git" {
+		checkouts = append(checkouts, checkout{root: filepath.Dir(commonDir), main: true})
+	}
+	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	for _, entry := range entries {
+		registry := filepath.Join(commonDir, "worktrees", entry.Name())
+		data, readErr := os.ReadFile(filepath.Join(registry, "gitdir"))
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		dotGit := strings.TrimSpace(string(data))
+		if dotGit == "" {
+			continue
+		}
+		// git 2.48+ (--relative-paths) records it relative to the registry dir
+		if !filepath.IsAbs(dotGit) {
+			dotGit = filepath.Join(registry, dotGit)
+		}
+		checkouts = append(checkouts, checkout{root: filepath.Dir(filepath.Clean(dotGit))})
+	}
+	return checkouts, nil
+}
+
+// repoCheckouts lists repoRoot and every checkout git's registry names for its
+// repository, resolved where they stand. It is nil when the registry cannot be
+// read, since a folder above an unlisted checkout could then pass as neutral.
+func repoCheckouts(repoRoot string) []string {
+	commonDir, ok, err := gitCommonDir(repoRoot)
+	if err != nil || !ok {
+		return nil
+	}
+	checkouts, err := registeredCheckouts(commonDir)
+	if err != nil {
+		return nil
+	}
+	roots := []string{repoRoot}
+	for _, c := range checkouts {
+		if root, err := resolveVanished(c.root, false); err == nil {
+			roots = append(roots, root)
+		}
+	}
+	return roots
 }
 
 // checkoutOfRepo reports whether the existing directory root is still the

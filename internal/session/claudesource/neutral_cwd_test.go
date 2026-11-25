@@ -1,6 +1,7 @@
 package claudesource
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -82,6 +83,20 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 		"deleted folder": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
 			return filepath.Join(outer, "gone")
 		}},
+		"folder linking into another project": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			other := mkdir(t, filepath.Join(outer, "other"))
+			gitRun(t, other, "init", "-q")
+			links := mkdir(t, filepath.Join(outer, "links"))
+			if err := os.Symlink(mkdir(t, filepath.Join(other, "src")), filepath.Join(links, "src")); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+			return links
+		}},
+		"folder holding a linked worktree": {foreign: true, visit: func(t *testing.T, outer, repo string) string {
+			trees := mkdir(t, filepath.Join(outer, "trees"))
+			gitRun(t, repo, "worktree", "add", "-q", filepath.Join(trees, "nested", "wt2"))
+			return trees
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			outer, err := filepath.EvalSymlinks(t.TempDir())
@@ -118,7 +133,47 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 				if !strings.Contains(err.Error(), fmt.Sprintf("%q", visit)) {
 					t.Fatalf("Validate(root=%s): the error must name the cwd %q: %v", root, visit, err)
 				}
+				if gone := strings.Contains(err.Error(), GoneCwdNote); gone != (name == "deleted folder") {
+					t.Fatalf("Validate(root=%s): only a deleted folder is named as gone: %v", root, err)
+				}
 			}
 		})
+	}
+}
+
+// A record's timestamp reaches a terminal in the error, so only a well-formed
+// one is shown, and one that is not a string does not hide the record's cwd.
+func TestDescribeCwdShowsOnlyAValidTimestamp(t *testing.T) {
+	for raw, want := range map[string]string{
+		`"2026-11-25T10:00:00Z"`:          `"/w" (first at 2026-11-25T10:00:00Z)`,
+		`"2026-11-25T10:00:00Z\u001b[2J"`: `"/w"`,
+		`1795634424`:                      `"/w"`,
+		``:                                `"/w"`,
+	} {
+		if got := describeCwd("/w", json.RawMessage(raw)); got != want {
+			t.Errorf("describeCwd(%s) = %s, want %s", raw, got, want)
+		}
+	}
+
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	other := t.TempDir()
+	if err := os.Mkdir(filepath.Join(other, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, repo) +
+		fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":1795634424}\n", id, other)
+	path := filepath.Join(t.TempDir(), id+".jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(path, repo, id); !errors.Is(err, ErrUntrustedSource) {
+		t.Fatalf("a numeric timestamp must not hide a foreign cwd: %v", err)
 	}
 }
