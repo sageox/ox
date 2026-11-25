@@ -416,8 +416,8 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 		}
 	})
 
-	// /presence: where the page's pointer rests now, for the connection its
-	// event stream opened under the same key. Unlike the review POSTs it
+	// /presence: where the page's pointer rests now and what it has selected,
+	// for the connection its event stream opened under the same key. Unlike the review POSTs it
 	// writes nothing, reloads nothing, and does not hold the loop open.
 	mux.HandleFunc("/presence", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -429,17 +429,19 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 			return
 		}
 		var q struct {
-			Key string      `json:"key"`
-			At  *presenceAt `json:"at"`
+			Key string       `json:"key"`
+			At  *presenceAt  `json:"at"`
+			Sel *presenceSel `json:"sel"`
 		}
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&q); err != nil || (q.At != nil && !q.At.valid()) {
+		dec.DisallowUnknownFields() // strict-reader-ok: the page and this server ship in one binary
+		if err := dec.Decode(&q); err != nil || (q.At != nil && !q.At.valid()) || (q.Sel != nil && !q.Sel.valid()) {
 			http.Error(w, "not a pointer location", http.StatusBadRequest)
 			return
 		}
-		at, _ := json.Marshal(q.At) // "null": the pointer left the plan
-		if presence == nil || !presence.move(q.Key, at) {
+		at, _ := json.Marshal(q.At)   // "null": the pointer left the plan
+		sel, _ := json.Marshal(q.Sel) // "null": nothing is selected
+		if presence == nil || !presence.move(q.Key, at, sel) {
 			http.Error(w, "no presence connection", http.StatusNotFound)
 			return
 		}

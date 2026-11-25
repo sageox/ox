@@ -1,0 +1,29 @@
+{
+  "summary": "Selections (SelectionAt, docs/specs/plan-review-presence.md section 1): the words a reviewer has selected, as two places in the plan's text, never the words or screen coordinates. Every reader applies the same rules: selectionAt in packages/plan-review/src/protocol.ts, the ox review server's presence bridge, and a presence service that relays them. valid: accepted as they are. invalid: each refused. Fields not named here are dropped, never relayed.",
+  "valid": [
+    {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "text": 12}},
+    {"start": {"anchor": "h1234abcd", "nth": 1, "of": 3, "text": 5}, "end": {"anchor": "h00000000", "text": 0}},
+    {"start": {"anchor": "h00000000", "nth": 9999, "of": 10000, "text": 1048576}, "end": {"anchor": "hffffffff", "nth": 0, "of": 2, "text": 1048576}}
+  ],
+  "invalid": {
+    "no start": {"end": {"anchor": "h1234abcd", "text": 0}},
+    "no end": {"start": {"anchor": "h1234abcd", "text": 0}},
+    "a null end": {"start": {"anchor": "h1234abcd", "text": 0}, "end": null},
+    "an end that is not an object": {"start": {"anchor": "h1234abcd", "text": 0}, "end": "h1234abcd"},
+    "a highlight anchor": {"start": {"anchor": "q1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "a short anchor": {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234", "text": 0}},
+    "an uppercase anchor": {"start": {"anchor": "h1234ABCD", "text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "no anchor": {"start": {"text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "no text offset": {"start": {"anchor": "h1234abcd"}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "a string text offset": {"start": {"anchor": "h1234abcd", "text": "3"}, "end": {"anchor": "h1234abcd", "text": 4}},
+    "a fractional text offset": {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "text": 1.5}},
+    "a negative text offset": {"start": {"anchor": "h1234abcd", "text": -1}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "a text offset past the limit": {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "text": 1048577}},
+    "nth without of": {"start": {"anchor": "h1234abcd", "nth": 0, "text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "of without nth": {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "of": 2, "text": 0}},
+    "one of one": {"start": {"anchor": "h1234abcd", "nth": 0, "of": 1, "text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "nth past of": {"start": {"anchor": "h1234abcd", "nth": 3, "of": 3, "text": 0}, "end": {"anchor": "h1234abcd", "text": 0}},
+    "of past the limit": {"start": {"anchor": "h1234abcd", "text": 0}, "end": {"anchor": "h1234abcd", "nth": 0, "of": 10001, "text": 0}},
+    "not an object": "h1234abcd"
+  }
+}
