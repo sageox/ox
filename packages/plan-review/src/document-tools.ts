@@ -415,6 +415,8 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
         // or a painted highlight; nothing for an element
         const h = m.anchor === null ? null : picked && picked.a === m.anchor ? picked.range : qRanges[m.anchor] ? qRanges[m.anchor].range : null;
         focusRange(h);
+        // teammates keep seeing the words while the reviewer writes the note
+        pointers.hold(h);
         break;
       }
       case 'reveal':

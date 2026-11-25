@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -296,13 +297,15 @@ func pointIntoFrame(t *testing.T, ctx context.Context, part string) {
 // pointer, with their name, on the same word, through a scroll; a pointer in
 // a section collapsed on the other side is not drawn until it is opened
 // there; each sees the words the other selects tinted in the other's color,
-// until they let go; the framed plan never hears a name; and Devon reloading
-// leaves one cursor of his, not a ghost.
+// until they let go, and the words Devon's open note is about while he writes
+// it; the framed plan never hears a name; and Devon reloading leaves one
+// cursor of his, not a ghost.
 // Failure prevented: cursors are shared as screen positions and land on other
 // words at another width or scroll, a pointer is painted over a collapsed
 // section as if on what follows it, a selection tints other words than the
-// ones selected or stays after it is let go, a plan's own script learns who
-// is reviewing it, or a reload leaves a stale cursor behind.
+// ones selected or stays after it is let go, teammates lose the words a
+// reviewer is commenting on once they click into the note, a plan's own
+// script learns who is reviewing it, or a reload leaves a stale cursor behind.
 func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	ctx := frameBrowser(t)
 	gitRoot := newPlanStatusTestRepo(t)
@@ -374,6 +377,27 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitTint(t, ctx, true, "Devon", "", "Devon letting go of the words")
+
+	// in review mode Devon double-clicks a word to comment on it, then clicks
+	// into the note, which takes his page's selection away: Avery keeps seeing
+	// the word tinted until he closes the note
+	consumer := localSpot(t, local, "inside")
+	if err := chromedp.Run(local, chromedp.Click(".rev-toggle", chromedp.ByQuery), chromedp.MouseClickXY(consumer.X, consumer.Y, chromedp.ClickCount(2)),
+		chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery), chromedp.Click(".rev-pop .rev-note", chromedp.ByQuery)); err != nil {
+		t.Fatalf("comment on a word: %v", err)
+	}
+	if got := evalString(t, local, `getSelection().toString()`); got != "" {
+		t.Fatalf("clicking into the note must take the page's selection away for this check to mean anything: %q", got)
+	}
+	time.Sleep(time.Second) // past a selection's way to Avery's frame: a dropped one would be gone by now
+	waitTint(t, ctx, true, "Devon", "consumer", "the word Devon's open note is about")
+	if err := chromedp.Run(local, chromedp.KeyEvent(kb.Escape)); err != nil {
+		t.Fatal(err)
+	}
+	waitTint(t, ctx, true, "Devon", "", "Devon closing the note")
+	if err := chromedp.Run(local, chromedp.Click(".rev-toggle", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
 
 	var heard []string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.heard`, &heard)); err != nil {
