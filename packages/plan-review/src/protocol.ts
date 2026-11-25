@@ -102,6 +102,30 @@ export interface PointerAt {
   text?: number;
 }
 
+/**
+ * A place in the plan's text: the markable element ("h" anchor; nth of `of`
+ * when that anchor repeats) and how many of its non-space characters precede
+ * the place, counted the way PointerAt.text is.
+ */
+export interface TextAt {
+  anchor: string;
+  nth?: number;
+  of?: number;
+  text: number;
+}
+
+/** The words a reviewer has selected, as two places in the plan's text; start comes first in document order. */
+export interface SelectionAt {
+  start: TextAt;
+  end: TextAt;
+}
+
+/** A selection to tint, in one of the COLORS cursor colors the host gave its owner. */
+export interface Tinted {
+  color: number;
+  sel: SelectionAt;
+}
+
 /** Where a pointer lands, in the document's viewport pixels. `key` is the host's name for it, never a person's. */
 export interface Located {
   key: string;
@@ -114,7 +138,8 @@ export type HostMessage =
   | { type: 'paint'; items: PaintItem[]; drawings: DrawingPaint[] }
   | { type: 'focus'; anchor: string | null }
   | { type: 'reveal'; anchor: string; nth: number }
-  | { type: 'locate'; points: Array<{ key: string; at: PointerAt }> };
+  | { type: 'locate'; points: Array<{ key: string; at: PointerAt }> }
+  | { type: 'selections'; items: Tinted[] };
 
 export type DocumentMessage =
   | { type: 'ready' }
@@ -127,7 +152,8 @@ export type DocumentMessage =
   | { type: 'placed'; items: Placed[] }
   | { type: 'key'; key: 'Escape' | 'r' }
   | { type: 'pointer'; at: PointerAt | null }
-  | { type: 'located'; points: Located[] };
+  | { type: 'located'; points: Located[] }
+  | { type: 'selection'; sel: SelectionAt | null };
 
 /** Every message travels inside this envelope; instance names one load of one framed document. */
 export interface Envelope {
@@ -151,6 +177,8 @@ const DRAW_REFUSALS = ['no-target', 'too-large', 'too-small', 'layout-changed', 
 export const MAX_POINTERS = 64;
 /** The deepest child path a pointer location carries. */
 export const MAX_PATH = 16;
+/** How many cursor colors a host gives reviewers: host.css .rev-c0 … .rev-c7, document.css rev-sel-c0 … rev-sel-c7. */
+export const COLORS = 8;
 const MAX_TEXT_OFFSET = 1 << 20;
 const KEY = /^[A-Za-z0-9_-]{1,32}$/;
 
@@ -261,6 +289,11 @@ export function parseDocumentMessage(data: unknown, instance: string): DocumentM
       }
       return { type: 'located', points };
     }
+    case 'selection': {
+      if (d.sel === null) return { type: 'selection', sel: null };
+      const sel = selectionAt(d.sel);
+      return sel ? { type: 'selection', sel } : null;
+    }
   }
   return null;
 }
@@ -304,6 +337,16 @@ export function parseHostMessage(data: unknown, instance: string): HostMessage |
       }
       return { type: 'locate', points };
     }
+    case 'selections': {
+      if (!Array.isArray(d.items) || d.items.length > MAX_POINTERS) return null;
+      const items: Tinted[] = [];
+      for (const it of d.items) {
+        const sel = obj(it) && whole(it.color, COLORS - 1) ? selectionAt(it.sel) : null;
+        if (!sel) return null;
+        items.push({ color: it.color as number, sel });
+      }
+      return { type: 'selections', items };
+    }
   }
   return null;
 }
@@ -315,12 +358,7 @@ const unit = (v: unknown): v is number => num(v) && v >= 0 && v <= 1;
 export function pointerAt(v: unknown): PointerAt | null {
   if (!obj(v) || typeof v.anchor !== 'string' || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== 'h' || !unit(v.x) || !unit(v.y)) return null;
   const at: PointerAt = { anchor: v.anchor, x: v.x, y: v.y };
-  // nth and of come together, and only for an anchor that repeats
-  if (v.nth !== undefined || v.of !== undefined) {
-    if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return null;
-    at.nth = v.nth;
-    at.of = v.of;
-  }
+  if (!occurrence(v, at)) return null;
   if (v.path !== undefined) {
     if (!Array.isArray(v.path) || !v.path.length || v.path.length > MAX_PATH || !all(v.path, (i) => whole(i, MAX_ITEMS))) return null;
     at.path = (v.path as number[]).slice();
@@ -330,6 +368,28 @@ export function pointerAt(v: unknown): PointerAt | null {
     at.text = v.text;
   }
   return at;
+}
+
+/** selectionAt validates a selection, as a fresh object; null when it is not one. A host checks each one a presence service relays. */
+export function selectionAt(v: unknown): SelectionAt | null {
+  const start = obj(v) ? textAt(v.start) : null, end = obj(v) ? textAt(v.end) : null;
+  return start && end ? { start, end } : null;
+}
+
+function textAt(v: unknown): TextAt | null {
+  if (!obj(v) || typeof v.anchor !== 'string' || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== 'h' || !whole(v.text, MAX_TEXT_OFFSET)) return null;
+  const t: TextAt = { anchor: v.anchor, text: v.text };
+  return occurrence(v, t) ? t : null;
+}
+
+// occurrence copies v's nth and of onto out: they come together, and only
+// for an anchor that repeats. False when they are malformed.
+function occurrence(v: Obj, out: { nth?: number; of?: number }): boolean {
+  if (v.nth === undefined && v.of === undefined) return true;
+  if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return false;
+  out.nth = v.nth;
+  out.of = v.of;
+  return true;
 }
 
 /** paintItem validates one item a host paints; null when it is not one. A host checks each before it sends, since one bad item drops the whole paint. */

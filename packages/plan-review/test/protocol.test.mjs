@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
-const { PROTOCOL, MAX_POINTERS, envelope, parseDocumentMessage, parseHostMessage, pointerAt } = await load('protocol.ts');
+const { PROTOCOL, MAX_POINTERS, COLORS, envelope, parseDocumentMessage, parseHostMessage, pointerAt, selectionAt } = await load('protocol.ts');
 const { connectFrame } = await load('ports.ts');
 const I = 'inst-0001';
 const doc = (m) => envelope(m, I);
@@ -141,4 +141,28 @@ test('pointer locations parse to their known fields only, by the shared cases', 
   for (const bad of [
     [{ key: 'p1', at: { ...at, x: 2 } }], [{ key: 'usr_1 Devon', at }], [{ key: 'p1' }], Array(MAX_POINTERS + 1).fill({ key: 'p1', at }),
   ]) assert.equal(parseHostMessage(doc({ type: 'locate', points: bad }), I), null, JSON.stringify(bad).slice(0, 60));
+});
+
+// Live selections cross the frame, and reach the presence service, as two
+// places in the plan's text, never its words. Failure prevented: a plan's
+// script, or a peer through the service, carries a name or the selected
+// words in a selection; an unbounded list, or a color past the host's eight,
+// reaches the document's tinting; or the rules drift from the ones the review
+// server's bridge and a service apply.
+test('selections parse to their known fields only, by the shared cases', () => {
+  const cases = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/presence/selections.json', import.meta.url), 'utf8'));
+  const named = (t) => ({ ...t, name: 'Devon', quote: 'retry storms' });
+  for (const sel of cases.valid) assert.deepEqual(selectionAt({ start: named(sel.start), end: named(sel.end), quote: 'retry storms' }), sel);
+  for (const [name, sel] of Object.entries(cases.invalid)) assert.equal(selectionAt(sel), null, name);
+
+  const sel = cases.valid[1];
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'selection', sel: { ...sel, quote: 'retry storms' } }), I), { type: 'selection', sel });
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'selection', sel: null }), I), { type: 'selection', sel: null });
+  assert.equal(parseDocumentMessage(doc({ type: 'selection' }), I), null, 'a selection message with no selection');
+
+  assert.deepEqual(parseHostMessage(doc({ type: 'selections', items: [{ color: COLORS - 1, sel, name: 'Devon' }] }), I), { type: 'selections', items: [{ color: COLORS - 1, sel }] });
+  for (const bad of [
+    [{ color: COLORS, sel }], [{ color: -1, sel }], [{ color: 1.5, sel }], [{ color: '1', sel }], [{ sel }], [{ color: 0 }],
+    [{ color: 0, sel: cases.invalid['no end'] }], Array(MAX_POINTERS + 1).fill({ color: 0, sel }),
+  ]) assert.equal(parseHostMessage(doc({ type: 'selections', items: bad }), I), null, JSON.stringify(bad).slice(0, 60));
 });
