@@ -72,6 +72,11 @@ words are, and never carries the selected words themselves:
 | `nth`, `of` | As for a pointer: which occurrence of a repeated anchor, of how many |
 | `text` | How many non-space characters of that element precede the place; required, at most 1048576 |
 
+In review mode, a note open on highlighted words shares those words as the
+reviewer's selection whenever the page has no selection of its own: clicking
+into the note takes the page's selection away, and teammates keep seeing the
+words it is about until it closes.
+
 A selection's edges skip whitespace, and any words outside every markable
 element: a selection that starts in a `<summary>` on an authored page, which
 is not markable, is shared from the first markable words after it. The
@@ -267,7 +272,7 @@ review` pages on one markdown plan see each other's pointers and selections.
 
 | Test | Proves |
 |---|---|
-| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; each tints exactly the words the other selects, across elements and at its own width, painted translucently in the other's chip color, from the first markable words, and clears them when they are let go; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; a reloaded frame leaves no stale pointer; with its server gone, the page shows no one |
+| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; each tints exactly the words the other selects, across elements and at its own width, painted translucently in the other's chip color, from the first markable words, and clears them when they are let go; the word Devon's open note is about stays tinted for Avery after he clicks into the note, until he closes it; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; a reloaded frame leaves no stale pointer; with its server gone, the page shows no one |
 | `TestBrowser_PointerOnAnotherRevisionIsNeverDrawn` | Two local pages on one plan, on different revisions, list each other as on another revision and never draw each other's pointer |
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves, selections and leaves between a page and a hosted viewer, under the service's names; a move with nothing selected carries no `sel`; a second tab leaves alone; live reloads share the stream |
 | `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields (the selected words among them), out-of-range values, half a selection, a key with no open stream, and oversized bodies |
@@ -298,9 +303,6 @@ service for one plan, used by these tests.
 - **A selection is one range.** Dragged across content collapsed on the
   reviewer's page, such as a closed `<details>` or a hidden tab, it still
   covers that content, and a teammate who has it open sees it tinted.
-- **A selection in review mode** is shared only while it lasts: once the
-  reviewer clicks into the note it opened, the page has no selection, and
-  teammates see none, though the note is about those words.
 - **A browser without the CSS Custom Highlight API** shares its reviewer's
   selection but tints no one else's.
 - **A host that mounts the review controls only for review** shows presence
