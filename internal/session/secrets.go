@@ -349,7 +349,7 @@ func DefaultPatterns() []SecretPattern {
 		// Connection strings with embedded credentials (DB protocols)
 		{
 			Name:     "connection_string",
-			Pattern:  regexp.MustCompile(`(?i)(mongodb\+srv|mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/(?:[^:/?#\s"\\]|\\[^\s"])+:(?:(?:[^@\s"\\]|\\[^\s])+\\?|\\)@[^\s'"]+`),
+			Pattern:  regexp.MustCompile(`(?i)(mongodb\+srv|mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/(?:[^:/?#\s"\\]|\\[^\s"nrt])+:(?:(?:[^@\s"\\]|\\[^\s])+\\?|\\)@[^\s'"]+`),
 			Redact:   "[REDACTED_CONNECTION_STRING]",
 			Keywords: []string{"mongodb", "postgres", "mysql", "redis", "amqp", "mssql"},
 		},

@@ -444,6 +444,12 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: false,
 		},
 		{
+			name:     "mongodb+srv without password keeps later lines in escaped JSON",
+			input:    `{\"out\":\"MONGO_URL=mongodb+srv://db.internal.example.com\nnotify:ops@example.com on call\"}`,
+			expected: `{\"out\":\"MONGO_URL=mongodb+srv://db.internal.example.com\nnotify:ops@example.com on call\"}`,
+			wantFind: false,
+		},
+		{
 			name:     "password with raw slash, question mark and hash still redacted",
 			input:    "DATABASE_URL=postgres://app:Xy/9?k#2@db.example.com/prod",
 			expected: "DATABASE_URL=[REDACTED_CONNECTION_STRING]",
