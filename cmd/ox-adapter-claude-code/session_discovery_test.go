@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/session/claudesource/claudesourcetest"
 )
 
 func TestFindSessionFile_ResumedSessionInOldBucket(t *testing.T) {
@@ -411,11 +413,8 @@ func TestSessionReadersHandleLinesOverOneMiB(t *testing.T) {
 // record. It is no project, so stop run from the main checkout must still find
 // the worktree's session; a step into another project must not.
 func TestFindSessionFile_WorktreeSessionThatVisitsANotesFolder(t *testing.T) {
-	home, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", home)
+	notes := claudesourcetest.SharedNotesFolder(t)
+	home := os.Getenv("HOME")
 	git := func(dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
@@ -435,10 +434,6 @@ func TestFindSessionFile_WorktreeSessionThatVisitsANotesFolder(t *testing.T) {
 	}
 	wt := filepath.Join(repo, ".claude", "worktrees", "wt")
 	git(repo, "worktree", "add", "-q", "-b", "wt", wt)
-	notes := filepath.Join(home, "Library", "Application Support", "Claude", "side-session-notes", "local_1")
-	if err := os.MkdirAll(notes, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
 	bucket := filepath.Join(home, ".claude", "projects", claudeProjectHash(wt))
@@ -464,7 +459,7 @@ func TestFindSessionFile_WorktreeSessionThatVisitsANotesFolder(t *testing.T) {
 	}
 
 	writeTurns(other)
-	_, _, err = findSessionFile(repo, "", "", id)
+	_, _, err := findSessionFile(repo, "", "", id)
 	if err == nil {
 		t.Fatal("a session that stepped into another repository was accepted")
 	}

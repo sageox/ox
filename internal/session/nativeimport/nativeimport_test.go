@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/session/claudesource/claudesourcetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -258,6 +259,8 @@ func TestScopeClassify(t *testing.T) {
 	require.NoError(t, os.Symlink(filepath.Join(other, "sub"), filepath.Join(base, "link")))
 	throughLink := filepath.Join(base, "link") + "/../unrelated"
 
+	notes := claudesourcetest.SharedNotesFolder(t)
+
 	scope, err := NewScope(worktree)
 	require.NoError(t, err)
 	tests := []struct {
@@ -273,8 +276,11 @@ func TestScopeClassify(t *testing.T) {
 		{"an unrelated directory", []string{unrelated}, OtherRepo},
 		{"a relative path proves nothing", []string{"repo"}, OtherRepo},
 		{"this repo and a nested repository", []string{repo, nested}, MixedRepos},
-		// a folder that is no project holds no one else's work (issue #2041)
-		{"this repo and a plain folder", []string{worktree, unrelated}, ThisRepo},
+		// the Claude desktop app's shared notes folder is no project (issue #2041)
+		{"this repo and the shared notes folder", []string{worktree, notes}, ThisRepo},
+		{"the shared notes folder alone", []string{notes}, OtherRepo},
+		// no project markers, but nothing says its owner shares it with this repo
+		{"this repo and a plain folder", []string{worktree, unrelated}, MixedRepos},
 		{"this repo and the folder above it", []string{repo, base}, MixedRepos},
 		{"this repo and a deleted folder", []string{repo, filepath.Join(base, "gone-notes")}, MixedRepos},
 		{"this repo and a dotted path through a link", []string{repo, throughLink}, MixedRepos},

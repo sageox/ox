@@ -11,11 +11,11 @@ import (
 	"testing"
 )
 
-// TestValidateNeutralFolderVisit: a session that lives in this repo's worktree
-// and steps into a folder that is no project (the Claude desktop app's shared
-// notes folder, issue #2041) still belongs to this repo. A folder that holds or
-// may hold another project's work still makes it foreign.
-func TestValidateNeutralFolderVisit(t *testing.T) {
+// TestValidateSharedNotesFolderVisit: a session that lives in this repo's
+// worktree and steps into the Claude desktop app's shared notes folder (issue
+// #2041) still belongs to this repo. Every other folder outside the repo still
+// makes it foreign, whether or not it looks like a project.
+func TestValidateSharedNotesFolderVisit(t *testing.T) {
 	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
 	gitRun := func(t *testing.T, dir string, args ...string) {
 		t.Helper()
@@ -32,24 +32,55 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 		}
 		return dir
 	}
+	notesRoot := func(outer string) string {
+		return filepath.Join(outer, "Library", "Application Support", "Claude", "side-session-notes")
+	}
 	for name, tt := range map[string]struct {
 		visit    func(t *testing.T, outer, repo string) string
 		homeless bool // the session never stood in the repo
 		foreign  bool
+		gone     bool // the refusal says the folder no longer exists
 	}{
-		"plain notes folder": {visit: func(t *testing.T, outer, _ string) string {
-			return mkdir(t, filepath.Join(outer, "Library", "Application Support", "Claude", "side-session-notes", "local_1"))
+		"shared notes folder": {visit: func(t *testing.T, outer, _ string) string {
+			return mkdir(t, filepath.Join(notesRoot(outer), "local_1"))
 		}},
-		"plain folder holding files": {visit: func(t *testing.T, outer, _ string) string {
-			dir := mkdir(t, filepath.Join(outer, "notes"))
-			mkdir(t, filepath.Join(dir, "drafts"))
+		"folder inside a shared notes folder": {visit: func(t *testing.T, outer, _ string) string {
+			return mkdir(t, filepath.Join(notesRoot(outer), "local_1", "drafts"))
+		}},
+		// the app removes a session's notes; where they stood is still known
+		"shared notes folder since deleted": {visit: func(t *testing.T, outer, _ string) string {
+			return filepath.Join(notesRoot(outer), "local_1")
+		}},
+		"shared notes folder alone is not a home": {homeless: true, foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			return mkdir(t, filepath.Join(notesRoot(outer), "local_1"))
+		}},
+		"the folder that holds every session's notes": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			return mkdir(t, notesRoot(outer))
+		}},
+		"repository inside a shared notes folder": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			clone := mkdir(t, filepath.Join(notesRoot(outer), "local_1", "clone"))
+			gitRun(t, clone, "init", "-q")
+			return mkdir(t, filepath.Join(clone, "pkg"))
+		}},
+		"link in a shared notes folder to another repository": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			other := mkdir(t, filepath.Join(outer, "other"))
+			gitRun(t, other, "init", "-q")
+			link := filepath.Join(mkdir(t, filepath.Join(notesRoot(outer), "local_1")), "other")
+			if err := os.Symlink(other, link); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+			return link
+		}},
+		// no project markers, but nothing says its owner shares it with this repo
+		"plain folder": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			dir := mkdir(t, filepath.Join(outer, "Documents", "private-client"))
 			if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return dir
 		}},
-		"plain folder alone is not a home": {homeless: true, foreign: true, visit: func(t *testing.T, outer, _ string) string {
-			return mkdir(t, filepath.Join(outer, "notes"))
+		"folder named like the notes folder elsewhere": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+			return mkdir(t, filepath.Join(outer, "Claude", "side-session-notes", "local_1"))
 		}},
 		"another repository": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
 			other := mkdir(t, filepath.Join(outer, "other"))
@@ -66,36 +97,8 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 		"folder above the repo": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
 			return outer
 		}},
-		"folder of other projects": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
-			src := mkdir(t, filepath.Join(outer, "src"))
-			gitRun(t, mkdir(t, filepath.Join(src, "other")), "init", "-q")
-			return src
-		}},
-		"folder linking to another project": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
-			other := mkdir(t, filepath.Join(outer, "other"))
-			gitRun(t, other, "init", "-q")
-			links := mkdir(t, filepath.Join(outer, "links"))
-			if err := os.Symlink(other, filepath.Join(links, "other")); err != nil {
-				t.Skip("symlinks unavailable:", err)
-			}
-			return links
-		}},
-		"deleted folder": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
+		"deleted folder": {foreign: true, gone: true, visit: func(t *testing.T, outer, _ string) string {
 			return filepath.Join(outer, "gone")
-		}},
-		"folder linking into another project": {foreign: true, visit: func(t *testing.T, outer, _ string) string {
-			other := mkdir(t, filepath.Join(outer, "other"))
-			gitRun(t, other, "init", "-q")
-			links := mkdir(t, filepath.Join(outer, "links"))
-			if err := os.Symlink(mkdir(t, filepath.Join(other, "src")), filepath.Join(links, "src")); err != nil {
-				t.Skip("symlinks unavailable:", err)
-			}
-			return links
-		}},
-		"folder holding a linked worktree": {foreign: true, visit: func(t *testing.T, outer, repo string) string {
-			trees := mkdir(t, filepath.Join(outer, "trees"))
-			gitRun(t, repo, "worktree", "add", "-q", filepath.Join(trees, "nested", "wt2"))
-			return trees
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -103,6 +106,7 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			useSharedNotesRoot(t, notesRoot(outer))
 			repo := mkdir(t, filepath.Join(outer, "repo"))
 			gitRun(t, repo, "init", "-q")
 			gitRun(t, repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
@@ -123,7 +127,7 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 				err := Validate(path, root, id)
 				if !tt.foreign {
 					if err != nil {
-						t.Fatalf("Validate(root=%s): a visit to a folder that is no project must not reject the session: %v", root, err)
+						t.Fatalf("Validate(root=%s): a visit to the shared notes folder must not reject the session: %v", root, err)
 					}
 					continue
 				}
@@ -133,7 +137,7 @@ func TestValidateNeutralFolderVisit(t *testing.T) {
 				if !strings.Contains(err.Error(), fmt.Sprintf("%q", visit)) {
 					t.Fatalf("Validate(root=%s): the error must name the cwd %q: %v", root, visit, err)
 				}
-				if gone := strings.Contains(err.Error(), GoneCwdNote); gone != (name == "deleted folder") {
+				if gone := strings.Contains(err.Error(), GoneCwdNote); gone != tt.gone {
 					t.Fatalf("Validate(root=%s): only a deleted folder is named as gone: %v", root, err)
 				}
 			}
@@ -179,16 +183,18 @@ func TestDescribeCwdShowsOnlyAValidTimestamp(t *testing.T) {
 }
 
 // An archived workspace no longer names its git dir, yet a recording made in it
-// that also visited a plain folder is still its own (daemon recovery, #2041).
-func TestValidateNeutralFolderVisitFromArchivedWorkspace(t *testing.T) {
+// that also visited the shared notes folder is still its own (daemon recovery,
+// #2041).
+func TestValidateSharedNotesFolderVisitFromArchivedWorkspace(t *testing.T) {
 	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
 	outer, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join(outer, "archived")
-	notes := filepath.Join(outer, "notes")
-	if err := os.Mkdir(notes, 0o755); err != nil {
+	useSharedNotesRoot(t, filepath.Join(outer, "side-session-notes"))
+	notes := filepath.Join(outer, "side-session-notes", "local_1")
+	if err := os.MkdirAll(notes, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, workspace) +
@@ -198,6 +204,54 @@ func TestValidateNeutralFolderVisitFromArchivedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Validate(path, workspace, id); err != nil {
-		t.Fatalf("a plain folder visit from an archived workspace must not reject it: %v", err)
+		t.Fatalf("a shared notes folder visit from an archived workspace must not reject it: %v", err)
+	}
+}
+
+// useSharedNotesRoot points the notes lookup at root for one test, so no test
+// depends on, or writes into, the real app's data folder.
+func useSharedNotesRoot(t *testing.T, root string) {
+	t.Helper()
+	prev := sharedNotesRoot
+	sharedNotesRoot = func() (string, error) { return root, nil }
+	t.Cleanup(func() { sharedNotesRoot = prev })
+}
+
+// The real lookup names the notes folder inside the Claude desktop app's data
+// folder, which sits in the OS's per-user config directory.
+func TestSharedNotesRootIsInsideTheAppDataFolder(t *testing.T) {
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Skip("no user config dir:", err)
+	}
+	got, err := sharedNotesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(config, "Claude", "side-session-notes"); got != want {
+		t.Fatalf("sharedNotesRoot() = %q, want %q", got, want)
+	}
+}
+
+// The stop guidance reads the refusal as text, so a folder whose name contains
+// the "no longer exists" note must not read as a folder that is gone.
+func TestForeignCwdIsGoneSkipsTheFolderName(t *testing.T) {
+	refusal := func(cwd, note string) string {
+		return fmt.Sprintf("adapter error: %v: %s: %s%s", ErrUntrustedSource, ForeignCwdReason, describeCwd(cwd, json.RawMessage(`"2026-11-25T10:00:00Z"`)), note)
+	}
+	for name, tt := range map[string]struct {
+		message string
+		want    bool
+	}{
+		"folder that is gone":             {refusal("/work/gone", ", "+GoneCwdNote), true},
+		"folder that exists":              {refusal("/work/other", ""), false},
+		"existing folder named like it":   {refusal("/work/"+GoneCwdNote, ""), false},
+		"gone folder named like it":       {refusal("/work/"+GoneCwdNote, ", "+GoneCwdNote), true},
+		"a refusal for another reason":    {"claude source has invalid or missing repository metadata", false},
+		"folder with a quote in its name": {refusal(`/work/a", `+GoneCwdNote, ""), false},
+	} {
+		if got := ForeignCwdIsGone(tt.message); got != tt.want {
+			t.Errorf("%s: ForeignCwdIsGone(%q) = %v, want %v", name, tt.message, got, tt.want)
+		}
 	}
 }

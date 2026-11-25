@@ -26,7 +26,7 @@ type dirVerdict int
 const (
 	dirOther   dirVerdict = iota // another project's, or cannot be shown not to be
 	dirMine                      // inside one of this repository's checkouts
-	dirNeutral                   // a folder outside every project: no one's work
+	dirNeutral                   // a shared notes folder: no one's work
 )
 
 // Scope decides whether working directories belong to one repository: the one
@@ -63,9 +63,9 @@ func NewScope(repoRoot string) (*Scope, error) {
 	return s, nil
 }
 
-// Classify reports whether every directory belongs to this repository. A
-// folder outside every project, such as the notes folder the Claude desktop
-// app shares between sessions, counts for neither side: it is no one's work.
+// Classify reports whether every directory belongs to this repository. The
+// notes folder the Claude desktop app shares between sessions counts for
+// neither side: it is no project, so it holds no one else's work.
 func (s *Scope) Classify(cwds []string) Membership {
 	mine, other := 0, 0
 	for _, dir := range cwds {
@@ -96,7 +96,7 @@ func (s *Scope) place(dir string) dirVerdict {
 		v = dirMine
 	// a cwd with ".." is cleaned before its links are resolved, which can land
 	// somewhere other than the folder it names, so only a canonical one counts
-	case filepath.IsAbs(dir) && filepath.Clean(dir) == dir && claudesource.OutsideEveryProject(resolvePath(dir), s.roots...):
+	case filepath.IsAbs(dir) && filepath.Clean(dir) == dir && claudesource.InSharedNotesFolder(resolvePath(dir)):
 		v = dirNeutral
 	}
 	s.cache[dir] = v
