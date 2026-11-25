@@ -330,7 +330,7 @@ func TestLiveStreamWedge_FetchHangsAndPushIsRejected(t *testing.T) {
 	requireDelivered(t, e, want.String())
 	select {
 	case <-pulled:
-		t.Fatal("precondition: the Ledger sync should still be hung in a fetch")
+		t.Fatal("precondition: the Ledger sync should still be stuck, holding the Ledger mutex and the repo lock")
 	default:
 	}
 	git.Release()
