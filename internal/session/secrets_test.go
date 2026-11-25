@@ -498,6 +498,12 @@ func TestRedactString_ConnectionStrings(t *testing.T) {
 			wantFind: true,
 		},
 		{
+			name:     "comma in username still redacted",
+			input:    "postgres://ops,admin:secretpass@db.example.com/prod",
+			expected: "[REDACTED_CONNECTION_STRING]",
+			wantFind: true,
+		},
+		{
 			name:     "raw space in password still redacted",
 			input:    "postgres://user:my pass@db.example.com/app",
 			expected: "[REDACTED_CONNECTION_STRING]",
