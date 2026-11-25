@@ -1,0 +1,7 @@
+# Blacksmith runner labels the workflows use; without them actionlint reports
+# every `runs-on` as unknown.
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2404
+    - blacksmith-8vcpu-ubuntu-2404

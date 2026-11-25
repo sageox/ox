@@ -218,7 +218,8 @@ func TestConversationE2E_InvalidIDs(t *testing.T) {
 	}{
 		{"folder name", []string{"conversation", "show", "2026-08-11-22-32-full"}},
 		{"bare uuid", []string{"conversation", "show", convE2EFullUUID}},
-		{"wrong prefix", []string{"conversation", "show", "ses_" + convE2EFullUUID}},
+		// not ses_: show hands ses_ ids to the live session view (session_view_live_test.go)
+		{"wrong prefix", []string{"conversation", "show", "usr_" + convE2EFullUUID}},
 		{"uuid v4 not v7", []string{"conversation", "show", "cnv_019ff2f5-2079-4be1-b05e-8caad2772e61"}},
 		{"transcript bad id", []string{"conversation", "transcript", "not-an-id"}},
 		{"topics bad id", []string{"conversation", "topics", "nope"}},

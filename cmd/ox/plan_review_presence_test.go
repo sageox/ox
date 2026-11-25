@@ -37,12 +37,15 @@ type fakePresence struct {
 	people map[string]fakePerson // by token
 	mux    *http.ServeMux
 
-	mu     sync.Mutex
-	refuse int // answer every join with this status, when set
-	conns  map[string]*fakeConn
-	seq    int
-	joins  int
-	moves  []fakeMove
+	mu        sync.Mutex
+	refuse    int       // answer every join with this status, when set
+	refuseSel bool      // refuse every move carrying sel, as a service from before selections does
+	refused   int       // moves refused for carrying sel
+	refusedAt time.Time // when the last of them came
+	conns     map[string]*fakeConn
+	seq       int
+	joins     int
+	moves     []fakeMove
 }
 
 type fakePerson struct{ name, user string }
@@ -50,7 +53,7 @@ type fakePerson struct{ name, user string }
 type fakeConn struct {
 	id, token, revision string
 	who                 fakePerson
-	at                  json.RawMessage
+	at, sel             json.RawMessage // sel is nil while nothing is selected
 	out                 chan string
 	kill                chan struct{}
 }
@@ -58,6 +61,8 @@ type fakeConn struct {
 type fakeMove struct {
 	conn string
 	at   string
+	sel  string // "" when the move carried no sel
+	when time.Time
 }
 
 // newFakePresence serves a fakePresence for plan and returns it with its base URL.
@@ -85,7 +90,11 @@ func fakeBearer(r *http.Request) string {
 }
 
 func (c *fakeConn) peer() map[string]any {
-	return map[string]any{"id": c.id, "name": c.who.name, "user": c.who.user, "revision": c.revision, "at": c.at}
+	p := map[string]any{"id": c.id, "name": c.who.name, "user": c.who.user, "revision": c.revision, "at": c.at}
+	if c.sel != nil {
+		p["sel"] = c.sel
+	}
+	return p
 }
 
 // broadcast queues an event for every connection; f.mu is held.
@@ -166,14 +175,25 @@ func (f *fakePresence) move(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		At json.RawMessage `json:"at"`
+		At  json.RawMessage `json:"at"`
+		Sel json.RawMessage `json:"sel"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.At == nil {
 		http.Error(w, "at", http.StatusBadRequest)
 		return
 	}
-	c.at = body.At
-	f.moves = append(f.moves, fakeMove{c.id, string(body.At)})
+	if f.refuseSel && body.Sel != nil {
+		f.refused++
+		f.refusedAt = time.Now()
+		http.Error(w, `invalid request body: json: unknown field "sel"`, http.StatusBadRequest)
+		return
+	}
+	// a move is the connection's whole state: one without sel clears it
+	c.at, c.sel = body.At, body.Sel
+	if string(c.sel) == "null" {
+		c.sel = nil
+	}
+	f.moves = append(f.moves, fakeMove{c.id, string(body.At), string(body.Sel), time.Now()})
 	f.broadcast("peer", c.peer())
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -284,13 +304,15 @@ func roomURL(base string) string {
 // --- A. The room, both ways ---
 
 // TestReviewLoop_PresenceRelaysTheRoomBothWays joins a local review page and
-// a hosted viewer to one plan's room. Each hears the other join, move and
-// leave, a second tab of the viewer's is a connection of its own, the page's
-// moves reach the room under the name the service stamped from the user's
-// login, and live reloads still reach the page on the stream it shares.
-// Failure prevented: a local reviewer and a hosted one never see each other,
-// a page can name itself whatever it likes, closing one tab drops another's
-// cursor or a closed tab leaves a ghost, or presence breaks live reload.
+// a hosted viewer to one plan's room. Each hears the other join, move, select
+// words and leave, a second tab of the viewer's is a connection of its own,
+// the page's moves reach the room under the name the service stamped from the
+// user's login, and live reloads still reach the page on the stream it shares.
+// Failure prevented: a local reviewer and a hosted one never see each other
+// or each other's selections, a page can name itself whatever it likes, a
+// move with nothing selected carries a sel a service from before selections
+// refuses, closing one tab drops another's cursor or a closed tab leaves a
+// ghost, or presence breaks live reload.
 func TestReviewLoop_PresenceRelaysTheRoomBothWays(t *testing.T) {
 	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}, "tok-avery": {"Avery", "u-avery"}})
 	review, bc := presenceReview(t, base, "tok-devon")
@@ -312,15 +334,30 @@ func TestReviewLoop_PresenceRelaysTheRoomBothWays(t *testing.T) {
 		t.Fatalf("the room must hear the page join as the signed-in user, pointing nowhere yet: %v", joined.data)
 	}
 
-	if code := pointerPOST(t, review.URL, "page-devon-1", `{"anchor":"h1234abcd","path":[1],"x":0.5,"y":0.25,"text":7}`); code != http.StatusNoContent {
-		t.Fatalf("a well-formed pointer: HTTP %d", code)
+	sel := `{"start":{"anchor":"h1234abcd","text":3},"end":{"anchor":"h5678abcd","nth":0,"of":2,"text":9}}`
+	if code := reviewPOST(t, review.URL+"/presence", "secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","path":[1],"x":0.5,"y":0.25,"text":7},"sel":`+sel+`}`); code != http.StatusNoContent {
+		t.Fatalf("a well-formed pointer and selection: HTTP %d", code)
 	}
 	moved := nextEvent(t, avery, "Devon's pointer", func(e sseEvent) bool { return from("Devon")(e) && e.data["at"] != nil })
 	if at := moved.data["at"].(map[string]any); at["anchor"] != "h1234abcd" || at["text"] != float64(7) {
 		t.Fatalf("the room must get the page's pointer under the service's name: %v", moved.data)
 	}
+	if got, _ := json.Marshal(moved.data["sel"]); !jsonEqual(t, string(got), sel) {
+		t.Fatalf("the room must get the page's selection with its pointer: %v", moved.data)
+	}
+	// letting go of the words: a pointer-only move, byte for byte as before selections
+	if code := pointerPOST(t, review.URL, "page-devon-1", `{"anchor":"h1234abcd","x":0.5,"y":0.5}`); code != http.StatusNoContent {
+		t.Fatalf("a pointer with nothing selected: HTTP %d", code)
+	}
+	cleared := nextEvent(t, avery, "Devon letting go of the words", func(e sseEvent) bool { return from("Devon")(e) && e.data["sel"] == nil })
+	if _, moves := fake.count(); moves[len(moves)-1].sel != "" {
+		t.Fatalf("a move with nothing selected must carry no sel: %+v", moves[len(moves)-1])
+	} else if cleared.data["at"] == nil {
+		t.Fatalf("letting go of the words keeps the pointer: %v", cleared.data)
+	}
 
-	req, _ := http.NewRequest(http.MethodPost, roomURL(base)+"/"+peerID(t, fake, "Avery"), strings.NewReader(`{"at":{"anchor":"hfeedbeef","x":0.1,"y":0.9}}`))
+	averySel := `{"start":{"anchor":"hfeedbeef","text":0},"end":{"anchor":"hfeedbeef","text":4}}`
+	req, _ := http.NewRequest(http.MethodPost, roomURL(base)+"/"+peerID(t, fake, "Avery"), strings.NewReader(`{"at":{"anchor":"hfeedbeef","x":0.1,"y":0.9},"sel":`+averySel+`}`))
 	req.Header.Set("Authorization", "Bearer tok-avery")
 	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("Avery's move: %v %v", resp, err)
@@ -329,8 +366,12 @@ func TestReviewLoop_PresenceRelaysTheRoomBothWays(t *testing.T) {
 		p, _ := e.data["peer"].(map[string]any)
 		return presenceOf("peer")(e) && p["name"] == "Avery" && p["at"] != nil
 	})
-	if p := seen.data["peer"].(map[string]any); p["at"].(map[string]any)["anchor"] != "hfeedbeef" {
+	p := seen.data["peer"].(map[string]any)
+	if p["at"].(map[string]any)["anchor"] != "hfeedbeef" {
 		t.Fatalf("the page must hear the hosted viewer's pointer: %v", seen.data)
+	}
+	if got, _ := json.Marshal(p["sel"]); !jsonEqual(t, string(got), averySel) {
+		t.Fatalf("the page must hear the hosted viewer's selection: %v", seen.data)
 	}
 
 	bc.broadcast()
@@ -351,6 +392,16 @@ func TestReviewLoop_PresenceRelaysTheRoomBothWays(t *testing.T) {
 	nextEvent(t, avery, "closing the page leaving the room", func(e sseEvent) bool { return e.name == "leave" && e.data["id"] == self })
 }
 
+// jsonEqual reports whether two JSON documents hold the same value.
+func jsonEqual(t *testing.T, a, b string) bool {
+	t.Helper()
+	var x, y any
+	if json.Unmarshal([]byte(a), &x) != nil || json.Unmarshal([]byte(b), &y) != nil {
+		t.Fatalf("not JSON: %s / %s", a, b)
+	}
+	return reflect.DeepEqual(x, y)
+}
+
 // peerID is the fake's connection id for the named person.
 func peerID(t *testing.T, f *fakePresence, name string) string {
 	t.Helper()
@@ -368,10 +419,11 @@ func peerID(t *testing.T, f *fakePresence, name string) string {
 // --- B. What a page may send ---
 
 // TestReviewLoop_PresenceMovesAreCheckedAndScoped sends /presence everything
-// but a well-formed pointer for a connected page.
+// but a well-formed pointer and selection for a connected page.
 // Failure prevented: the review server forwards whatever the page posts to
-// the user's account upstream (a name, a note, an unbounded blob), or a
-// caller without the review token moves the user's pointer.
+// the user's account upstream (a name, a note, the selected words, an
+// unbounded blob), or a caller without the review token moves the user's
+// pointer.
 func TestReviewLoop_PresenceMovesAreCheckedAndScoped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: closing the oversized request's connection waits net/http's 500 ms")
@@ -390,6 +442,8 @@ func TestReviewLoop_PresenceMovesAreCheckedAndScoped(t *testing.T) {
 		"a name of its own": {"secret", `{"key":"page-devon-1","at":` + good + `,"name":"Mallory"}`, http.StatusBadRequest},
 		"a field in at":     {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":0.5,"y":0.5,"note":"hi"}}`, http.StatusBadRequest},
 		"off the element":   {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":2,"y":0.5}}`, http.StatusBadRequest},
+		"words in sel":      {"secret", `{"key":"page-devon-1","at":null,"sel":{"start":{"anchor":"h1234abcd","text":0},"end":{"anchor":"h1234abcd","text":4},"quote":"retry"}}`, http.StatusBadRequest},
+		"half a selection":  {"secret", `{"key":"page-devon-1","at":null,"sel":{"start":{"anchor":"h1234abcd","text":0}}}`, http.StatusBadRequest},
 		"no open stream":    {"secret", `{"key":"page-avery-9","at":` + good + `}`, http.StatusNotFound},
 		"too large":         {"secret", `{"key":"` + strings.Repeat("x", 5000) + `","at":` + good + `}`, http.StatusBadRequest},
 	} {
@@ -477,6 +531,44 @@ func TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer(t *testing.T) {
 	waitFor(t, "the current pointer", func() bool { _, m := fake.count(); return len(m) == 1 })
 	if _, moves := fake.count(); moves[0].conn != again || moves[0].at != current {
 		t.Fatalf("the rejoined connection must get the current pointer, once: %v", moves)
+	}
+}
+
+// TestPresenceBridge_SelectionsFallBackOnAnOlderService selects words on a
+// page whose room is served by a service that refuses every move carrying
+// sel, as one from before selections does.
+// Failure prevented: a newer ox against an older service loses the reviewer's
+// pointer for as long as words are selected, or resends it faster than the
+// service's move rate allows.
+func TestPresenceBridge_SelectionsFallBackOnAnOlderService(t *testing.T) {
+	setPresenceTimings(t, 20*time.Millisecond, time.Hour, time.Hour)
+	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}})
+	fake.mu.Lock()
+	fake.refuseSel = true
+	fake.mu.Unlock()
+	review, _ := presenceReview(t, base, "tok-devon")
+	page, _ := pageEvents(t, review.URL, "page-devon-1")
+	nextEvent(t, page, "the page's welcome", presenceOf("welcome"))
+
+	sel := `{"start":{"anchor":"h1234abcd","text":0},"end":{"anchor":"h1234abcd","text":4}}`
+	for i := 1; i <= 2; i++ {
+		at := fmt.Sprintf(`{"anchor":"h1234abcd","x":0.%d,"y":0.5}`, i)
+		if code := reviewPOST(t, review.URL+"/presence", "secret", `{"key":"page-devon-1","at":`+at+`,"sel":`+sel+`}`); code != http.StatusNoContent {
+			t.Fatalf("move %d with words selected: HTTP %d", i, code)
+		}
+		waitFor(t, fmt.Sprintf("pointer %d in the room with words selected", i), func() bool {
+			_, m := fake.count()
+			return len(m) == i && m[i-1].at == at && m[i-1].sel == ""
+		})
+	}
+	_, moves := fake.count()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.refused != 1 {
+		t.Fatalf("an older service must be offered a selection once per connection, then sent pointers alone: %d refused", fake.refused)
+	}
+	if gap := moves[0].when.Sub(fake.refusedAt); gap < presenceMoveEvery {
+		t.Fatalf("the pointer resent %v after the refused move; moves are at least %v apart", gap, presenceMoveEvery)
 	}
 }
 
@@ -650,43 +742,48 @@ func TestPresenceBridge_JoinsWithTheCurrentLogin(t *testing.T) {
 
 // --- D. The wire ---
 
-// TestPresenceAt_SharedCases runs the pointer cases every reader shares.
-// Failure prevented: the review server forwards a pointer the package and
-// the service refuse, or refuses one they accept.
-func TestPresenceAt_SharedCases(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(packageDir, "..", "..", "pkg", "planreview", "testdata", "presence", "pointers.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cases struct {
-		Valid   []json.RawMessage          `json:"valid"`
-		Invalid map[string]json.RawMessage `json:"invalid"`
-	}
-	if err := json.Unmarshal(raw, &cases); err != nil {
-		t.Fatal(err)
-	}
-	parse := func(b []byte) (*presenceAt, bool) {
-		var a presenceAt
+// TestPresence_SharedCases runs the pointer and selection cases every reader
+// shares.
+// Failure prevented: the review server forwards a pointer or selection the
+// package and the service refuse, or refuses one they accept.
+func TestPresence_SharedCases(t *testing.T) {
+	decode := func(b []byte, v any) bool {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
-		return &a, dec.Decode(&a) == nil && a.valid()
+		return dec.Decode(v) == nil
 	}
-	for _, v := range cases.Valid {
-		a, ok := parse(v)
-		if !ok {
-			t.Errorf("refused a valid pointer: %s", v)
-			continue
-		}
-		var got, want any
-		out, _ := json.Marshal(a)
-		if json.Unmarshal(out, &got) != nil || json.Unmarshal(v, &want) != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("a valid pointer must pass through unchanged: %s became %s", v, out)
-		}
-	}
-	for name, v := range cases.Invalid {
-		if _, ok := parse(v); ok {
-			t.Errorf("accepted %s: %s", name, v)
-		}
+	for file, parse := range map[string]func([]byte) (any, bool){
+		"pointers.json":   func(b []byte) (any, bool) { var a presenceAt; return &a, decode(b, &a) && a.valid() },
+		"selections.json": func(b []byte) (any, bool) { var s presenceSel; return &s, decode(b, &s) && s.valid() },
+	} {
+		t.Run(file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(packageDir, "..", "..", "pkg", "planreview", "testdata", "presence", file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cases struct {
+				Valid   []json.RawMessage          `json:"valid"`
+				Invalid map[string]json.RawMessage `json:"invalid"`
+			}
+			if err := json.Unmarshal(raw, &cases); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range cases.Valid {
+				parsed, ok := parse(v)
+				if !ok {
+					t.Errorf("refused a valid case: %s", v)
+					continue
+				}
+				if out, _ := json.Marshal(parsed); !jsonEqual(t, string(out), string(v)) {
+					t.Errorf("a valid case must pass through unchanged: %s became %s", v, out)
+				}
+			}
+			for name, v := range cases.Invalid {
+				if _, ok := parse(v); ok {
+					t.Errorf("accepted %s: %s", name, v)
+				}
+			}
+		})
 	}
 }
 

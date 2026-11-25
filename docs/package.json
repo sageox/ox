@@ -20,5 +20,5 @@
   "scripts": {
     "check:mdx": "node check-mdx.mjs"
   },
-  "version": "0.26.0"
+  "version": "0.27.2"
 }

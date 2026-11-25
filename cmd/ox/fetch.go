@@ -132,7 +132,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// stream to stdout
 	if fetchStdoutFlag {
-		return lfs.DownloadToFile(obj.Actions.Download, cmd.OutOrStdout(), fetchVerifyFlag, oid)
+		return lfs.DownloadToFile(obj.Actions.Download, fetchStdout(cmd), fetchVerifyFlag, oid)
 	}
 
 	// determine output path
@@ -230,8 +230,20 @@ func streamFileToStdout(cmd *cobra.Command, path string) error {
 		return fmt.Errorf("open cached file: %w", err)
 	}
 	defer f.Close()
-	_, err = io.Copy(cmd.OutOrStdout(), f)
+	_, err = io.Copy(fetchStdout(cmd), f)
 	return err
+}
+
+// fetchStdout is where --stdout writes the file: the command's own writer when
+// a caller set one (tests), else the real stdout, bypassing the ANSI-stripping
+// pipe that would otherwise read binary bytes as escape sequences and drop
+// them. Nothing else is printed to stdout on this path, so skipping the pipe
+// cannot reorder output.
+func fetchStdout(cmd *cobra.Command) io.Writer {
+	if out := cmd.OutOrStdout(); out != io.Writer(os.Stdout) {
+		return out
+	}
+	return binaryStdout
 }
 
 func cachedFetchDigestMatches(filename, oid string) bool {

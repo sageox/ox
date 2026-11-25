@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/parser"
 	"github.com/mattn/go-isatty"
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
@@ -34,14 +35,75 @@ import (
 const maxFrictionRetries = 1
 
 // ansiStripper wraps a writer and strips ANSI escape codes on Write.
+//
+// Writes arrive in arbitrary chunks (io.Copy hands over 32 KiB at a time), so a
+// multi-byte UTF-8 character or an escape sequence (a color, an OSC hyperlink,
+// a DCS string, ESC ( charset selection) can straddle two Writes. ansi.Strip
+// starts every call from the parser's ground state, which turned a split
+// character into U+FFFD and leaked an escape's tail as text. So this runs the
+// same state machine as ansi.Strip (charmbracelet/x/ansi width.go) but keeps
+// its state between Writes. Text bytes pass straight through and escape
+// payloads are dropped as they arrive, so nothing is buffered across Writes.
 type ansiStripper struct {
-	w io.Writer
+	w      io.Writer
+	pstate parser.State // parser state carried into the next Write
+	ri, rw int          // bytes seen / expected of the UTF-8 rune in progress
+	out    bytes.Buffer // reused per Write
 }
 
 func (s *ansiStripper) Write(p []byte) (int, error) {
-	_, err := s.w.Write([]byte(ansi.Strip(string(p))))
+	s.out.Reset()
+	for _, c := range p {
+		if s.pstate == parser.Utf8State {
+			s.out.WriteByte(c)
+			s.ri++
+			if s.ri < s.rw {
+				continue
+			}
+			s.pstate, s.ri, s.rw = parser.GroundState, 0, 0
+			continue
+		}
+		state, action := parser.Table.Transition(s.pstate, c)
+		switch action {
+		case parser.CollectAction:
+			if state == parser.Utf8State {
+				s.rw = utf8ByteLen(c)
+				s.out.WriteByte(c)
+				s.ri++
+			}
+		case parser.PrintAction, parser.ExecuteAction:
+			s.out.WriteByte(c)
+		}
+		s.pstate = state
+	}
+	if s.out.Len() == 0 {
+		return len(p), nil
+	}
+	_, err := s.w.Write(s.out.Bytes())
 	return len(p), err // report original length to caller
 }
+
+// utf8ByteLen is the sequence length a UTF-8 lead byte announces (-1 when b
+// cannot start one), matching the unexported helper ansi.Strip uses.
+func utf8ByteLen(b byte) int {
+	switch {
+	case b <= 0x7f:
+		return 1
+	case b >= 0xc0 && b <= 0xdf:
+		return 2
+	case b >= 0xe0 && b <= 0xef:
+		return 3
+	case b >= 0xf0 && b <= 0xf7:
+		return 4
+	}
+	return -1
+}
+
+// binaryStdout is the process's real stdout, never the ANSI-stripping pipe
+// below. Binary output (ox fetch --stdout) must go here: the stripper parses
+// its input as terminal text, so a stray ESC or C1 byte in a file would be
+// read as the start of an escape sequence and the bytes after it dropped.
+var binaryStdout io.Writer = os.Stdout
 
 // stdoutDone reports the copy result so main can fail if output was lost.
 var stdoutDone chan error
@@ -83,13 +145,14 @@ func init() {
 		pr, pw, err := os.Pipe()
 		if err == nil {
 			realStdout := os.Stdout
+			binaryStdout = realStdout
 			os.Stdout = pw
 
 			stdoutDone = make(chan error, 1)
 			go func() {
 				// Keep Go's default SIGPIPE behavior for early-closing consumers
 				// such as head; other write errors are reported by main.
-				_, err := io.Copy(&ansiStripper{realStdout}, pr)
+				_, err := io.Copy(&ansiStripper{w: realStdout}, pr)
 				// Unblock a producer still writing after the destination failed.
 				_ = pr.Close()
 				stdoutDone <- err
@@ -106,7 +169,7 @@ func init() {
 			go func() {
 				defer stderrWg.Done()
 				defer pr.Close()
-				io.Copy(&ansiStripper{realStderr}, pr) //nolint:errcheck // best-effort
+				io.Copy(&ansiStripper{w: realStderr}, pr) //nolint:errcheck // best-effort
 			}()
 		}
 	}

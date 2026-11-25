@@ -116,7 +116,7 @@ const ACCOUNT = 'local';
 
   // The live-reload stream. A page that names the revision it shows, and
   // itself, is also in the plan's presence room while the stream is open;
-  // its pointer goes to /presence under the same name.
+  // its pointer and selection go to /presence under the same name.
   const revision = body.getAttribute('data-review-revision') || '';
   const key = newId();
   let es: EventSource | null = null;
@@ -137,8 +137,8 @@ const ACCOUNT = 'local';
       return {
         // a pointer that cannot reach the server is dropped: the stream's
         // own error already says the server is gone
-        move(at) {
-          return fetch(base + '/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify({ key, at }) }).catch(() => {});
+        move(at, sel) {
+          return fetch(base + '/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify({ key, at, sel }) }).catch(() => {});
         },
         leave() { /* the stream's end leaves the room */ },
       };
