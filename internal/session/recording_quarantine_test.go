@@ -293,3 +293,45 @@ func TestLoadQuarantinedRecordingNamed_OnlyFromCachesOxWrites(t *testing.T) {
 		t.Fatalf("a marker claiming another folder must be skipped: %+v, %v", found, err)
 	}
 }
+
+// An unnamed release or abort lists the agent's quarantined recordings. The
+// list must apply the trust rule a named lookup does, so a marker planted in
+// the in-repo legacy folder, or one claiming another folder, is never offered.
+func TestLoadQuarantinedRecordingsForAgent_OnlyFromCachesOxWrites(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	state, err := StartRecording(project, StartRecordingOptions{AgentID: "OxListed", AdapterName: "claude-code", Username: "testuser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SourceRejected = true
+	if err := SaveRecordingState(project, state); err != nil {
+		t.Fatal(err)
+	}
+	forge := func(dir, sessionPath string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		forged := *state
+		forged.SessionPath = sessionPath
+		forged.StartedAt = state.StartedAt.Add(time.Hour)
+		data, err := json.Marshal(forged)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, recordingFile), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := filepath.Join(project, "sessions", "2001-02-03T04-05-testuser-OxListed")
+	forge(legacy, legacy)
+	forge(filepath.Join(filepath.Dir(state.SessionPath), "2001-02-03T04-06-testuser-OxListed"), legacy)
+
+	held, err := LoadQuarantinedRecordingsForAgent(project, "OxListed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 1 || held[0].SessionPath != state.SessionPath {
+		t.Fatalf("only the cache recording may be listed, got %d: %+v", len(held), held)
+	}
+}

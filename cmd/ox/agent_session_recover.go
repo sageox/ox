@@ -84,6 +84,10 @@ func recheckQuarantinedSource(projectRoot string, state *session.RecordingState)
 	return nil
 }
 
+// loadQuarantinedForAgent lists an agent's quarantined recordings; tests
+// replace it to change what is on disk between two reads.
+var loadQuarantinedForAgent = session.LoadQuarantinedRecordingsForAgent
+
 // releaseAndRecover re-checks a quarantined recording and, only if the check
 // passes, recovers that recording. Its persisted quarantine stays in place
 // until recovery clears the recording, keeping it out of active lookups.
@@ -98,12 +102,8 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot, sessionName st
 			return err
 		}
 		state = named
-		if state.AgentID != inst.AgentID {
-			// recovery records the session under the agent that made it
-			inst = &agentinstance.Instance{AgentID: state.AgentID}
-		}
 	} else {
-		held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID)
+		held, err := loadQuarantinedForAgent(projectRoot, inst.AgentID)
 		if err != nil {
 			return fmt.Errorf("no recording state found: %w", err)
 		}
@@ -111,6 +111,15 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot, sessionName st
 			return fmt.Errorf("no quarantined recording to release for agent %s", inst.AgentID)
 		}
 		state = held[0] // newest; 'ox doctor' lists every one
+	}
+	return releaseRecording(inst, projectRoot, state)
+}
+
+// releaseRecording re-checks and recovers the quarantined recording state, the
+// one its caller selected, under the agent that made it.
+func releaseRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	if state.AgentID != inst.AgentID {
+		inst = &agentinstance.Instance{AgentID: state.AgentID}
 	}
 	if err := recheckQuarantinedSource(projectRoot, state); err != nil {
 		return err
@@ -158,14 +167,14 @@ func runForExpiredQuarantineOwner(cmd *cobra.Command, agentID string, args []str
 	}
 	inst := &agentinstance.Instance{AgentID: agentID}
 	if sessionName == "" {
-		held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID)
+		held, err := loadQuarantinedForAgent(projectRoot, agentID)
 		if err != nil || len(held) == 0 {
 			return false, nil
 		}
 		if len(held) > 1 {
 			return true, fmt.Errorf("agent %s has %d quarantined recordings; name the one to release: ox agent %s session recover --release-quarantine <session>\nRun 'ox doctor' to list them", agentID, len(held), agentID)
 		}
-		return true, releaseAndRecover(inst, projectRoot, "")
+		return true, releaseRecording(inst, projectRoot, held[0])
 	}
 	// only the agent's own quarantined recording, never another session that
 	// shares the name

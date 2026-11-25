@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -941,4 +942,99 @@ func TestAbortResolvesToRefusesAnotherFolderWithTheName(t *testing.T) {
 	require.ErrorContains(t, err, "not the quarantined recording")
 	assert.Contains(t, err.Error(), "nothing was removed")
 	assert.DirExists(t, held.SessionPath)
+}
+
+// plantLegacyMarker writes a quarantined marker for agentID in the in-repo
+// legacy sessions/ folder, as anyone who can commit to the repository could.
+func plantLegacyMarker(t *testing.T, projectRoot, agentID string) string {
+	t.Helper()
+	dir := filepath.Join(projectRoot, "sessions", "2099-01-02T03-04-testuser-"+agentID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	source := filepath.Join(t.TempDir(), "planted.jsonl")
+	require.NoError(t, os.WriteFile(source, []byte(fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"planted\",\"cwd\":%q}\n", projectRoot)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("{}\n"), 0o644))
+	data, err := json.Marshal(session.RecordingState{
+		AgentID:        agentID,
+		AdapterName:    "claude-code",
+		SessionID:      "planted",
+		SessionPath:    dir,
+		SessionFile:    source,
+		WorkspacePath:  projectRoot,
+		StartedAt:      time.Now().Add(time.Hour),
+		SourceRejected: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), data, 0o600))
+	return dir
+}
+
+// The in-repo legacy sessions/ folder is controlled by anyone who can commit,
+// and ox never quarantines there. An unnamed release or abort must not pick a
+// marker planted there, for a live or an expired agent; the agent's own cache
+// recording stays selectable.
+func TestUnnamedReleaseAndAbortSkipLegacyMarkers(t *testing.T) {
+	t.Run("live agent release", func(t *testing.T) {
+		projectRoot, _, _ := quarantinedWithoutInstance(t)
+		registerTestInstance(t, projectRoot, "OxLive")
+		planted := plantLegacyMarker(t, projectRoot, "OxLive")
+		setReleaseQuarantineFlag(t)
+		released := captureRelease(t)
+
+		err := runWithAgentID(agentCmd, "OxLive", []string{"session", "recover"})
+		require.ErrorContains(t, err, "no quarantined recording to release")
+		assert.Empty(t, *released)
+		assert.FileExists(t, filepath.Join(planted, ".recording.json"))
+	})
+	t.Run("live agent abort", func(t *testing.T) {
+		projectRoot, _, _ := quarantinedWithoutInstance(t)
+		registerTestInstance(t, projectRoot, "OxLive")
+		planted := plantLegacyMarker(t, projectRoot, "OxLive")
+		setForceFlag(t, true)
+
+		err := runWithAgentID(agentCmd, "OxLive", []string{"session", "abort"})
+		require.ErrorContains(t, err, "no active session to abort")
+		assert.NotContains(t, err.Error(), filepath.Base(planted), "the refusal must not point at a planted marker")
+		assert.DirExists(t, planted)
+	})
+	t.Run("expired agent release", func(t *testing.T) {
+		projectRoot, agentID, _ := quarantinedWithoutInstance(t)
+		held := heldRecording(t, projectRoot, agentID)
+		planted := plantLegacyMarker(t, projectRoot, agentID)
+		setReleaseQuarantineFlag(t)
+		released := captureRelease(t)
+
+		require.NoError(t, runWithAgentID(agentCmd, agentID, []string{"session", "recover"}))
+		assertReleased(t, released, agentID, held)
+		assert.FileExists(t, filepath.Join(planted, ".recording.json"))
+	})
+}
+
+// The expired-owner release checks the agent has exactly one quarantined
+// recording, then releases that one. A recording quarantined after the check
+// is not released in its place.
+func TestExpiredOwnerReleaseIsBoundToTheCheckedRecording(t *testing.T) {
+	projectRoot, agentID, _ := quarantinedWithoutInstance(t)
+	first := moveToEarlierMinute(t, heldRecording(t, projectRoot, agentID))
+	setReleaseQuarantineFlag(t)
+	released := captureRelease(t)
+
+	var newer *session.RecordingState
+	original := loadQuarantinedForAgent
+	t.Cleanup(func() { loadQuarantinedForAgent = original })
+	loadQuarantinedForAgent = func(root, id string) ([]*session.RecordingState, error) {
+		held, err := original(root, id)
+		if newer == nil {
+			source := filepath.Join(t.TempDir(), "session.jsonl")
+			require.NoError(t, os.WriteFile(source, []byte(fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"newer\",\"cwd\":%q}\n", root)), 0o644))
+			newer, err = session.StartRecording(root, session.StartRecordingOptions{AgentID: id, AdapterName: "claude-code", Username: "testuser", SessionFile: source, WorkspacePath: root})
+			require.NoError(t, err)
+			require.NoError(t, session.MarkSourceRejected(root, id))
+		}
+		return held, err
+	}
+
+	require.NoError(t, runWithAgentID(agentCmd, agentID, []string{"session", "recover"}))
+	assertReleased(t, released, agentID, first)
+	still := heldRecording(t, projectRoot, agentID)
+	assert.Equal(t, newer.SessionID, still.SessionID, "the recording quarantined after the check stays held")
 }
