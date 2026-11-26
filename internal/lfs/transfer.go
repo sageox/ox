@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/useragent"
@@ -72,26 +70,7 @@ func validateActionHref(action *Action) error {
 	}
 	u, err := url.Parse(action.Href)
 	if err != nil {
-		if action.readClient != nil {
-			return fmt.Errorf("validate read action: invalid URL")
-		}
 		return fmt.Errorf("validate action: parse href: %w", err)
-	}
-	if c := action.readClient; c != nil {
-		if u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-			return fmt.Errorf("validate read action: HTTPS URL without userinfo or fragment required")
-		}
-		if strings.EqualFold(u.Host, action.TrustedHost) {
-			if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, action.Href); err != nil {
-				return err
-			}
-			if action.Href != c.readURL+"/info/lfs/objects/"+action.readOID {
-				return fmt.Errorf("validate read action: object URL does not match requested object")
-			}
-		}
-		// External HTTPS actions carry only their storage signature, never headers
-		// from the batch response. The server bounds the signature's actual expiry.
-		return nil
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && !isLoopbackHost(u.Hostname()) {
@@ -110,29 +89,8 @@ func validateActionHref(action *Action) error {
 	return nil
 }
 
-// setRequestHeaders keeps direct-Git headers compatible while confining the
-// selected TAT to authenticated object URLs beneath the discovered resource.
+// setRequestHeaders copies the batch response's headers for the action onto req.
 func (action *Action) setRequestHeaders(req *http.Request) error {
-	if c := action.readClient; c != nil {
-		if req.Method != http.MethodGet {
-			return fmt.Errorf("read-only LFS action cannot upload or verify")
-		}
-		token, err := auth.CurrentReadToken(c.readEndpoint)
-		if err != nil {
-			return err
-		}
-		href, err := url.QueryUnescape(req.URL.String())
-		if err != nil {
-			return fmt.Errorf("validate read action: invalid URL encoding")
-		}
-		if strings.Contains(href, token) || strings.Contains(href, base64.StdEncoding.EncodeToString([]byte("ox:"+token))) {
-			return fmt.Errorf("validate read action: credential-bearing URL refused")
-		}
-		if strings.EqualFold(req.URL.Host, action.TrustedHost) {
-			req.SetBasicAuth("ox", token)
-		}
-		return nil
-	}
 	for k, v := range action.Header {
 		req.Header.Set(k, v)
 	}
@@ -361,17 +319,11 @@ func DownloadObject(action *Action) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		if action.readClient != nil {
-			err = withoutURL(err) // signed storage URLs are credentials too
-		}
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if action.readClient != nil {
-			return nil, newHTTPError(resp)
-		}
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -380,10 +332,6 @@ func DownloadObject(action *Action) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read download body: %w", err)
 	}
-	if action.readClient != nil && ComputeOID(data) != action.readOID {
-		return nil, fmt.Errorf("download %w", ErrOIDMismatch)
-	}
-
 	return data, nil
 }
 
@@ -421,13 +369,6 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 		return fmt.Errorf("download: %w", err)
 	}
 
-	if action.readClient != nil {
-		verify = true
-		if expectedOID != "" && strings.TrimPrefix(expectedOID, "sha256:") != action.readOID {
-			return fmt.Errorf("download action does not match expected OID")
-		}
-		expectedOID = action.readOID
-	}
 	req, err := http.NewRequestWithContext(ctx, "GET", action.Href, nil)
 	if err != nil {
 		return fmt.Errorf("create download request: %w", err)
@@ -439,17 +380,11 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 
 	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
-		if action.readClient != nil {
-			err = withoutURL(err) // signed storage URLs are credentials too
-		}
 		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if action.readClient != nil {
-			return newHTTPError(resp)
-		}
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
 	}

@@ -377,9 +377,9 @@ var paletteCommand = regexp.MustCompile(`\box( [a-z][a-z0-9-]*)+( --[a-z][a-z-]*
 
 // TestUICatalogModal_PaletteCommandsResolve checks the command palette shown in
 // the design catalog against the real command tree.
-// Failure prevented: the catalog teaches `ox sync --read-only` (or any palette
-// row) after the command or flag was renamed, and the next component author
-// copies a command that no longer works.
+// Failure prevented: the catalog teaches a palette row after its command or
+// flag was renamed or removed, and the next component author copies a command
+// that no longer works.
 func TestUICatalogModal_PaletteCommandsResolve(t *testing.T) {
 	entry, ok := uicatalog.Get("modal")
 	require.True(t, ok)

@@ -36,13 +36,6 @@ Examples:
   ox sync --team acme  # sync specific team context
   ox sync --all-teams  # sync all team contexts
 
-Headless read-only mode runs a bounded ledger refresh without the daemon:
-  ox sync --read-only --repo repo_\<uuid> --timeout 30m --json
-  ox sync --read-only --repo repo_\<uuid> --check --json
-
-Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. See docs/specs/ledger-read-sync.md for the reader contract.
-
 ```
 ox sync [flags]
 ```
@@ -51,13 +44,9 @@ ox sync [flags]
 
 ```
       --all-teams            sync all configured team contexts
-      --check                check local read-only readiness without contacting the server
   -h, --help                 help for sync
-      --read-only            refresh one ledger using the selected team token, without the daemon
       --remove-team string   remove a team context (clears config and optionally deletes repo)
-      --repo string          repository ID for --read-only (repo_<uuid>)
       --team string          sync a specific team context by ID
-      --timeout duration     maximum duration of a read-only operation, including lock wait and hydration (default 30m0s)
 ```
 
 ### Options inherited from parent commands

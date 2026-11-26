@@ -118,7 +118,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			gitRoot := t.TempDir()
 			ledger := filepath.Join(gitRoot, "ledger.git")
 			initBareRemote(t, ledger)
-			backend := &cgi.Handler{Path: filepath.Join(hostedTestGit(t, gitRoot, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"}}
+			backend := &cgi.Handler{Path: filepath.Join(hermeticGit(t, gitRoot, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"}}
 			var calls, oldProbes, freshProbes atomic.Int32
 			var rejectPAT atomic.Bool
 			var repos api.ReposResponse
@@ -158,12 +158,12 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			}
 			setupAuthRenderEnv(t, srv.URL, bearer)
 			root := createInitializedProjectWithConfig(t, nil)
-			hostedTestGit(t, root, "init")
+			hermeticGit(t, root, "init")
 			t.Chdir(root)
 			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 			t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 			const oldURL = "https://oauth2:doctor-pat@127.0.0.1/ledger.git"
-			hostedTestGit(t, ledger, "remote", "add", "origin", oldURL)
+			hermeticGit(t, ledger, "remote", "add", "origin", oldURL)
 			require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledger}}))
 			repos = api.ReposResponse{Token: "doctor-pat", ServerURL: srv.URL, ExpiresAt: time.Now().Add(24 * time.Hour), Repos: map[string]api.RepoInfo{"team_test": {Type: "team-context", TeamID: "team_test", URL: srv.URL + "/ledger.git"}}}
 			require.NoError(t, saveGitCredentialsFromRepos(&repos, srv.URL, "previous-bearer"))
@@ -188,19 +188,19 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 				assert.False(t, checkGitPATLiveness(false).passed)
 				for _, repair := range []func() checkResult{checkGitCredentials, func() checkResult { return checkGitCredentialsFreshness(true) }, func() checkResult { return checkGitPATLiveness(true) }} {
 					require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, *cached))
-					hostedTestGit(t, ledger, "remote", "set-url", "origin", oldURL)
+					hermeticGit(t, ledger, "remote", "set-url", "origin", oldURL)
 					result := repair()
 					assert.Equal(t, outcome == "repaired", result.passed && !result.warning)
 					stored, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
 					require.NoError(t, err)
 					if outcome == "repaired" {
 						assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), stored.BearerTokenHash)
-						assert.Equal(t, "https://127.0.0.1/ledger.git", hostedTestGit(t, ledger, "remote", "get-url", "origin"))
-						assert.Contains(t, hostedTestGit(t, ledger, "config", "--get", "credential.https://127.0.0.1.helper"), "git-credential-helper")
+						assert.Equal(t, "https://127.0.0.1/ledger.git", hermeticGit(t, ledger, "remote", "get-url", "origin"))
+						assert.Contains(t, hermeticGit(t, ledger, "config", "--get", "credential.https://127.0.0.1.helper"), "git-credential-helper")
 					} else {
 						assert.Contains(t, result.detail, "Rotate or re-mint")
 						assert.Equal(t, cached, stored)
-						assert.Equal(t, oldURL, hostedTestGit(t, ledger, "remote", "get-url", "origin"))
+						assert.Equal(t, oldURL, hermeticGit(t, ledger, "remote", "get-url", "origin"))
 					}
 				}
 				assert.EqualValues(t, 3, calls.Load())
