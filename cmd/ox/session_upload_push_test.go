@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -644,6 +645,11 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 func TestPushLedger_LockHeldByAnotherProcessIsNamed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: waits out the 2m repo lock timeout")
+	}
+	if runtime.GOOS == "windows" {
+		// fileutil.tryFlock is a no-op on Windows, so a lock held by another
+		// process cannot block this one there; the claim does not hold.
+		t.Skip("windows: the repo lock is in-process only")
 	}
 	barePath, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)
