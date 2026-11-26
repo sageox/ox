@@ -750,7 +750,6 @@ func LoadQuarantinedRecordingNamed(projectRoot, name string) (*RecordingState, e
 	return found, err
 }
 
-// samePath reports whether a and b name the same existing file or directory.
 // trustedQuarantineMarker reports whether a quarantined marker found in dir
 // may be released or discarded: it lives in a cache ox writes, not the in-repo
 // legacy sessions/ folder anyone who can commit controls, and its SessionPath
@@ -762,6 +761,7 @@ func trustedQuarantineMarker(projectRoot, dir string, state *RecordingState) boo
 	return samePath(dir, state.SessionPath)
 }
 
+// samePath reports whether a and b name the same existing file or directory.
 func samePath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
