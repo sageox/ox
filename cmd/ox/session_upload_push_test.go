@@ -9,7 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -630,4 +632,43 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	require.Error(t, err, "should error when session dir exists but has no files to commit")
 	assert.Contains(t, err.Error(), "git add failed",
 		"error should indicate files were missing for git add")
+}
+
+// A push that never got the Ledger lock says so, instead of reading as a slow
+// secret scan.
+// Failure prevented: with the daemon holding the lock, every push failed with
+// a bare "context deadline exceeded" under secret_gate, which sent the coworker
+// hunting for a scan-budget bug while the real fix was to stop the daemon.
+func TestPushLedger_LockHeldByAnotherProcessIsNamed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the 2m repo lock timeout")
+	}
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	sessionName := "2026-01-01T00-00-testuser-OxLock1"
+	writeSessionFiles(t, clonePath, sessionName)
+	runGit(t, clonePath, "add", filepath.Join(clonePath, "sessions"))
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "session: "+sessionName)
+
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- gitutil.WithRepoLock(context.Background(), clonePath, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := pushLedger(ctx, clonePath)
+	close(release)
+	require.NoError(t, <-done)
+
+	require.ErrorIs(t, err, errLedgerLockBusy)
+	assert.Equal(t, 1, commitCount(t, cloneBare(t, barePath)), "nothing reaches the remote without the lock")
+
+	require.NoError(t, pushLedger(context.Background(), clonePath), "the push succeeds once the lock is free")
+	assert.Equal(t, 2, commitCount(t, cloneBare(t, barePath)))
 }
