@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -630,4 +635,66 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	require.Error(t, err, "should error when session dir exists but has no files to commit")
 	assert.Contains(t, err.Error(), "git add failed",
 		"error should indicate files were missing for git add")
+}
+
+// A push that never got the Ledger lock says so, instead of reading as a slow
+// secret scan.
+// Failure prevented: with the daemon holding the lock, every push failed with
+// a bare "context deadline exceeded" under secret_gate, which sent the coworker
+// hunting for a scan-budget bug while the real fix was to stop the daemon.
+func TestPushLedger_LockHeldByAnotherProcessIsNamed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the 2m repo lock timeout")
+	}
+	if runtime.GOOS == "windows" {
+		// fileutil.tryFlock is a no-op on Windows, so a lock held by another
+		// process cannot block this one there; the claim does not hold.
+		t.Skip("windows: the repo lock is in-process only")
+	}
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	sessionName := "2026-01-01T00-00-testuser-OxLock1"
+	writeSessionFiles(t, clonePath, sessionName)
+	runGit(t, clonePath, "add", filepath.Join(clonePath, "sessions"))
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "session: "+sessionName)
+
+	// The lock holder is a separate process, as the daemon was: the in-process
+	// gate in fileutil must not be what makes this pass.
+	holder := exec.Command(os.Args[0], "-test.run=^TestHelperHoldRepoLock$")
+	holder.Env = append(os.Environ(), "OX_TEST_HOLD_REPO_LOCK="+clonePath) // safe: re-execs this test binary with the test's isolated env, not ox
+	stdin, err := holder.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := holder.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, holder.Start())
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "held\n", line, "the subprocess must hold the lock before the push starts")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err = pushLedger(ctx, clonePath)
+	require.NoError(t, stdin.Close(), "release the subprocess lock")
+	require.NoError(t, holder.Wait())
+
+	require.ErrorIs(t, err, errLedgerLockBusy)
+	assert.Equal(t, 1, commitCount(t, cloneBare(t, barePath)), "nothing reaches the remote without the lock")
+
+	require.NoError(t, pushLedger(context.Background(), clonePath), "the push succeeds once the lock is free")
+	assert.Equal(t, 2, commitCount(t, cloneBare(t, barePath)))
+}
+
+// TestHelperHoldRepoLock is the lock-holding subprocess for
+// TestPushLedger_LockHeldByAnotherProcessIsNamed; it does nothing otherwise.
+func TestHelperHoldRepoLock(t *testing.T) {
+	repo := os.Getenv("OX_TEST_HOLD_REPO_LOCK")
+	if repo == "" {
+		t.Skip("helper process only")
+	}
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), repo, func() error {
+		fmt.Println("held")
+		_, _ = io.Copy(io.Discard, os.Stdin) // hold until the parent closes stdin
+		return nil
+	}))
 }
