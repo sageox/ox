@@ -636,6 +636,9 @@ func runInit() error {
 	if configResult == configCreated && !configExisted {
 		if configTarget != "" {
 			tracker.trackCreatedFile(configTarget)
+			// stageAll stages the link itself, so its index entry needs
+			// restoring even when the metadata update below never snapshots it
+			tracker.trackIndexEntry(configPath)
 		} else {
 			tracker.trackCreatedFile(configPath)
 		}
@@ -1852,6 +1855,7 @@ type initTracker struct {
 	createdDirs   []string          // absolute paths of newly created directories
 	modifiedFiles map[string][]byte // absolute path -> original content (for restore)
 	forceStage    []string          // absolute paths that need --force staging (may be gitignored)
+	indexOnly     []string          // absolute paths whose index entry rollback restores, file left alone
 	isFreshInit   bool              // true if .sageox/ didn't exist before
 
 	// indexEntries records each touched path's git INDEX entry as it was
@@ -1972,6 +1976,14 @@ func (t *initTracker) trackModifiedFile(absPath string) {
 	if content, err := os.ReadFile(absPath); err == nil {
 		t.modifiedFiles[absPath] = content
 	}
+}
+
+// trackIndexEntry records a path whose index entry rollback must put back
+// without restoring or removing the file itself, such as a config symlink
+// init wrote through.
+func (t *initTracker) trackIndexEntry(absPath string) {
+	t.snapshotIndexEntry(absPath)
+	t.indexOnly = append(t.indexOnly, absPath)
 }
 
 // trackForceStage records a file that needs --force to stage (may be gitignored).
@@ -2126,9 +2138,10 @@ func (t *initTracker) unstageAll(quiet bool) {
 
 	var paths []string
 	seen := make(map[string]bool)
-	for _, p := range slices.Concat(t.createdFiles, t.forceStage, slices.Collect(maps.Keys(t.modifiedFiles))) {
+	for _, p := range slices.Concat(t.createdFiles, t.forceStage, t.indexOnly, slices.Collect(maps.Keys(t.modifiedFiles))) {
 		rel, err := filepath.Rel(t.gitRoot, p)
-		if err != nil || seen[rel] {
+		// a symlink target outside the repo has no index entry to reset
+		if err != nil || seen[rel] || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
 		seen[rel] = true

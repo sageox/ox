@@ -161,9 +161,11 @@ func TestRunInit_RefusedRegistrationLeavesCommittedSageoxFilesAlone(t *testing.T
 	}
 }
 
-// A committed config.json symlink whose target is missing: init writes the
-// default config through the link, so a refused registration has to remove the
-// file it created and keep the user's link, not the other way round.
+// A config.json symlink whose target is missing: init writes the default config
+// through the link, so a refused registration has to remove the file it created
+// and keep the user's link, not the other way round. The staged link points
+// somewhere else than the working-tree one, and rollback must put that staged
+// version back rather than leave init's `git add` of the link in the index.
 func TestRunInit_RefusedRegistrationKeepsDanglingConfigSymlink(t *testing.T) {
 	env := newOxE2E(t)
 	withInitFlags(t, env.TeamID)
@@ -182,11 +184,16 @@ func TestRunInit_RefusedRegistrationKeepsDanglingConfigSymlink(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".sageox"), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, "settings"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(env.Root, "settings", "README"), []byte("shared settings\n"), 0o644))
+	git("add", "settings/README")
+	git("commit", "-qm", "add shared settings")
+
 	linkPath := filepath.Join(env.Root, ".sageox", "config.json")
-	targetPath := filepath.Join(env.Root, "settings", "project.json")
-	require.NoError(t, os.Symlink("../settings/project.json", linkPath))
-	git("add", "-f", ".sageox/config.json", "settings/README")
-	git("commit", "-qm", "link SageOx config to shared settings")
+	targetPath := filepath.Join(env.Root, "settings", "local.json")
+	require.NoError(t, os.Symlink("../settings/staged.json", linkPath))
+	git("add", "-f", ".sageox/config.json")
+	require.NoError(t, os.Remove(linkPath))
+	require.NoError(t, os.Symlink("../settings/local.json", linkPath))
+	stagedBefore := git("ls-files", "--stage", "--", ".sageox/config.json")
 
 	err := runInit()
 	require.Error(t, err)
@@ -194,10 +201,12 @@ func TestRunInit_RefusedRegistrationKeepsDanglingConfigSymlink(t *testing.T) {
 
 	dest, linkErr := os.Readlink(linkPath)
 	require.NoError(t, linkErr, "a refused init must keep the config symlink")
-	assert.Equal(t, "../settings/project.json", dest)
+	assert.Equal(t, "../settings/local.json", dest)
 	assert.NoFileExists(t, targetPath, "a refused init must remove the config it wrote through the link")
-	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/config.json", "settings"),
-		"a refused init must leave the link and its directory as committed")
+	assert.Equal(t, stagedBefore, git("ls-files", "--stage", "--", ".sageox/config.json"),
+		"a refused init must put the staged link back, not leave its own git add of the link")
+	assert.Empty(t, git("status", "--porcelain", "--", "settings"),
+		"a refused init must leave the link's directory as committed")
 }
 
 // withInitFlags sets runInit's package-level flag vars and restores them, so a
