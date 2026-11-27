@@ -375,9 +375,6 @@ func (m configModel) View() tea.View {
 func (m configModel) mainView(width int) string {
 	innerWidth := width - 4 // account for border padding
 
-	// Build settings list section
-	settingsList := m.buildSettingsList(innerWidth)
-
 	// Build detail panel for selected item
 	detailPanel := m.buildDetailPanel(innerWidth)
 
@@ -393,12 +390,29 @@ func (m configModel) mainView(width int) string {
 		help = successStyle.Render("✓ saved") + "  " + help
 	}
 
-	content := fmt.Sprintf("%s\n%s\n%s\n\n%s",
-		settingsList,
-		divider,
-		detailPanel,
-		helpStyle.Render(help),
-	)
+	renderedHelp := helpStyle.Render(help)
+	helpHeight := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(renderedHelp))
+
+	// Calculate available vertical rows for the settings list
+	maxListRows, showDetail := m.maxSettingsListRows(innerWidth, detailPanel, helpHeight)
+
+	// Build settings list section (windowed if maxListRows > 0)
+	settingsList := m.buildSettingsListWithLimit(innerWidth, maxListRows)
+
+	var content string
+	if showDetail {
+		content = fmt.Sprintf("%s\n%s\n%s\n\n%s",
+			settingsList,
+			divider,
+			detailPanel,
+			renderedHelp,
+		)
+	} else {
+		content = fmt.Sprintf("%s\n\n%s",
+			settingsList,
+			renderedHelp,
+		)
+	}
 
 	// Wrap in frame
 	frame := frameStyle.Width(width - 2).Render(content)
@@ -413,14 +427,106 @@ func (m configModel) mainView(width int) string {
 			lines[0] = firstLine[:2] + title + firstLine[2+len(title):]
 		}
 	}
+	if m.height > 0 && len(lines) > m.height {
+		lastLine := lines[len(lines)-1]
+		lines = append(lines[:m.height-1], lastLine)
+	}
 
 	return strings.Join(lines, "\n")
 }
 
-func (m configModel) buildSettingsList(width int) string {
-	var b strings.Builder
+func (m configModel) maxSettingsListRows(innerWidth int, detailPanel string, helpHeight int) (maxRows int, showDetail bool) {
+	if m.height <= 0 {
+		return 0, true
+	}
+	if helpHeight < 1 {
+		helpHeight = 1
+	}
+	detailHeight := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(detailPanel))
+	// Frame borders (2) + divider (1) + blank before help (1) + help + layout padding (2) + detail panel
+	nonListRows := 2 + 1 + 1 + helpHeight + 2 + detailHeight
+	if avail := m.height - nonListRows; avail >= 4 {
+		return avail, true
+	}
+	// Not enough vertical space for both the detail panel and a usable list:
+	// omit the detail panel and divider, keeping frame borders (2) + blank (1) + help.
+	avail := m.height - (2 + 1 + helpHeight)
+	if avail < 1 {
+		avail = 1
+	}
+	return avail, false
+}
 
-	// Track which display position we're at
+func (m configModel) buildSettingsList(width int) string {
+	maxRows := 0
+	if m.height > 0 {
+		detailPanel := m.buildDetailPanel(width)
+		maxRows, _ = m.maxSettingsListRows(width, detailPanel, 1)
+	}
+	return m.buildSettingsListWithLimit(width, maxRows)
+}
+
+func (m configModel) buildSettingsListWithLimit(width int, maxRows int) string {
+	lines, selectedLine := m.allSettingsLines(width)
+	if len(lines) == 0 {
+		return ""
+	}
+
+	if maxRows <= 0 || len(lines) <= maxRows {
+		return strings.Join(lines, "\n")
+	}
+
+	if maxRows < 3 {
+		maxRows = 3
+	}
+
+	upIndicator := detailMutedStyle.Render("  ↑ more")
+	downIndicator := detailMutedStyle.Render("  ↓ more")
+
+	var visible []string
+
+	if selectedLine < maxRows-1 {
+		// Case 1: Cursor near the top
+		end := maxRows - 1
+		if end > len(lines) {
+			end = len(lines)
+		}
+		visible = append(visible, lines[:end]...)
+		if end < len(lines) {
+			visible = append(visible, downIndicator)
+		}
+	} else if selectedLine >= len(lines)-(maxRows-1) {
+		// Case 2: Cursor near the bottom
+		start := len(lines) - (maxRows - 1)
+		if start < 0 {
+			start = 0
+		}
+		if start > 0 {
+			visible = append(visible, upIndicator)
+		}
+		visible = append(visible, lines[start:]...)
+	} else {
+		// Case 3: Cursor in the middle
+		contentSlots := maxRows - 2
+		start := selectedLine - contentSlots/2
+		if start < 1 {
+			start = 1
+		}
+		if start+contentSlots > len(lines)-1 {
+			start = len(lines) - 1 - contentSlots
+		}
+		end := start + contentSlots
+		visible = append(visible, upIndicator)
+		visible = append(visible, lines[start:end]...)
+		visible = append(visible, downIndicator)
+	}
+
+	return strings.Join(visible, "\n")
+}
+
+func (m configModel) allSettingsLines(width int) ([]string, int) {
+	var lines []string
+	selectedLine := -1
 	displayPos := 0
 
 	for _, cat := range m.catOrder {
@@ -430,8 +536,8 @@ func (m configModel) buildSettingsList(width int) string {
 		}
 
 		// Category header
-		b.WriteString(categoryStyle.Render(strings.ToUpper(cat)))
-		b.WriteString("\n")
+		catHeader := categoryStyle.Render(strings.ToUpper(cat))
+		lines = append(lines, strings.Split(catHeader, "\n")...)
 
 		// Settings in this category
 		for _, idx := range indices {
@@ -452,9 +558,23 @@ func (m configModel) buildSettingsList(width int) string {
 				keyText = settingKeyStyle.Render(keyText)
 			}
 
-			// Value with source indicator
-			valueText := item.value.Value
+			// Value with source indicator (flatten newlines and truncate long values so each row fits on one physical line)
+			valueText := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(item.value.Value)
 			sourceText := m.formatSourceArrow(item.value.Source)
+			if width > 0 {
+				keyWidth := lipgloss.Width(keyText)
+				if keyWidth < 26 {
+					keyWidth = 26
+				}
+				maxValWidth := width - (2 + keyWidth + 1 + 1 + lipgloss.Width(sourceText))
+				if maxValWidth >= 4 && lipgloss.Width(valueText) > maxValWidth {
+					runes := []rune(valueText)
+					for len(runes) > 0 && lipgloss.Width(string(runes)) > maxValWidth-1 {
+						runes = runes[:len(runes)-1]
+					}
+					valueText = string(runes) + "…"
+				}
+			}
 
 			var styledValue string
 			if item.value.Source == ConfigLevelDefault {
@@ -465,14 +585,18 @@ func (m configModel) buildSettingsList(width int) string {
 
 			// Format: cursor + key (padded) + value + source
 			row := fmt.Sprintf("%s%-26s %s %s", cursor, keyText, styledValue, sourceText)
-			b.WriteString(row)
-			b.WriteString("\n")
-
+			if width > 0 {
+				row = lipgloss.NewStyle().MaxWidth(width).Render(row)
+			}
+			if isSelected {
+				selectedLine = len(lines)
+			}
+			lines = append(lines, row)
 			displayPos++
 		}
 	}
 
-	return b.String()
+	return lines, selectedLine
 }
 
 func (m configModel) formatSourceArrow(source ConfigLevel) string {
@@ -505,6 +629,20 @@ func (m configModel) buildDetailPanel(width int) string {
 	// Long description (wrap to width)
 	if item.setting.LongDescription != "" {
 		desc := m.wrapText(item.setting.LongDescription, width-2)
+		if m.height > 0 {
+			descLines := strings.Split(desc, "\n")
+			maxDescLines := 3
+			if m.height >= 35 {
+				maxDescLines = 6
+			}
+			if len(descLines) > maxDescLines {
+				descLines = descLines[:maxDescLines]
+				if len(descLines) > 0 {
+					descLines[len(descLines)-1] = "..."
+				}
+			}
+			desc = strings.Join(descLines, "\n")
+		}
 		b.WriteString(detailMutedStyle.Render(desc))
 		b.WriteString("\n\n")
 	}
@@ -622,14 +760,7 @@ func (m configModel) editView(width int) string {
 	b.WriteString(detailDescStyle.Render(item.setting.Description))
 	b.WriteString("\n\n")
 
-	// Description
-	if item.setting.LongDescription != "" {
-		desc := m.wrapText(item.setting.LongDescription, innerWidth-2)
-		b.WriteString(detailMutedStyle.Render(desc))
-		b.WriteString("\n\n")
-	}
-
-	// Scope selector (only for multi-level settings)
+	// Scope selector (only for multi-level settings) - positioned immediately below title
 	if len(item.setting.Levels) > 1 {
 		b.WriteString(chainHeaderStyle.Render("Scope:"))
 		b.WriteString("  ")
@@ -647,7 +778,7 @@ func (m configModel) editView(width int) string {
 		b.WriteString("\n\n")
 	}
 
-	// Value selection
+	// Value selection - positioned immediately below scope
 	b.WriteString(chainHeaderStyle.Render("Select value:"))
 	b.WriteString("\n")
 
@@ -718,6 +849,29 @@ func (m configModel) editView(width int) string {
 	}
 	b.WriteString(detailMutedStyle.Render("Sets " + levelLabel))
 	b.WriteString("\n\n")
+
+	// Extended LongDescription placed below interactive controls
+	if item.setting.LongDescription != "" {
+		desc := m.wrapText(item.setting.LongDescription, innerWidth-2)
+		if m.height > 0 {
+			usedLines := lipgloss.Height(lipgloss.NewStyle().Width(innerWidth).Render(b.String()))
+			avail := m.height - (usedLines + 4)
+			if avail > 0 {
+				descLines := strings.Split(desc, "\n")
+				if len(descLines) > avail {
+					descLines = descLines[:avail]
+					if len(descLines) > 0 {
+						descLines[len(descLines)-1] = "..."
+					}
+				}
+				b.WriteString(detailMutedStyle.Render(strings.Join(descLines, "\n")))
+				b.WriteString("\n\n")
+			}
+		} else {
+			b.WriteString(detailMutedStyle.Render(desc))
+			b.WriteString("\n\n")
+		}
+	}
 
 	helpText := "↑/↓ select • enter save • esc cancel"
 	if len(item.setting.Levels) > 1 {
