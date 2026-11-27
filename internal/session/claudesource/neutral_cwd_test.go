@@ -296,3 +296,39 @@ func TestInSharedNotesFolderRefusesAPathThroughADeadLink(t *testing.T) {
 		t.Errorf("InSharedNotesFolder(%q) refused the notes folder itself", notes)
 	}
 }
+
+// TestInSharedNotesFolderIsFalseWhenTheNotesRootCannotBeNamed: with no place
+// to look, no folder is vouched for, so the session stays on this machine.
+func TestInSharedNotesFolderIsFalseWhenTheNotesRootCannotBeNamed(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no per-user config directory", func(t *testing.T) {
+		// os.UserConfigDir reads a different variable on each OS
+		for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "AppData"} {
+			t.Setenv(name, "")
+		}
+		if root, err := sharedNotesRoot(); err == nil {
+			t.Fatalf("sharedNotesRoot() = %q, want an error with no config directory", root)
+		}
+		if InSharedNotesFolder(dir) {
+			t.Fatalf("InSharedNotesFolder(%q) = true with no config directory, want false", dir)
+		}
+	})
+
+	t.Run("a notes root that cannot be resolved", func(t *testing.T) {
+		loop := filepath.Join(dir, "loop")
+		if err := os.Symlink(loop, loop); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		prev := sharedNotesRoot
+		sharedNotesRoot = func() (string, error) { return loop, nil }
+		t.Cleanup(func() { sharedNotesRoot = prev })
+		inside := filepath.Join(loop, "local_1")
+		if InSharedNotesFolder(inside) {
+			t.Fatalf("InSharedNotesFolder(%q) = true under a root that is a link to itself, want false", inside)
+		}
+	})
+}
