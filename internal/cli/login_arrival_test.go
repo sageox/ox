@@ -112,9 +112,9 @@ func TestLoginArrival_Golden(t *testing.T) {
 }
 
 // TestLoginArrival_RendersBesideArt is the snapshot of the interactive
-// terminal's block: Oxy's picture on the left, the three lines level with the
+// terminal's block: the SageOx mark on the left, the three lines level with the
 // middle of the figure. The art here is a stand-in with a known shape; the real
-// picture is pinned in internal/pet.
+// mark is pinned in internal/ui.
 // Failure prevented: text landing on the wrong rows, or art rows of uneven width
 // shearing the block.
 func TestLoginArrival_RendersBesideArt(t *testing.T) {
@@ -133,4 +133,6 @@ func TestLoginArrival_RendersBesideArt(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80)
 	}
+	assert.Equal(t, 56, arrival.WidthBeside(art), "the widest row, art and gap included")
+	assert.Equal(t, 46, arrival.WidthBeside(nil), "the text alone")
 }

@@ -49,6 +49,9 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.SessionStreamingEnabled != nil {
 		f.SessionStreamingEnabled = *p.SessionStreamingEnabled
 	}
+	if p.NewLogoEnabled != nil {
+		f.NewLogoEnabled = *p.NewLogoEnabled
+	}
 	if p.DisableFileDeleteTools != nil {
 		f.DisableFileDeleteTools = *p.DisableFileDeleteTools
 	}

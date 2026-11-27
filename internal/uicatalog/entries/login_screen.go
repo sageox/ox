@@ -4,8 +4,8 @@ import (
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/pet"
 	"github.com/sageox/ox/internal/theme"
+	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/uicatalog"
 )
 
@@ -34,13 +34,11 @@ func init() {
 			returning := cli.NewLoginArrival("Person A", "person.a@company.test", "sageox.ai", true)
 			firstTime := cli.NewLoginArrival("Person A", "person.a@company.test", "sageox.ai", false)
 
-			// Oxy joins only a person at a color terminal; the catalog shows the
-			// same rule. Without color his picture would be solid blocks.
+			// The SageOx mark joins only a person at a color terminal; the
+			// catalog shows the same rule.
 			interactive := returning.Render(nil)
 			if theme.Profile >= colorprofile.ANSI256 {
-				if art, err := pet.TerminalFrame("confetti", 0.35, 6); err == nil {
-					interactive = returning.Render(art.Lines)
-				}
+				interactive = returning.Render(ui.RenderMark())
 			}
 
 			denied := cli.StyleError.Render("Error:") + " authentication failed: authorization was denied\n" +

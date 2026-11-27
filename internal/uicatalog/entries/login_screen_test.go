@@ -41,12 +41,12 @@ func TestLoginScreenReference(t *testing.T) {
 	}
 }
 
-// TestLoginScreenReference_ShowsOxyAtAColorTerminal verifies the catalog draws
-// Oxy beside the block when the terminal has color, the one audience `ox login`
-// draws him for, and still fits 80 columns with him there.
+// TestLoginScreenReference_ShowsTheMarkAtAColorTerminal verifies the catalog
+// draws the SageOx mark beside the block when the terminal has color, the one
+// audience `ox login` draws it for, and still fits 80 columns with it there.
 // Failure prevented: the catalog documenting a picture the command no longer
 // draws, or a picture that pushes the block past the terminal's edge.
-func TestLoginScreenReference_ShowsOxyAtAColorTerminal(t *testing.T) {
+func TestLoginScreenReference_ShowsTheMarkAtAColorTerminal(t *testing.T) {
 	prev := theme.Profile
 	theme.Profile = colorprofile.TrueColor
 	t.Cleanup(func() { theme.Profile = prev })
@@ -55,7 +55,7 @@ func TestLoginScreenReference_ShowsOxyAtAColorTerminal(t *testing.T) {
 	require.True(t, ok)
 	view := entry.Render()
 
-	assert.Contains(t, view, "▀", "Oxy's half-block picture")
+	assert.Contains(t, view, "⣿", "the SageOx mark, in braille")
 	assert.Contains(t, ansi.Strip(view), "Welcome back, Person (person.a@company.test)")
 	for _, line := range strings.Split(view, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80, line)
