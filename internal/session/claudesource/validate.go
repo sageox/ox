@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -33,6 +35,15 @@ var ErrSourceGone = errors.New("claude source file is gone")
 // place: Claude records canonical paths, so one with "..", "." or doubled
 // separators was not written by it.
 var errNonCanonicalCwd = errors.New("cwd is not in canonical form")
+
+// ForeignCwdReason is the text an ErrUntrustedSource carries when the session
+// worked somewhere that may hold another project's work. It survives the
+// adapter's process boundary as text, where errors.Is cannot follow it.
+const ForeignCwdReason = "cwd outside repo"
+
+// GoneCwdNote follows a ForeignCwdReason whose folder no longer exists, so a
+// coworker does not go looking for it. It is refused for where it stood.
+const GoneCwdNote = "which no longer exists"
 
 // Validate checks every complete native record before discovery or final upload.
 // A partial trailing record is left for the next read, like the native reader.
@@ -106,6 +117,9 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	}
 
 	seenCwd, seenID := false, false
+	// a shared notes folder says nothing about whose session this is, so it can
+	// only ride along with a session that also stood in the repo
+	neutralCwd := ""
 	// Claude Code writes a resumed or forked conversation to a new file named
 	// for its new session ID, and opens it with a copy of the conversation it
 	// continues, whose records keep the earlier session's ID. Another ID is
@@ -126,6 +140,7 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			Type      string          `json:"type"`
 			Cwd       json.RawMessage `json:"cwd"`
 			SessionID json.RawMessage `json:"sessionId"`
+			Timestamp json.RawMessage `json:"timestamp"`
 		}
 		if err := json.Unmarshal(line, &meta); err != nil {
 			// The adapter skips malformed JSON too. Rejecting the entire file
@@ -167,10 +182,18 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			}
 			switch verdict {
 			case cwdForeign:
-				ownershipErr = fmt.Errorf("%w: cwd outside repo", ErrUntrustedSource)
+				where := describeCwd(cwd, meta.Timestamp)
+				if _, statErr := os.Lstat(cwd); errors.Is(statErr, fs.ErrNotExist) {
+					where += ", " + GoneCwdNote
+				}
+				ownershipErr = fmt.Errorf("%w: %s: %s", ErrUntrustedSource, ForeignCwdReason, where)
 				return nil, nil
 			case cwdOwned:
 				seenCwd = true
+			case cwdNeutral:
+				if neutralCwd == "" {
+					neutralCwd = describeCwd(cwd, meta.Timestamp)
+				}
 			}
 		}
 		if (meta.Type == "user" || meta.Type == "assistant") && (cwd == "" || id == "") {
@@ -195,6 +218,9 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 		// or another session's file under this name: wait for a turn of its own
 		return fmt.Errorf("claude source holds only the conversation it continues")
 	}
+	if requireInitialIdentity && !seenCwd && neutralCwd != "" {
+		return fmt.Errorf("%w: %s: %s, and never in the repo", ErrUntrustedSource, ForeignCwdReason, neutralCwd)
+	}
 	if requireInitialIdentity && (!seenCwd || (sessionID != "" && !seenID)) {
 		return fmt.Errorf("claude source has invalid or missing repository metadata")
 	}
@@ -207,7 +233,21 @@ const (
 	cwdUnknown cwdVerdict = iota
 	cwdOwned
 	cwdForeign
+	cwdNeutral // a shared notes folder: it is no project, so it holds no one else's work
 )
+
+// describeCwd names a cwd and, when the record carries a valid one, when the
+// session first stood there, so a coworker can find the turn in the transcript.
+// Both reach a terminal, so neither is printed raw.
+func describeCwd(cwd string, timestamp json.RawMessage) string {
+	var stamp string
+	_ = json.Unmarshal(timestamp, &stamp)
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return strconv.Quote(cwd)
+	}
+	return fmt.Sprintf("%q (first at %s)", cwd, at.Format(time.RFC3339Nano))
+}
 
 // judgeCwd decides whether a directory a session visited lies inside the repo.
 // The error is set only for cwdUnknown.
@@ -232,7 +272,80 @@ func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
 	if inside {
 		return cwdOwned, nil
 	}
+	if InSharedNotesFolder(resolved) {
+		return cwdNeutral, nil
+	}
 	return cwdForeign, nil
+}
+
+// projectMarkers name what makes a directory a project of its own: a git
+// checkout of any kind, or an initialized Ox project.
+var projectMarkers = []string{".git", filepath.Join(".sageox", "config.json"), filepath.Join(".sageox", "config.yaml")}
+
+// sharedNotesRoot names the folder where the Claude desktop app keeps the notes
+// that sessions it starts from one another share: one subfolder per session,
+// inside the app's own data folder. A variable so tests can point it elsewhere.
+var sharedNotesRoot = func() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "Claude", "side-session-notes"), nil
+}
+
+// InSharedNotesFolder reports whether dir, absolute and symlink-resolved, lies
+// inside one of the Claude desktop app's shared notes folders. The app adds
+// that folder to a session as a second working directory, so a session can end
+// up standing in it without having crossed into another repository.
+//
+// It is the only folder outside the repo that counts as neutral. Any folder
+// with no project markers would also cover it, but an unmarked folder says
+// nothing about whether its owner agreed to share it with this repo's team, and
+// a project whose markers are missing or unreadable would pass as one. A known
+// place fails the safe way: a folder it does not name keeps the session on this
+// machine instead of uploading someone else's work.
+func InSharedNotesFolder(dir string) bool {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return false
+	}
+	root, err := sharedNotesRoot()
+	if err != nil {
+		return false
+	}
+	// resolved like dir was, and by where it stands when the app has not made it yet
+	if root, err = resolveVanished(root, false); err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	// Walk from dir up to the notes root, the root included, by counting steps:
+	// on a filesystem that ignores case the two spellings may never compare
+	// equal, and a walk that waits for them to would not end.
+	for d, left := dir, strings.Count(rel, string(os.PathSeparator))+2; left > 0; d, left = filepath.Dir(d), left-1 {
+		// a checkout or Ox project put inside a notes folder is still a project
+		if mayBeProject(d) {
+			return false
+		}
+		// dir is resolved, so a link left in it is one that could not be
+		// followed: where it led cannot be looked at, so it is not vouched for
+		if info, err := os.Lstat(d); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// mayBeProject reports whether dir is a checkout or an Ox project, or cannot be
+// looked at closely enough to rule that out.
+func mayBeProject(dir string) bool {
+	for _, marker := range projectMarkers {
+		if _, err := os.Lstat(filepath.Join(dir, marker)); !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveVanished resolves symlinks in the longest prefix of path that still
@@ -403,7 +516,7 @@ func outsideNestedRepos(repoRoot, root, cwd string) (bool, error) {
 	// "not there" counts as absence: any other failure to look (EACCES, I/O) is an
 	// error, because a marker that cannot be seen cannot be ruled out.
 	for dir := cwd; dir != root; {
-		for _, marker := range []string{".git", filepath.Join(".sageox", "config.json"), filepath.Join(".sageox", "config.yaml")} {
+		for _, marker := range projectMarkers {
 			info, err := os.Lstat(filepath.Join(dir, marker))
 			if errors.Is(err, fs.ErrNotExist) {
 				continue

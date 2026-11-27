@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource/claudesourcetest"
 	"github.com/sageox/ox/internal/session/nativeimport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,6 +51,7 @@ const (
 	e2eClaudeC  = "a7b8c9d0-e1f2-4a3b-9c4d-5e6f7a8b9c0d"
 	e2eCodexA   = "01a0ee54-4491-70e1-b771-3c5d2e8f9a10"
 	e2eCodexB   = "01a0ee60-1234-7abc-8def-0123456789ab"
+	e2eCodexC   = "01a0ee6c-5678-7abc-8def-0123456789cd"
 	e2eCodexA2  = "01a0ee54-4491-7aaa-8bbb-000000000001" // started in the same minute as e2eCodexA
 	loginPrompt = "The login page loops back to itself after the OAuth callback on Safari only, find out why and fix it"
 	pushPrompt  = "Every Ledger push from my laptop fails with a missing object error since yesterday, explain what broke"
@@ -1144,6 +1146,33 @@ func TestImportE2E_FailedPushIsCarriedByTheNextOne(t *testing.T) {
 		assert.Contains(t, remoteSessionDirs(t, f.barePath), s.SessionName)
 		assert.Equal(t, string(stateAlreadyImported), next.session(t, e2eCodexB).State)
 	})
+}
+
+// A session that also stood in the notes folder the Claude desktop app shares
+// between sessions is still this repo's history (#2041). Any other folder
+// outside the repo, plain or a repository, keeps it out.
+//
+// Failure prevented: a worktree session that once read a shared notes folder
+// refused as "it also worked in other repositories".
+func TestImportE2E_SharedNotesFolderVisitIsNotAnotherRepo(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC)
+	notes := claudesourcetest.SharedNotesFolder(t)
+	other := t.TempDir()
+	runGit(t, other, "init", "-q")
+	plain := t.TempDir()
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start, prompt: loginPrompt, reply: "Read the notes.", alsoIn: notes})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Both repos.", alsoIn: other})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexC, start: start.Add(2 * time.Hour), prompt: pushPrompt, reply: "A private folder.", alsoIn: plain})
+
+	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	assert.Equal(t, string(stateReady), r.session(t, e2eCodexA).State, "the shared notes folder is no other repository")
+	for _, id := range []string{e2eCodexB, e2eCodexC} {
+		mixed := r.session(t, id)
+		assert.Equal(t, string(stateIneligible), mixed.State, id)
+		assert.Equal(t, "it also worked in other repositories", mixed.Reason, id)
+	}
 }
 
 // The preview accounts for every native file it did not list as a candidate,
