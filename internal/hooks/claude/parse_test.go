@@ -366,3 +366,54 @@ func TestMarshalSettingsRaw(t *testing.T) {
 		})
 	}
 }
+
+// TestMarshalSettings_KeepsHookFieldsOxDoesNotModel: installing ox's hooks
+// rewrites the whole hooks block, and a coworker's own hook must come back out
+// with every field Claude Code supports, not only type and command.
+// Failure prevented: ox init, doctor and prime stripping timeout,
+// statusMessage, args or onFailure from a project's existing hooks (#1454).
+func TestMarshalSettings_KeepsHookFieldsOxDoesNotModel(t *testing.T) {
+	input := []byte(`{"hooks":{
+  "SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"./scripts/bootstrap.sh","timeout":900,"statusMessage":"Bootstrapping <deps> & tools"}]}],
+  "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"node","args":["guard.js"],"onFailure":"block"}]}]
+}}`)
+
+	settings, rawMap, err := ParseSettingsRaw(input)
+	require.NoError(t, err)
+	settings.Hooks["SessionStart"] = MergeHookEntries(settings.Hooks["SessionStart"], []HookEntry{{
+		Matcher: "",
+		Hooks:   []Hook{{Command: "ox agent hook SessionStart", Type: HookType}},
+	}})
+
+	data, err := MarshalSettings(settings, rawMap)
+	require.NoError(t, err)
+
+	var got struct {
+		Hooks map[string][]struct {
+			Matcher string           `json:"matcher"`
+			Hooks   []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	require.Len(t, got.Hooks["SessionStart"], 1)
+	start := got.Hooks["SessionStart"][0].Hooks
+	require.Len(t, start, 2, "the coworker's hook and ox's hook")
+	assert.Equal(t, map[string]any{
+		"type":          "command",
+		"command":       "./scripts/bootstrap.sh",
+		"timeout":       float64(900),
+		"statusMessage": "Bootstrapping <deps> & tools",
+	}, start[0])
+	assert.Equal(t, map[string]any{"type": "command", "command": "ox agent hook SessionStart"}, start[1],
+		"ox's own hook gains no fields")
+
+	require.Len(t, got.Hooks["PreToolUse"], 1)
+	assert.Equal(t, map[string]any{
+		"type":      "command",
+		"command":   "node",
+		"args":      []any{"guard.js"},
+		"onFailure": "block",
+	}, got.Hooks["PreToolUse"][0].Hooks[0])
+	assert.Contains(t, string(data), "Bootstrapping <deps> & tools", "kept fields are not HTML-escaped")
+}

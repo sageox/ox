@@ -181,6 +181,51 @@ func TestInstallPreservesExistingHooks(t *testing.T) {
 	assert.True(t, foundOx, "ox lifecycle hook should be added")
 }
 
+// TestInstallKeepsFieldsOfExistingHooks: a coworker's own hook must keep every
+// field Claude Code supports when ox installs its hooks next to it, not only
+// type and command. Failure prevented: ox init, doctor and prime silently
+// dropping a bootstrap hook's timeout and statusMessage (#1454).
+func TestInstallKeepsFieldsOfExistingHooks(t *testing.T) {
+	tmpDir := t.TempDir()
+	claudeDir := filepath.Join(tmpDir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0755))
+	bootstrap := map[string]any{
+		"type":          "command",
+		"command":       "./scripts/bootstrap.sh",
+		"timeout":       float64(900),
+		"statusMessage": "Bootstrapping",
+	}
+	data, err := json.Marshal(map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{"matcher": "", "hooks": []any{bootstrap}}},
+		},
+	})
+	require.NoError(t, err)
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	require.NoError(t, os.WriteFile(settingsPath, data, 0644))
+
+	require.NoError(t, InstallProjectClaudeHooks(tmpDir))
+
+	written, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var got struct {
+		Hooks map[string][]struct {
+			Hooks []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(written, &got))
+	var kept map[string]any
+	for _, entry := range got.Hooks[claudeSessionStart] {
+		for _, hook := range entry.Hooks {
+			if hook["command"] == bootstrap["command"] {
+				kept = hook
+			}
+		}
+	}
+	require.NotNil(t, kept, "the coworker's SessionStart hook must survive the install")
+	assert.Equal(t, bootstrap, kept, "and keep its timeout and statusMessage")
+}
+
 // TestReadCorruptedSettingsJSON verifies graceful handling of malformed JSON.
 func TestReadCorruptedSettingsJSON(t *testing.T) {
 	tests := []struct {
