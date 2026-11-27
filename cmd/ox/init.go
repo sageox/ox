@@ -621,9 +621,27 @@ func runInit() error {
 	// create or upgrade config.json
 	// This logic is shared with ox doctor --fix via ensureSageoxConfig()
 	configPath := filepath.Join(sageoxDir, "config.json")
+	// snapshot an existing config before ensureSageoxConfig upgrades it in
+	// place, or a refused registration keeps the upgrade (GH #2028)
+	// os.Stat like ensureSageoxConfig, so a dangling symlink counts as absent
+	_, statErr := os.Stat(configPath)
+	configExisted := statErr == nil
+	if configExisted {
+		tracker.trackModifiedFile(configPath)
+	}
+	// a dangling config symlink is kept: init writes through it and creates
+	// the target, so the target is what rollback has to remove
+	configTarget := danglingSymlinkTarget(configPath)
 	configResult := ensureSageoxConfig(gitRoot)
-	if configResult == configCreated {
-		tracker.trackCreatedFile(configPath)
+	if configResult == configCreated && !configExisted {
+		if configTarget != "" {
+			tracker.trackCreatedFile(configTarget)
+			// stageAll stages the link itself, so its index entry needs
+			// restoring even when the metadata update below never snapshots it
+			tracker.trackIndexEntry(configPath)
+		} else {
+			tracker.trackCreatedFile(configPath)
+		}
 	}
 	if !initQuiet && configResult == configError {
 		cli.PrintWarning("Could not update .sageox/config.json")
@@ -681,6 +699,7 @@ func runInit() error {
 		}
 		merged, changed := mergeGitignoreEntries(string(content))
 		if changed {
+			tracker.trackModifiedFile(gitignorePath)
 			if err := os.WriteFile(gitignorePath, []byte(merged), 0644); err != nil {
 				return fmt.Errorf("failed to update .gitignore: %w", err)
 			}
@@ -1836,6 +1855,7 @@ type initTracker struct {
 	createdDirs   []string          // absolute paths of newly created directories
 	modifiedFiles map[string][]byte // absolute path -> original content (for restore)
 	forceStage    []string          // absolute paths that need --force staging (may be gitignored)
+	indexOnly     []string          // absolute paths whose index entry rollback restores, file left alone
 	isFreshInit   bool              // true if .sageox/ didn't exist before
 
 	// indexEntries records each touched path's git INDEX entry as it was
@@ -1956,6 +1976,14 @@ func (t *initTracker) trackModifiedFile(absPath string) {
 	if content, err := os.ReadFile(absPath); err == nil {
 		t.modifiedFiles[absPath] = content
 	}
+}
+
+// trackIndexEntry records a path whose index entry rollback must put back
+// without restoring or removing the file itself, such as a config symlink
+// init wrote through.
+func (t *initTracker) trackIndexEntry(absPath string) {
+	t.snapshotIndexEntry(absPath)
+	t.indexOnly = append(t.indexOnly, absPath)
 }
 
 // trackForceStage records a file that needs --force to stage (may be gitignored).
@@ -2110,9 +2138,10 @@ func (t *initTracker) unstageAll(quiet bool) {
 
 	var paths []string
 	seen := make(map[string]bool)
-	for _, p := range slices.Concat(t.createdFiles, t.forceStage, slices.Collect(maps.Keys(t.modifiedFiles))) {
+	for _, p := range slices.Concat(t.createdFiles, t.forceStage, t.indexOnly, slices.Collect(maps.Keys(t.modifiedFiles))) {
 		rel, err := filepath.Rel(t.gitRoot, p)
-		if err != nil || seen[rel] {
+		// a symlink target outside the repo has no index entry to reset
+		if err != nil || seen[rel] || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
 		seen[rel] = true
@@ -2136,7 +2165,7 @@ func (t *initTracker) unstageAll(quiet bool) {
 			// stage 0 leaves BOTH in the index, so a previously-conflicted
 			// path comes back as unmerged (`git status` shows UU) instead of
 			// restored. A zero-mode line is update-index's delete directive.
-			input := fmt.Sprintf("0 %s\t%s\n", strings.Repeat("0", 40), rel) + entry + "\n"
+			input := fmt.Sprintf("0 %s\t%s\n", zeroObjectID(entry), rel) + entry + "\n"
 
 			restore := exec.Command("git", "update-index", "--index-info")
 			restore.Dir = t.gitRoot
@@ -2147,15 +2176,61 @@ func (t *initTracker) unstageAll(quiet bool) {
 			if !quiet {
 				cli.PrintWarning(fmt.Sprintf("Could not restore index entry for %s", rel))
 			}
+			// The path was in the index before init, so dropping it now would
+			// stage the deletion of a file the user has. Leave it as it is.
+			continue
 		}
 
-		// Not in the index before init (or unreadable): drop it.
-		rm := exec.Command("git", "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+		// Not in the index before init (or unreadable): drop it. When the
+		// snapshot shows it was absent, init's staged copy can differ from both
+		// HEAD and the restored file, which a plain rm --cached refuses, so
+		// force it. -f with --cached only touches the index.
+		args := []string{"rm", "-q", "--cached", "--ignore-unmatch"}
+		if recorded {
+			args = append(args, "-f")
+		}
+		rm := exec.Command("git", append(args, "--", rel)...)
 		rm.Dir = t.gitRoot
 		if err := rm.Run(); err != nil && !quiet {
 			cli.PrintWarning(fmt.Sprintf("Could not unstage %s: %v", rel, err))
 		}
 	}
+}
+
+// zeroObjectID returns an all-zero object ID as wide as the one in a recorded
+// `git ls-files --stage` entry: 40 digits for SHA-1, 64 for SHA-256.
+func zeroObjectID(entry string) string {
+	if fields := strings.Fields(entry); len(fields) >= 2 {
+		return strings.Repeat("0", len(fields[1]))
+	}
+	return strings.Repeat("0", 40)
+}
+
+// danglingSymlinkTarget returns the path a write through path would create
+// when path is a symlink (or chain of symlinks) whose final target does not
+// exist, and "" otherwise.
+func danglingSymlinkTarget(path string) string {
+	for hops := 0; hops < 40; hops++ {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if hops > 0 && os.IsNotExist(err) {
+				return path
+			}
+			return ""
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return ""
+		}
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return ""
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(filepath.Dir(path), dest)
+		}
+		path = dest
+	}
+	return ""
 }
 
 // fileExists returns true if path exists (regular file or symlink).
