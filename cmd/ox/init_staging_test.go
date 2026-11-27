@@ -478,6 +478,62 @@ func TestUnstageAll_RestoresConflictStagesWithoutLeavingUnmerged(t *testing.T) {
 		"exactly stages 1-3 should remain — a leftover stage 0 means the index is still unmerged")
 }
 
+// TestUnstageAll_RestoresUnchangedEntryInSHA256Repo covers rollback in a
+// SHA-256 repository. The delete line sent to update-index used a 40-digit
+// object ID, which Git rejects there, and the fallback then ran git rm --cached
+// on a file init never changed, leaving a staged deletion behind.
+func TestUnstageAll_RestoresUnchangedEntryInSHA256Repo(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+	git("init", "-q", "--object-format=sha256")
+	git("config", "user.name", "Test User")
+	git("config", "user.email", "test@example.com")
+	abs := writeFileAt(t, repo, "AGENTS.md", "# committed\n")
+	git("add", "AGENTS.md")
+	git("commit", "-qm", "baseline")
+
+	tracker := newInitTracker(repo)
+	tracker.trackModifiedFile(abs)
+	tracker.trackForceStage(abs)
+	tracker.stageAll()
+	tracker.rollback(true)
+
+	assert.Empty(t, git("status", "--porcelain", "--", "AGENTS.md"),
+		"rollback must leave an unchanged tracked file clean, not staged for deletion")
+}
+
+// TestUnstageAll_DropsStagedEditOfUntrackedFile covers a file that existed
+// but was not in the index when init ran. Rollback puts the old bytes back,
+// and the copy stageAll added then matches neither HEAD nor the file, so a
+// plain git rm --cached refused to drop it and the edit stayed staged.
+func TestUnstageAll_DropsStagedEditOfUntrackedFile(t *testing.T) {
+	repo := testGitRepo(t)
+	rel := filepath.Join(".sageox", ".gitignore")
+	abs := writeFileAt(t, repo, rel, "logs/\n")
+
+	tracker := newInitTracker(repo)
+	tracker.trackModifiedFile(abs)
+	require.NoError(t, os.WriteFile(abs, []byte("logs/\ncache/\n"), 0o644))
+	tracker.trackForceStage(abs)
+	tracker.stageAll()
+	require.Contains(t, stagedFiles(t, repo), filepath.ToSlash(rel), "precondition: init staged its edit")
+
+	tracker.rollback(true)
+
+	body, err := os.ReadFile(abs)
+	require.NoError(t, err)
+	assert.Equal(t, "logs/\n", string(body), "rollback restores the original bytes")
+	assert.NotContains(t, stagedFiles(t, repo), filepath.ToSlash(rel),
+		"rollback must not leave init's edit of a never-staged file in the index")
+}
+
 // TestStageAll_StagesClaudePrimaryInstructionFiles is the regression test
 // for the files ox writes via injectOxPrime. The later marker pass reports
 // them as alreadyPresent (injectOxPrime just wrote the marker), so gating

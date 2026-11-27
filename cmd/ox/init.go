@@ -623,7 +623,9 @@ func runInit() error {
 	configPath := filepath.Join(sageoxDir, "config.json")
 	// snapshot an existing config before ensureSageoxConfig upgrades it in
 	// place, or a refused registration keeps the upgrade (GH #2028)
-	configExisted := fileExists(configPath)
+	// os.Stat like ensureSageoxConfig, so a dangling symlink counts as absent
+	_, statErr := os.Stat(configPath)
+	configExisted := statErr == nil
 	if configExisted {
 		tracker.trackModifiedFile(configPath)
 	}
@@ -2143,7 +2145,7 @@ func (t *initTracker) unstageAll(quiet bool) {
 			// stage 0 leaves BOTH in the index, so a previously-conflicted
 			// path comes back as unmerged (`git status` shows UU) instead of
 			// restored. A zero-mode line is update-index's delete directive.
-			input := fmt.Sprintf("0 %s\t%s\n", strings.Repeat("0", 40), rel) + entry + "\n"
+			input := fmt.Sprintf("0 %s\t%s\n", zeroObjectID(entry), rel) + entry + "\n"
 
 			restore := exec.Command("git", "update-index", "--index-info")
 			restore.Dir = t.gitRoot
@@ -2154,15 +2156,34 @@ func (t *initTracker) unstageAll(quiet bool) {
 			if !quiet {
 				cli.PrintWarning(fmt.Sprintf("Could not restore index entry for %s", rel))
 			}
+			// The path was in the index before init, so dropping it now would
+			// stage the deletion of a file the user has. Leave it as it is.
+			continue
 		}
 
-		// Not in the index before init (or unreadable): drop it.
-		rm := exec.Command("git", "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+		// Not in the index before init (or unreadable): drop it. When the
+		// snapshot shows it was absent, init's staged copy can differ from both
+		// HEAD and the restored file, which a plain rm --cached refuses, so
+		// force it. -f with --cached only touches the index.
+		args := []string{"rm", "-q", "--cached", "--ignore-unmatch"}
+		if recorded {
+			args = append(args, "-f")
+		}
+		rm := exec.Command("git", append(args, "--", rel)...)
 		rm.Dir = t.gitRoot
 		if err := rm.Run(); err != nil && !quiet {
 			cli.PrintWarning(fmt.Sprintf("Could not unstage %s: %v", rel, err))
 		}
 	}
+}
+
+// zeroObjectID returns an all-zero object ID as wide as the one in a recorded
+// `git ls-files --stage` entry: 40 digits for SHA-1, 64 for SHA-256.
+func zeroObjectID(entry string) string {
+	if fields := strings.Fields(entry); len(fields) >= 2 {
+		return strings.Repeat("0", len(fields[1]))
+	}
+	return strings.Repeat("0", 40)
 }
 
 // fileExists returns true if path exists (regular file or symlink).
