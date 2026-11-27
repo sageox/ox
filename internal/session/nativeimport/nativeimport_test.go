@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/session/claudesource/claudesourcetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -250,6 +251,18 @@ func TestScopeClassify(t *testing.T) {
 	git(t, nested, "init", "-q")
 	unrelated := filepath.Join(base, "unrelated")
 	require.NoError(t, os.MkdirAll(unrelated, 0o755))
+	// base/link/../unrelated names other/unrelated on disk, not base/unrelated
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "sub"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "unrelated"), 0o755))
+	git(t, other, "init", "-q")
+	require.NoError(t, os.Symlink(filepath.Join(other, "sub"), filepath.Join(base, "link")))
+	throughLink := filepath.Join(base, "link") + "/../unrelated"
+
+	notes := claudesourcetest.SharedNotesFolder(t)
+	// a link in the notes folder to a checkout that has since been deleted
+	require.NoError(t, os.Symlink(filepath.Join(base, "deleted-checkout"), filepath.Join(notes, "private")))
+	throughDeadLink := filepath.Join(notes, "private", "pkg")
 
 	scope, err := NewScope(worktree)
 	require.NoError(t, err)
@@ -265,7 +278,16 @@ func TestScopeClassify(t *testing.T) {
 		{"a nested repository is not this repository", []string{nested}, OtherRepo},
 		{"an unrelated directory", []string{unrelated}, OtherRepo},
 		{"a relative path proves nothing", []string{"repo"}, OtherRepo},
-		{"this repo and another", []string{repo, unrelated}, MixedRepos},
+		{"this repo and a nested repository", []string{repo, nested}, MixedRepos},
+		// the Claude desktop app's shared notes folder is no project (issue #2041)
+		{"this repo and the shared notes folder", []string{worktree, notes}, ThisRepo},
+		{"the shared notes folder alone", []string{notes}, OtherRepo},
+		{"this repo and a dead link in the shared notes folder", []string{worktree, throughDeadLink}, MixedRepos},
+		// no project markers, but nothing says its owner shares it with this repo
+		{"this repo and a plain folder", []string{worktree, unrelated}, MixedRepos},
+		{"this repo and the folder above it", []string{repo, base}, MixedRepos},
+		{"this repo and a deleted folder", []string{repo, filepath.Join(base, "gone-notes")}, MixedRepos},
+		{"this repo and a dotted path through a link", []string{repo, throughLink}, MixedRepos},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
