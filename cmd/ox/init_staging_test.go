@@ -482,7 +482,7 @@ func TestUnstageAll_RestoresConflictStagesWithoutLeavingUnmerged(t *testing.T) {
 // SHA-256 repository. The delete line sent to update-index used a 40-digit
 // object ID, which Git rejects there, and the fallback then ran git rm --cached
 // on a file init never changed, leaving a staged deletion behind.
-func TestUnstageAll_RestoresUnchangedEntryInSHA256Repo(t *testing.T) {
+func TestUnstageAll_RestoresRecordedEntryInSHA256Repo(t *testing.T) {
 	repo := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -498,15 +498,24 @@ func TestUnstageAll_RestoresUnchangedEntryInSHA256Repo(t *testing.T) {
 	abs := writeFileAt(t, repo, "AGENTS.md", "# committed\n")
 	git("add", "AGENTS.md")
 	git("commit", "-qm", "baseline")
+	// the user's own staged edit, which rollback has to put back exactly
+	writeFileAt(t, repo, "AGENTS.md", "# staged by the user\n")
+	git("add", "AGENTS.md")
+	before := git("ls-files", "--stage", "--", "AGENTS.md")
 
 	tracker := newInitTracker(repo)
 	tracker.trackModifiedFile(abs)
 	tracker.trackForceStage(abs)
+	writeFileAt(t, repo, "AGENTS.md", "# staged by the user\n<!-- ox edit -->\n")
 	tracker.stageAll()
 	tracker.rollback(true)
 
-	assert.Empty(t, git("status", "--porcelain", "--", "AGENTS.md"),
-		"rollback must leave an unchanged tracked file clean, not staged for deletion")
+	assert.Equal(t, before, git("ls-files", "--stage", "--", "AGENTS.md"),
+		"rollback must replay the recorded 64-digit index entry, not keep init's edit or stage a deletion")
+	got, err := os.ReadFile(abs)
+	require.NoError(t, err)
+	assert.Equal(t, "# staged by the user\n", string(got))
+	assert.Equal(t, "M  AGENTS.md\n", git("status", "--porcelain", "--", "AGENTS.md"))
 }
 
 // TestUnstageAll_DropsStagedEditOfUntrackedFile covers a file that existed

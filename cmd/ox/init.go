@@ -629,9 +629,16 @@ func runInit() error {
 	if configExisted {
 		tracker.trackModifiedFile(configPath)
 	}
+	// a dangling config symlink is kept: init writes through it and creates
+	// the target, so the target is what rollback has to remove
+	configTarget := danglingSymlinkTarget(configPath)
 	configResult := ensureSageoxConfig(gitRoot)
 	if configResult == configCreated && !configExisted {
-		tracker.trackCreatedFile(configPath)
+		if configTarget != "" {
+			tracker.trackCreatedFile(configTarget)
+		} else {
+			tracker.trackCreatedFile(configPath)
+		}
 	}
 	if !initQuiet && configResult == configError {
 		cli.PrintWarning("Could not update .sageox/config.json")
@@ -2184,6 +2191,33 @@ func zeroObjectID(entry string) string {
 		return strings.Repeat("0", len(fields[1]))
 	}
 	return strings.Repeat("0", 40)
+}
+
+// danglingSymlinkTarget returns the path a write through path would create
+// when path is a symlink (or chain of symlinks) whose final target does not
+// exist, and "" otherwise.
+func danglingSymlinkTarget(path string) string {
+	for hops := 0; hops < 40; hops++ {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if hops > 0 && os.IsNotExist(err) {
+				return path
+			}
+			return ""
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return ""
+		}
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return ""
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(filepath.Dir(path), dest)
+		}
+		path = dest
+	}
+	return ""
 }
 
 // fileExists returns true if path exists (regular file or symlink).

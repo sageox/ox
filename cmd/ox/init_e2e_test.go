@@ -161,6 +161,45 @@ func TestRunInit_RefusedRegistrationLeavesCommittedSageoxFilesAlone(t *testing.T
 	}
 }
 
+// A committed config.json symlink whose target is missing: init writes the
+// default config through the link, so a refused registration has to remove the
+// file it created and keep the user's link, not the other way round.
+func TestRunInit_RefusedRegistrationKeepsDanglingConfigSymlink(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	env.OnRegister(func(api.RepoInitRequest) (int, any) {
+		return http.StatusForbidden, map[string]any{"success": false, "error": "you don't have access to this repository"}
+	})
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = env.Root
+		out, err := cmd.CombinedOutput()
+		require.NoErrorf(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".sageox"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, "settings"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, "settings", "README"), []byte("shared settings\n"), 0o644))
+	linkPath := filepath.Join(env.Root, ".sageox", "config.json")
+	targetPath := filepath.Join(env.Root, "settings", "project.json")
+	require.NoError(t, os.Symlink("../settings/project.json", linkPath))
+	git("add", "-f", ".sageox/config.json", "settings/README")
+	git("commit", "-qm", "link SageOx config to shared settings")
+
+	err := runInit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of the SageOx team")
+
+	dest, linkErr := os.Readlink(linkPath)
+	require.NoError(t, linkErr, "a refused init must keep the config symlink")
+	assert.Equal(t, "../settings/project.json", dest)
+	assert.NoFileExists(t, targetPath, "a refused init must remove the config it wrote through the link")
+	assert.Empty(t, git("status", "--porcelain", "--", ".sageox/config.json", "settings"),
+		"a refused init must leave the link and its directory as committed")
+}
+
 // withInitFlags sets runInit's package-level flag vars and restores them, so a
 // test cannot leak flag state into the rest of the package.
 func withInitFlags(t *testing.T, team string) {
