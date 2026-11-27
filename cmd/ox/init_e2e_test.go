@@ -115,6 +115,52 @@ func TestRunInit_RegistrationSkippedFinalizesReadme(t *testing.T) {
 	assert.Empty(t, stagedPaths(t, env.Root))
 }
 
+// A refused registration must leave committed .sageox files exactly as they
+// were. The config upgrade and the .gitignore merge ran before init snapshotted
+// those files, so rollback kept both edits, staged, in a clone where nothing
+// was set up.
+func TestRunInit_RefusedRegistrationLeavesCommittedSageoxFilesAlone(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	env.OnRegister(func(api.RepoInitRequest) (int, any) {
+		return http.StatusForbidden, map[string]any{"success": false, "error": "you don't have access to this repository"}
+	})
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = env.Root
+		out, err := cmd.CombinedOutput()
+		require.NoErrorf(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+	// a config committed before config_version existed, and a .gitignore
+	// written before the current required entries
+	committed := map[string]string{
+		".sageox/config.json": "{\n  \"repo_id\": \"" + env.RepoID + "\",\n  \"team_id\": \"" + env.TeamID + "\"\n}\n",
+		".sageox/.gitignore":  "logs/\n",
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".sageox"), 0o755))
+	for rel, content := range committed {
+		require.NoError(t, os.WriteFile(filepath.Join(env.Root, rel), []byte(content), 0o644))
+		git("add", "-f", rel)
+	}
+	git("commit", "-qm", "add SageOx config")
+
+	err := runInit()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member of the SageOx team")
+	require.Len(t, env.InitRequests(), 1)
+
+	for rel, content := range committed {
+		got, readErr := os.ReadFile(filepath.Join(env.Root, rel))
+		require.NoError(t, readErr)
+		assert.Equal(t, content, string(got), "a refused init must not rewrite the committed %s", rel)
+		assert.Empty(t, git("status", "--porcelain", "--", rel),
+			"a refused init must leave %s unmodified and unstaged", rel)
+	}
+}
+
 // withInitFlags sets runInit's package-level flag vars and restores them, so a
 // test cannot leak flag state into the rest of the package.
 func withInitFlags(t *testing.T, team string) {

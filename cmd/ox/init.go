@@ -621,8 +621,14 @@ func runInit() error {
 	// create or upgrade config.json
 	// This logic is shared with ox doctor --fix via ensureSageoxConfig()
 	configPath := filepath.Join(sageoxDir, "config.json")
+	// snapshot an existing config before ensureSageoxConfig upgrades it in
+	// place, or a refused registration keeps the upgrade (GH #2028)
+	configExisted := fileExists(configPath)
+	if configExisted {
+		tracker.trackModifiedFile(configPath)
+	}
 	configResult := ensureSageoxConfig(gitRoot)
-	if configResult == configCreated {
+	if configResult == configCreated && !configExisted {
 		tracker.trackCreatedFile(configPath)
 	}
 	if !initQuiet && configResult == configError {
@@ -681,6 +687,7 @@ func runInit() error {
 		}
 		merged, changed := mergeGitignoreEntries(string(content))
 		if changed {
+			tracker.trackModifiedFile(gitignorePath)
 			if err := os.WriteFile(gitignorePath, []byte(merged), 0644); err != nil {
 				return fmt.Errorf("failed to update .gitignore: %w", err)
 			}
