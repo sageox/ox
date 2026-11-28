@@ -179,6 +179,24 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	}
 }
 
+// LocalAttributionUserID resolves the stable owner ID written to draft
+// metadata. It never fetches token metadata: team-token ownership is known only
+// when a coworker identity is cached, and anonymous or unresolved identities
+// fail closed.
+func LocalAttributionUserID(ep string) (string, bool) {
+	if auth.EnvTokenIsTeamFamily(ep) {
+		coworker, known := auth.CachedTeamCoworker(ep)
+		if !known || coworker == nil || coworker.ID == "" {
+			return "", false
+		}
+		return coworker.ID, true
+	}
+	if userID := auth.GetUserID(ep); userID != "" {
+		return userID, true
+	}
+	return "", false
+}
+
 // signedInUser returns the account ID, email and full name of the SageOx
 // account signed in at ep, or "" for all three.
 func signedInUser(ep string) (id, email, name string) {

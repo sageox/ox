@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -103,7 +105,11 @@ func checkSessionDraftOrphan(fix bool) checkResult {
 // session.FindOrphanedDrafts (the shared source of truth). Thin wrapper: the
 // detection logic lives in internal/session so the daemon shares it verbatim.
 func findOrphanedDrafts(projectRoot, ledgerPath string) ([]string, error) {
-	return session.FindOrphanedDrafts(ledgerPath, draftCacheDirs(projectRoot, ledgerPath))
+	ownerID, known := identity.LocalAttributionUserID(endpoint.GetForProject(projectRoot))
+	if !known {
+		ownerID = ""
+	}
+	return session.FindOrphanedDrafts(ledgerPath, draftCacheDirs(projectRoot, ledgerPath), ownerID)
 }
 
 // draftCacheDirs returns the local cache session directories a draft's recording

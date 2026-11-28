@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +31,16 @@ func newRetractScheduler(t *testing.T) (*SyncScheduler, string) {
 	t.Helper()
 	ledger := t.TempDir()
 	gitInit(t, ledger)
+	const testUserID = "test-user"
+	const testEndpoint = "https://draft-retract-test.invalid"
+	t.Setenv("SAGEOX_ENDPOINT", testEndpoint)
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.NoError(t, auth.SaveTokenForEndpoint(endpoint.GetForProject(ledger), &auth.StoredToken{
+		AccessToken: "draft-retract-test-token",
+		UserInfo:    auth.UserInfo{UserID: testUserID},
+	}))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = ledger
@@ -71,9 +83,13 @@ func writeDraftCommit(t *testing.T, ledger, name string, age time.Duration, push
 	dir := filepath.Join(ledger, "sessions", name)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	updated := time.Now().Add(-age).UTC()
+	agentID := name
+	if separator := strings.LastIndex(name, "-"); separator >= 0 {
+		agentID = name[separator+1:]
+	}
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 		Version: "1.0", SessionName: name, SessionID: "ses_retract_test",
-		AgentID: "OxOrphan", CreatedAt: updated, Draft: true, TurnCount: 2,
+		AgentID: agentID, UserID: "test-user", CreatedAt: updated, Draft: true, TurnCount: 2,
 		UpdatedAt: &updated, Files: map[string]lfs.FileRef{},
 	}))
 	mustGit(t, ledger, "add", "-A", "sessions/")
@@ -120,7 +136,8 @@ func TestRetractOrphanedDrafts_RejectsWildcardNames(t *testing.T) {
 			mustGit(t, ledger, "add", "sessions/victim")
 			mustGit(t, ledger, "commit", "-m", "seed sibling")
 			// A valid orphan must still be removed in the same sweep.
-			commitStaleDraft(t, ledger, "ordinary", 120*time.Hour)
+			const validName = "2026-01-01T00-00-testuser-OxOrphan"
+			commitStaleDraft(t, ledger, validName, 120*time.Hour)
 			for _, file := range []string{"modified.txt", "staged.txt", "untracked.txt"} {
 				require.NoError(t, os.WriteFile(filepath.Join(sibling, file), []byte("local work\n"), 0644))
 			}
@@ -130,8 +147,8 @@ func TestRetractOrphanedDrafts_RejectsWildcardNames(t *testing.T) {
 
 			s.retractOrphanedDrafts(context.Background(), ledger)
 
-			assert.NoDirExists(t, filepath.Join(ledger, "sessions", "ordinary"))
-			assert.Equal(t, "sessions/ordinary/meta.json", mustGit(t, ledger, "diff", "--name-only", "HEAD^", "HEAD"))
+			assert.NoDirExists(t, filepath.Join(ledger, "sessions", validName))
+			assert.Equal(t, strings.Join([]string{"sessions", validName, "meta.json"}, "/"), mustGit(t, ledger, "diff", "--name-only", "HEAD^", "HEAD"))
 			assert.Equal(t, staged, mustGit(t, ledger, "diff", "--cached", "--binary"))
 			assert.Equal(t, unstaged, mustGit(t, ledger, "diff", "--binary"))
 			data, err := os.ReadFile(filepath.Join(sibling, "untracked.txt"))
