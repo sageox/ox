@@ -4,10 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +45,8 @@ func draftReaperFixture(t *testing.T) (projectRoot, ledgerPath string) {
 	// shells out to `git rev-parse --show-toplevel`. Cheap (~10ms) and it keeps
 	// these tests in the fast loop, unlike the full bare-remote fixture.
 	require.NoError(t, exec.Command("git", "-C", projectRoot, "init", "--quiet").Run())
+	require.NoError(t, exec.Command("git", "-C", projectRoot, "config", "user.name", "Test User").Run())
+	require.NoError(t, exec.Command("git", "-C", projectRoot, "config", "user.email", "testuser@example.com").Run())
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
@@ -59,7 +64,22 @@ func draftReaperFixture(t *testing.T) (projectRoot, ledgerPath string) {
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	setDraftReaperIdentity(t)
 	return projectRoot, ledgerPath
+}
+
+func setDraftReaperIdentity(t *testing.T) {
+	t.Helper()
+	const ep = "https://draft-reaper-test.invalid"
+	t.Setenv("SAGEOX_ENDPOINT", ep)
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_ENABLE", "1")
+	require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+		AccessToken: "draft-reaper-test-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo:    auth.UserInfo{UserID: "test-user"},
+	}))
 }
 
 // agedDraft writes a draft whose updated_at is `age` in the past.
@@ -72,7 +92,7 @@ func agedDraft(t *testing.T, ledgerPath, sessionName string, age time.Duration) 
 	updated := time.Now().Add(-age).UTC()
 	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 		Version: "1.0", SessionName: sessionName, SessionID: draftTestSessionID,
-		AgentID: "OxOrphan", CreatedAt: updated,
+		AgentID: sessionName[strings.LastIndex(sessionName, "-")+1:], UserID: "test-user", Username: identity.LocalAttributionUsername(), CreatedAt: updated,
 		Draft: true, TurnCount: 2, UpdatedAt: &updated,
 		Files: map[string]lfs.FileRef{},
 	}))
@@ -142,6 +162,7 @@ func TestFindOrphanedDrafts_OnlyReapsTrulyAbandoned(t *testing.T) {
 				require.NoError(t, os.MkdirAll(dir, 0755))
 				require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 					Version: "1.0", SessionName: name, SessionID: draftTestSessionID,
+					UserID: "test-user", AgentID: "OxOrph1",
 					CreatedAt: time.Now().Add(-120 * time.Hour), Draft: true,
 					Files: map[string]lfs.FileRef{},
 				}))
@@ -221,6 +242,7 @@ func TestFindOrphanedDrafts_MissingSessionsDirIsNotAnError(t *testing.T) {
 func TestCheckSessionDraftOrphan_ReportsWithoutMutating(t *testing.T) {
 	setTestCfg(t)
 	projectRoot, ledgerPath := setupLedgerProject(t)
+	setDraftReaperIdentity(t)
 	t.Chdir(projectRoot)
 
 	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxRept", 120*time.Hour)
@@ -243,6 +265,7 @@ func TestCheckSessionDraftOrphan_ReportsWithoutMutating(t *testing.T) {
 func TestCheckSessionDraftOrphan_PassesWhenNothingToReap(t *testing.T) {
 	setTestCfg(t)
 	projectRoot, ledgerPath := setupLedgerProject(t)
+	setDraftReaperIdentity(t)
 	t.Chdir(projectRoot)
 
 	agedDraft(t, ledgerPath, "2026-01-01T00-00-testuser-OxLive1", 1*time.Minute)
@@ -261,6 +284,7 @@ func TestCheckSessionDraftOrphan_PassesWhenNothingToReap(t *testing.T) {
 func TestCheckSessionDraftOrphan_FixRemovesFromRemote(t *testing.T) {
 	setTestCfg(t)
 	f := newDraftLedgerFixture(t)
+	setDraftReaperIdentity(t)
 	t.Chdir(f.projectRoot)
 
 	const orphan = "2026-01-01T00-00-testuser-OxReap"
@@ -293,6 +317,7 @@ func TestCheckSessionDraftOrphan_FixRejectsWildcardNames(t *testing.T) {
 	for _, name := range []string{"*", "victi?", "[v]ictim"} {
 		t.Run(name, func(t *testing.T) {
 			f := newDraftLedgerFixture(t)
+			setDraftReaperIdentity(t)
 			t.Chdir(f.projectRoot)
 			agedDraft(t, f.ledgerPath, name, 120*time.Hour)
 			sibling := filepath.Join(f.ledgerPath, "sessions", "victim")
