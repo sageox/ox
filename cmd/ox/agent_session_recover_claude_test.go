@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,7 +96,7 @@ func TestRecover_KeepsADiscoveredClaudeRecordingThatPublishesNothing(t *testing.
 // A recording's native session ID can come from repository metadata, so the
 // suggested import command must keep it a literal for the shell.
 func TestUndiscoveredSessionNextSteps_QuotesTheSessionID(t *testing.T) {
-	steps := undiscoveredSessionNextSteps(&session.RecordingState{AgentID: "Oxab12", AgentSessionID: "x$(id)"})
+	steps := undiscoveredSessionNextSteps(&session.RecordingState{AgentID: "Oxab12", AgentSessionID: "x$(id)"}, nil)
 	assert.Contains(t, steps, "--session 'x$(id)' --include-aborted")
 }
 
@@ -116,4 +117,42 @@ func TestSessionStopJSON_ReportsWhyNothingWasSaved(t *testing.T) {
 	assert.Contains(t, got.UploadWarning, ": no transcript under /repo")
 	assert.Contains(t, got.Guidance, "Session not saved")
 	assert.Contains(t, got.Guidance, "--session 'sess-1'")
+}
+
+// TestSessionStopJSON_ForeignCwdOffersNoDeadEnd: a transcript refused because it
+// also worked in another project cannot be recovered or imported either, so the
+// guidance must not send the coworker down those paths (issue #2041).
+func TestSessionStopJSON_ForeignCwdOffersNoDeadEnd(t *testing.T) {
+	state := &session.RecordingState{AgentID: "Oxab12", AgentSessionID: "sess-1"}
+	cause := fmt.Errorf("adapter error: session not found: %w: %s: %q", claudesource.ErrUntrustedSource, claudesource.ForeignCwdReason, "/work/other")
+	out := captureStdoutForPlanCLI(t, func() {
+		require.NoError(t, outputSessionStopJSON(t.TempDir(), &agentinstance.Instance{AgentID: "Oxab12"}, state, "1s", nil, cause, map[string]int64{}))
+	})
+	var got struct {
+		Success  bool   `json:"success"`
+		Guidance string `json:"guidance"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.False(t, got.Success)
+	assert.NotContains(t, got.Guidance, "session recover", "recover refuses the same transcript")
+	assert.NotContains(t, got.Guidance, "--include-aborted", "import refuses the same transcript")
+	assert.Contains(t, got.Guidance, "ox agent Oxab12 session abort")
+	assert.Contains(t, got.Guidance, "kept on this machine")
+}
+
+// A folder that no longer exists is refused for where it stood, so restoring
+// it changes nothing: the guidance must not offer recover or import for it.
+func TestSessionStopJSON_GoneForeignCwdOffersNoDeadEnd(t *testing.T) {
+	state := &session.RecordingState{AgentID: "Oxab12", AgentSessionID: "sess-1"}
+	cause := fmt.Errorf("adapter error: session not found: %w: %s: %q, %s", claudesource.ErrUntrustedSource, claudesource.ForeignCwdReason, "/work/gone", claudesource.GoneCwdNote)
+	out := captureStdoutForPlanCLI(t, func() {
+		require.NoError(t, outputSessionStopJSON(t.TempDir(), &agentinstance.Instance{AgentID: "Oxab12"}, state, "1s", nil, cause, map[string]int64{}))
+	})
+	var got struct {
+		Guidance string `json:"guidance"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.NotContains(t, got.Guidance, "session recover")
+	assert.NotContains(t, got.Guidance, "--include-aborted")
+	assert.Contains(t, got.Guidance, "ox agent Oxab12 session abort")
 }

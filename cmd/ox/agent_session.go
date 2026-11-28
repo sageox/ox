@@ -628,7 +628,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			if cacheHasEntries {
 				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo; saving the turns already captured instead.\n  %v\n", state.AdapterName, findErr)
 			} else {
-				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state))
+				fmt.Fprintf(os.Stderr, "\nThe %s session file was not found for this repo, so nothing from it was uploaded yet.\n  %v\n%s\n", state.AdapterName, findErr, undiscoveredSessionNextSteps(state, findErr))
 			}
 			_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
 				AgentID:       state.AgentID,
@@ -851,8 +851,16 @@ func discoverNativeSessionFile(projectRoot string, state *session.RecordingState
 
 // undiscoveredSessionNextSteps says what to do with a recording whose native
 // session file was not found: the recording and cache stay, so a retry can
-// still publish it once the transcript is accepted.
-func undiscoveredSessionNextSteps(state *session.RecordingState) string {
+// still publish it once the transcript is accepted. cause is why it was not
+// found; a transcript refused for working in a folder outside the repo is
+// refused by recover and import alike, so neither is offered for it. That holds
+// for a folder that is gone too: it is judged by where it stood.
+func undiscoveredSessionNextSteps(state *session.RecordingState, cause error) string {
+	if cause != nil && strings.Contains(cause.Error(), claudesource.ForeignCwdReason) {
+		return fmt.Sprintf("The transcript also worked in the folder named above, which may hold another project's work, "+
+			"so ox does not upload it to this repo's Ledger, and recovering or importing it is refused too. "+
+			"It is kept on this machine. To end the recording: ox agent %s session abort", state.AgentID)
+	}
 	steps := fmt.Sprintf("The recording is kept. Next steps:\n"+
 		"  - retry once the cause above is fixed: ox agent %s session recover\n"+
 		"  - or upload the transcript itself: ox agent %s session abort, then ox session import", state.AgentID, state.AgentID)
@@ -1072,7 +1080,7 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		if discoveryErr != nil {
 			output.UploadWarning += ": " + discoveryErr.Error()
 		}
-		output.Guidance = "Session not saved: no conversation data was found for this recording. " + strings.ReplaceAll(undiscoveredSessionNextSteps(state), "\n", " ")
+		output.Guidance = "Session not saved: no conversation data was found for this recording. " + strings.ReplaceAll(undiscoveredSessionNextSteps(state, discoveryErr), "\n", " ")
 	}
 	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {

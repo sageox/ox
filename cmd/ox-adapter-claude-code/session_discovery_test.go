@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/session/claudesource/claudesourcetest"
 )
 
 func TestFindSessionFile_ResumedSessionInOldBucket(t *testing.T) {
@@ -403,5 +405,65 @@ func TestSessionReadersHandleLinesOverOneMiB(t *testing.T) {
 	}
 	if got := findStartOffset(partial, since.Add(2*time.Hour)); got != int64(len(big)) {
 		t.Fatalf("start offset with an unterminated tail = %d, want %d", got, len(big))
+	}
+}
+
+// Issue #2041: the Claude desktop app shares a notes folder outside the repo
+// with a session it starts, and one cd into it put that folder in every later
+// record. It is no project, so stop run from the main checkout must still find
+// the worktree's session; a step into another project must not.
+func TestFindSessionFile_WorktreeSessionThatVisitsANotesFolder(t *testing.T) {
+	notes := claudesourcetest.SharedNotesFolder(t)
+	home := os.Getenv("HOME")
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	repo := filepath.Join(home, "work", "repo")
+	other := filepath.Join(home, "work", "other")
+	for _, dir := range []string{repo, other} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		git(dir, "init", "-q")
+		git(dir, "commit", "-q", "--allow-empty", "-m", "init")
+	}
+	wt := filepath.Join(repo, ".claude", "worktrees", "wt")
+	git(repo, "worktree", "add", "-q", "-b", "wt", wt)
+
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	bucket := filepath.Join(home, ".claude", "projects", claudeProjectHash(wt))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bucket, id+".jsonl")
+	writeTurns := func(visit string) {
+		t.Helper()
+		turns := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, wt) +
+			fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, wt) +
+			fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, visit) +
+			fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, visit)
+		if err := os.WriteFile(path, []byte(turns), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTurns(notes)
+	for _, root := range []string{repo, wt} {
+		if got, _, err := findSessionFile(root, "", "", id); err != nil || got != path {
+			t.Fatalf("from %s: got %q, %v; want %q", root, got, err, path)
+		}
+	}
+
+	writeTurns(other)
+	_, _, err := findSessionFile(repo, "", "", id)
+	if err == nil {
+		t.Fatal("a session that stepped into another repository was accepted")
+	}
+	if !strings.Contains(err.Error(), other) {
+		t.Fatalf("the error must name the folder outside the repo: %v", err)
 	}
 }
