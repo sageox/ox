@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/paths"
 )
 
 // FileQueue provides disk-based event queueing for telemetry.
@@ -31,14 +35,12 @@ import (
 // and could handle retries, backoff, and batching more intelligently. For now, the
 // lazy flush approach is simpler and sufficient for our needs.
 type FileQueue struct {
-	path string
-	mu   sync.Mutex
+	path      string
+	sageoxDir string
+	mu        sync.Mutex
 }
 
 const (
-	// telemetryFileName is the name of the telemetry queue file
-	telemetryFileName = "telemetry.jsonl"
-
 	// flushThresholdCount triggers a flush when this many events are queued
 	flushThresholdCount = 10
 
@@ -50,16 +52,30 @@ const (
 )
 
 // NewFileQueue creates a new file-based event queue.
-// The queue file is stored at .sageox/cache/telemetry.jsonl in the project root.
-// Returns nil if projectRoot is empty (telemetry disabled without project context).
+// Queues live in the per-user cache, keyed by the canonical project root.
+// Repository-local queues are deliberately neither read nor migrated.
+// Returns nil if the project or cache location cannot be resolved safely.
 func NewFileQueue(projectRoot string) *FileQueue {
 	if projectRoot == "" {
 		return nil
 	}
 
-	cacheDir := filepath.Join(projectRoot, ".sageox", "cache")
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil
+	}
+	cacheDir := paths.TelemetryCacheDir()
+	if !filepath.IsAbs(cacheDir) {
+		return nil // never fall back to a path relative to the checkout
+	}
+	key := sha256.Sum256([]byte(root))
 	return &FileQueue{
-		path: filepath.Join(cacheDir, telemetryFileName),
+		path:      filepath.Join(cacheDir, hex.EncodeToString(key[:])+".jsonl"),
+		sageoxDir: filepath.Join(root, ".sageox"),
 	}
 }
 
@@ -74,23 +90,9 @@ func (q *FileQueue) Append(event Event) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// only write telemetry if SageOx is properly installed
-	// check for .sageox/README.md or .sageox/.repo_* marker files
-	sageoxDir := filepath.Dir(filepath.Dir(q.path)) // .sageox/cache -> .sageox
-	if !isSageoxInstalled(sageoxDir) {
+	// Markers are project metadata, not evidence that a queue path is trusted.
+	if !isSageoxInstalled(q.sageoxDir) {
 		return nil // silently skip - SageOx not installed or was uninstalled
-	}
-
-	// ensure directory exists
-	dir := filepath.Dir(q.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	// check file size to prevent unbounded growth
-	if info, err := os.Stat(q.path); err == nil && info.Size() > maxFileSize {
-		// truncate old events - better to lose old data than grow forever
-		_ = os.Truncate(q.path, 0)
 	}
 
 	// set timestamp if not already set
@@ -105,11 +107,22 @@ func (q *FileQueue) Append(event Event) error {
 	}
 
 	// append to file
-	f, err := os.OpenFile(q.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := openQueueFile(q.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	// Inspect and truncate the same validated file that will receive the event.
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > maxFileSize {
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+	}
 
 	_, err = f.Write(append(data, '\n'))
 	return err
@@ -125,7 +138,7 @@ func (q *FileQueue) ReadAll() ([]Event, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	f, err := os.Open(q.path)
+	f, err := openQueueFile(q.path, os.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -158,7 +171,12 @@ func (q *FileQueue) Truncate() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	return os.Truncate(q.path, 0)
+	f, err := openQueueFile(q.path, os.O_WRONLY)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Truncate(0)
 }
 
 // ShouldFlush returns true if the queue should be flushed.
