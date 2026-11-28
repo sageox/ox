@@ -243,3 +243,122 @@ func TestOrphanedStubSweepKeepsAQuarantinedRecording(t *testing.T) {
 		t.Fatalf("the sweep must still reap an ordinary dead header-only stub: %+v", res)
 	}
 }
+
+// Release by name trusts only markers ox wrote. A marker committed to the
+// repository's legacy sessions/ folder, or one claiming another folder, is not
+// a quarantined recording that can be released.
+func TestLoadQuarantinedRecordingNamed_OnlyFromCachesOxWrites(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	state, err := StartRecording(project, StartRecordingOptions{AgentID: "OxNamed", AdapterName: "claude-code", Username: "testuser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SourceRejected = true
+	if err := SaveRecordingState(project, state); err != nil {
+		t.Fatal(err)
+	}
+	name := GetSessionName(state.SessionPath)
+
+	found, err := LoadQuarantinedRecordingNamed(project, name)
+	if err != nil || found == nil || found.SessionID != state.SessionID {
+		t.Fatalf("the cache recording must be found: %+v, %v", found, err)
+	}
+
+	forge := func(dir string, sessionPath string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		forged := *state
+		forged.AgentID = "OxForged"
+		forged.SessionPath = sessionPath
+		data, err := json.Marshal(forged)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, recordingFile), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyName := "2001-02-03T04-05-testuser-OxForged"
+	legacy := filepath.Join(project, "sessions", legacyName)
+	forge(legacy, legacy)
+	if found, err := LoadQuarantinedRecordingNamed(project, legacyName); err != nil || found != nil {
+		t.Fatalf("a marker in the in-repo legacy folder must be skipped: %+v, %v", found, err)
+	}
+
+	elsewhereName := "2001-02-03T04-06-testuser-OxForged"
+	forge(filepath.Join(filepath.Dir(state.SessionPath), elsewhereName), legacy)
+	if found, err := LoadQuarantinedRecordingNamed(project, elsewhereName); err != nil || found != nil {
+		t.Fatalf("a marker claiming another folder must be skipped: %+v, %v", found, err)
+	}
+}
+
+// An unnamed release or abort lists the agent's quarantined recordings. The
+// list must apply the trust rule a named lookup does, so a marker planted in
+// the in-repo legacy folder, or one claiming another folder, is never offered.
+func TestLoadQuarantinedRecordingsForAgent_OnlyFromCachesOxWrites(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	state, err := StartRecording(project, StartRecordingOptions{AgentID: "OxListed", AdapterName: "claude-code", Username: "testuser"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SourceRejected = true
+	if err := SaveRecordingState(project, state); err != nil {
+		t.Fatal(err)
+	}
+	forge := func(dir, sessionPath string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		forged := *state
+		forged.SessionPath = sessionPath
+		forged.StartedAt = state.StartedAt.Add(time.Hour)
+		data, err := json.Marshal(forged)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, recordingFile), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := filepath.Join(project, "sessions", "2001-02-03T04-05-testuser-OxListed")
+	forge(legacy, legacy)
+	forge(filepath.Join(filepath.Dir(state.SessionPath), "2001-02-03T04-06-testuser-OxListed"), legacy)
+
+	held, err := LoadQuarantinedRecordingsForAgent(project, "OxListed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 1 || held[0].SessionPath != state.SessionPath {
+		t.Fatalf("only the cache recording may be listed, got %d: %+v", len(held), held)
+	}
+}
+
+// A quarantine lookup with nothing to look for is a caller bug, not "none
+// held": an empty answer would let a release or discard go on without a target.
+func TestQuarantineLookupsRefuseAnEmptyKey(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+
+	if _, err := LoadQuarantinedRecordingsForAgent(project, ""); !errors.Is(err, ErrEmptyPath) {
+		t.Fatalf("LoadQuarantinedRecordingsForAgent with no agent ID: err = %v, want ErrEmptyPath", err)
+	}
+	if _, err := LoadQuarantinedRecordingNamed(project, ""); !errors.Is(err, ErrEmptyPath) {
+		t.Fatalf("LoadQuarantinedRecordingNamed with no name: err = %v, want ErrEmptyPath", err)
+	}
+}
+
+// A marker that records no folder of its own cannot be matched to the one it
+// was found in, so it is never trusted for a release or a discard.
+func TestTrustedQuarantineMarkerNeedsARecordedFolder(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	dir := t.TempDir()
+
+	if trustedQuarantineMarker(project, dir, &RecordingState{SourceRejected: true}) {
+		t.Fatal("a marker with no SessionPath was trusted")
+	}
+	if !trustedQuarantineMarker(project, dir, &RecordingState{SourceRejected: true, SessionPath: dir}) {
+		t.Fatal("a marker naming the folder it sits in was not trusted")
+	}
+}

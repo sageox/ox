@@ -685,6 +685,9 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	// resolve instance from store
 	inst, err := resolveInstance(agentID)
 	if err != nil {
+		if handled, heldErr := runForExpiredQuarantineOwner(cmd, agentID, args, err); handled {
+			return heldErr
+		}
 		return err
 	}
 
@@ -770,7 +773,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionSubagentList(inst)
 		case "recover":
 			release, _ := cmd.Flags().GetBool("release-quarantine")
-			return recoverAgentSession(inst, release)
+			return recoverAgentSessionNamed(inst, release, firstPositional(sessionArgs))
 		case "abort":
 			return runAgentSessionAbort(inst, cmd, sessionArgs)
 		case "pause":
@@ -869,9 +872,9 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 		return nil, fmt.Errorf("failed to read instance store: %w", readErr)
 	}
 	if expired {
-		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
+		return nil, errkind.WithDetail(errkind.Other, "instance expired: %s", fmt.Errorf("%w: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentinstance.ErrInstanceExpired, agentID))
 	}
-	return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentID, strings.Join(searched, ", "))
+	return nil, errkind.WithDetail(errkind.Other, "instance not found: %s", fmt.Errorf("%w: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentinstance.ErrInstanceNotFound, agentID, strings.Join(searched, ", ")))
 }
 
 // findProjectRoot walks up from cwd looking for .sageox directory.

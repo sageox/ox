@@ -716,18 +716,59 @@ func LoadQuarantinedRecordingsForAgent(projectRoot, agentID string) ([]*Recordin
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
 	}
-	states, err := LoadAllRecordingStates(projectRoot)
-	if err != nil {
-		return nil, err
-	}
 	var held []*RecordingState
-	for _, s := range states {
-		if s.AgentID == agentID && s.SourceRejected {
+	if err := walkRecordingMarkers(projectRoot, false, func(dir string, s *RecordingState) bool {
+		if s.AgentID == agentID && s.SourceRejected && trustedQuarantineMarker(projectRoot, dir, s) {
 			held = append(held, s)
 		}
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	sort.SliceStable(held, func(i, j int) bool { return held[i].StartedAt.After(held[j].StartedAt) })
 	return held, nil
+}
+
+// LoadQuarantinedRecordingNamed returns the quarantined recording in the session
+// folder named name, or nil when there is none. It reads only the caches ox
+// writes recordings to: markers in the in-repo legacy sessions/ folder are
+// skipped, since anyone who can commit to the repository controls them and ox
+// never quarantines there. A marker whose SessionPath names a folder other than
+// the one it was found in is skipped too.
+func LoadQuarantinedRecordingNamed(projectRoot, name string) (*RecordingState, error) {
+	if name == "" {
+		return nil, fmt.Errorf("%w: session name", ErrEmptyPath)
+	}
+	var found *RecordingState
+	err := walkRecordingMarkers(projectRoot, false, func(dir string, state *RecordingState) bool {
+		if !state.SourceRejected || filepath.Base(dir) != name || !trustedQuarantineMarker(projectRoot, dir, state) {
+			return true
+		}
+		found = state
+		return false
+	})
+	return found, err
+}
+
+// trustedQuarantineMarker reports whether a quarantined marker found in dir
+// may be released or discarded: it lives in a cache ox writes, not the in-repo
+// legacy sessions/ folder anyone who can commit controls, and its SessionPath
+// names dir itself.
+func trustedQuarantineMarker(projectRoot, dir string, state *RecordingState) bool {
+	if filepath.Clean(filepath.Dir(dir)) == filepath.Clean(filepath.Join(projectRoot, "sessions")) {
+		return false
+	}
+	return samePath(dir, state.SessionPath)
+}
+
+// samePath reports whether a and b name the same existing file or directory.
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ai, aErr := os.Stat(a)
+	bi, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(ai, bi)
 }
 
 // LoadRecordingStateForWorkspace finds the recording whose WorkspacePath
