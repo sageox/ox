@@ -207,7 +207,7 @@ func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]gu
 			return nil, ErrPointerContent
 		}
 		if err := secretguard.ValidateContent(name, content); err != nil {
-			return nil, fmt.Errorf("LFS publication refused: %w", err)
+			return nil, refusedUpload(name, err)
 		}
 		proofs[name] = guardedUpload{content: content}
 	}
@@ -220,10 +220,17 @@ func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]gu
 	rules = rules.Delta(secretguard.Bundled())
 	for name, proof := range proofs {
 		if err := rules.ValidateContent(name, proof.content); err != nil {
-			return nil, fmt.Errorf("LFS publication refused: %w", err)
+			return nil, refusedUpload(name, err)
 		}
 	}
 	return proofs, nil
+}
+
+// refusedUpload names the file the secret guard refused (never its bytes).
+// Without the name, a refusal during LFS reconcile wedges every Ledger push
+// and leaves the coworker no way to find the session to redact.
+func refusedUpload(name string, err error) error {
+	return fmt.Errorf("LFS publication refused for %s: %w", name, err)
 }
 func uploadGuardedObject(action *Action, proof guardedUpload) error {
 	if action == nil || action.Href == "" {

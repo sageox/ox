@@ -67,8 +67,9 @@ export interface HostControlsOptions {
   revision?: string;
   /**
    * The plan's live presence room: the bar lists who else has this plan
-   * open, and their pointers are drawn over the plan with their names when
-   * they show the same revision. Needs revision.
+   * open, and their pointers are drawn over the plan with their names, and
+   * the words they select tinted in their colors, when they show the same
+   * revision. Needs revision.
    */
   presence?: PresenceTransport;
   /**
@@ -1086,6 +1087,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         break;
       case 'located':
         if (presence) presence.located(m.points);
+        break;
+      case 'selection':
+        if (presence) presence.selection(m.sel);
         break;
     }
   });

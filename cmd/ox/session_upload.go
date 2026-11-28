@@ -549,6 +549,10 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // page): PushWithRetry's pull rebases the Ledger, and a cancel mid-rebase
 // kills git and skips the abort, leaving the clone mid-rebase. Its own
 // per-step timeouts still bound it.
+// errLedgerLockBusy: the push never started its secret scan because another
+// ox process (usually the daemon syncing) held the Ledger lock throughout.
+var errLedgerLockBusy = errors.New("another ox process (usually the daemon) held the Ledger lock, so the push did not start; retry, or stop the daemon with 'ox daemon stop' and retry")
+
 func pushLedger(ctx context.Context, ledgerPath string) error {
 	ctx = context.WithoutCancel(ctx)
 	ctx, span := perf.Start(ctx, "pre-push total")
@@ -591,9 +595,16 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	gateCtx, gateSpan := perf.Start(ctx, "secret_gate")
 	gateCtx, cancelGate := context.WithTimeout(gateCtx, lockedCommitTimeout)
 	defer cancelGate()
+	gateStarted := false
 	if err := gitutil.WithRepoLock(gateCtx, ledgerPath, func() error {
+		gateStarted = true
 		return runPrePushSecretGate(gateCtx, ledgerPath)
 	}); err != nil {
+		if !gateStarted && gitutil.IsRepoLockBusy(err) {
+			// Without this, a lock held by the daemon reads as a slow secret
+			// scan ("context deadline exceeded") and points at the wrong fix.
+			err = fmt.Errorf("%w: %w", errLedgerLockBusy, err)
+		}
 		perf.RecordError(gateSpan, err)
 		gateSpan.End()
 		perf.RecordError(span, err)

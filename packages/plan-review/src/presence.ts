@@ -1,15 +1,16 @@
-// Live presence, in the trusted host: who else has this plan open, and their
-// pointers, drawn as colored cursors with their names. The presence service
-// names everyone from their sign-in; the document tools only turn pointers
-// into content locations and back (pointer.ts), under keys the host mints, so
-// a framed plan never learns who points where. Nothing here is stored or
-// queued: only the latest place this reviewer's pointer rests is sent, every
-// peer is forgotten when the connection drops, and a reconnect starts from
-// the service's own word on who is here now.
+// Live presence, in the trusted host: who else has this plan open, their
+// pointers, drawn as colored cursors with their names, and the words they
+// have selected, tinted in the same colors. The presence service names
+// everyone from their sign-in; the document tools only turn pointers and
+// selections into content locations and back (pointer.ts), under keys and
+// colors the host gives them, so a framed plan never learns who points at or
+// selects what. Nothing here is stored or queued: only this reviewer's latest
+// pointer and selection are sent, every peer is forgotten when the connection
+// drops, and a reconnect starts from the service's own word on who is here now.
 
 import { fnv1a } from './anchor.js';
 import type { HostPort } from './ports.js';
-import { MAX_POINTERS, pointerAt, type Located, type PointerAt } from './protocol.js';
+import { COLORS, MAX_POINTERS, pointerAt, selectionAt, type Located, type PointerAt, type SelectionAt, type Tinted } from './protocol.js';
 
 /** Another connection to the plan, as the presence service describes it. */
 export interface Peer {
@@ -23,6 +24,8 @@ export interface Peer {
   revision: string;
   /** Where its pointer rests on the plan, or null. */
   at: PointerAt | null;
+  /** The words it has selected; absent or null when none. */
+  sel?: SelectionAt | null;
 }
 
 /** What a presence service says, in order. */
@@ -49,11 +52,12 @@ export interface PresenceTransport {
 
 export interface PresenceLink {
   /**
-   * Where this reviewer's pointer rests now, or null. Only the latest
-   * matters: drop any not yet sent. A promise returned holds the next move
-   * until it settles, so moves never overlap and cannot arrive out of order.
+   * Where this reviewer's pointer rests now and the words they have
+   * selected, each null when there is none. Only the latest matters: drop
+   * any not yet sent. A promise returned holds the next move until it
+   * settles, so moves never overlap and cannot arrive out of order.
    */
-  move(at: PointerAt | null): void | Promise<unknown>;
+  move(at: PointerAt | null, sel: SelectionAt | null): void | Promise<unknown>;
   /** Leave the room. */
   leave(): void;
 }
@@ -61,9 +65,11 @@ export interface PresenceLink {
 export interface Presence {
   /** This reviewer's pointer, as the document tools located it. */
   pointer(at: PointerAt | null): void;
+  /** The words this reviewer has selected, as the document tools located them. */
+  selection(sel: SelectionAt | null): void;
   /** Where the document placed the peers' pointers. */
   located(points: Located[]): void;
-  /** The document is listening: ask it to place the pointers again. */
+  /** The document is listening: ask it to place the pointers and tint the selections again. */
   ready(): void;
   /** The frame moved in this window: the cursors follow it. */
   reposition(): void;
@@ -71,11 +77,11 @@ export interface Presence {
 }
 
 const SEND_EVERY = 200; // ms: the most often a moving pointer is sent (5 a second; host.css glides a cursor that long)
-const COLORS = 8; // host.css .rev-c0 … .rev-c7
 const MAX_NAME = 200;
 const ARROW = '<svg width="16" height="20" viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1l13.5 10.2-6.1.9-3.3 6.4z" fill="currentColor" stroke="#111411" stroke-width="1.2" stroke-linejoin="round"/></svg>';
 
-const color = (user: string) => 'rev-c' + (parseInt(fnv1a(user), 16) % COLORS);
+const hue = (user: string) => parseInt(fnv1a(user), 16) % COLORS;
+const color = (user: string) => 'rev-c' + hue(user);
 const short = (v: unknown, n: number): v is string => typeof v === 'string' && v.length > 0 && v.length <= n;
 
 // peerOf checks one peer the transport delivered; the service is trusted, but
@@ -84,10 +90,11 @@ const short = (v: unknown, n: number): v is string => typeof v === 'string' && v
 function peerOf(v: unknown): Peer | null {
   const p = v as Record<string, unknown> | null;
   if (!p || typeof p !== 'object' || !short(p.id, 128) || !short(p.name, MAX_NAME) || !short(p.user, 128) || !short(p.revision, 128)) return null;
-  // no location, or null: pointing nowhere
+  // no location, or null: pointing nowhere; the same for a selection
   const at = p.at == null ? null : pointerAt(p.at);
-  if (p.at != null && !at) return null;
-  return { id: p.id, name: p.name, user: p.user, revision: p.revision, at };
+  const sel = p.sel == null ? null : selectionAt(p.sel);
+  if ((p.at != null && !at) || (p.sel != null && !sel)) return null;
+  return { id: p.id, name: p.name, user: p.user, revision: p.revision, at, sel };
 }
 
 /**
@@ -113,8 +120,9 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   document.body.appendChild(layer);
   const cursors = new Map<string, HTMLElement>();
   let listed = ''; // who the chips show, as JSON
+  let tinted = ''; // the selections the document was last asked to tint, as JSON
 
-  let mine: PointerAt | null = null, sent = 'null', last = 0, moving = false;
+  let mine: PointerAt | null = null, mySel: SelectionAt | null = null, sent = '[null,null]', last = 0, moving = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const link = transport.join(revision, on);
 
@@ -160,8 +168,8 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
     return k;
   }
 
-  // send passes this reviewer's latest pointer to the service, at most once
-  // every SEND_EVERY ms; now sends it at once.
+  // send passes this reviewer's latest pointer and selection to the service,
+  // at most once every SEND_EVERY ms; now sends them at once.
   function send(now: boolean) {
     if (!live || gone || (timer !== undefined && !now)) return;
     clearTimeout(timer);
@@ -169,23 +177,33 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   }
   function flush() {
     timer = undefined;
-    const at = mine, s = JSON.stringify(at);
+    const at = mine, sel = mySel, s = JSON.stringify([at, sel]);
     if (!live || gone || moving || s === sent) return;
     sent = s;
     last = Date.now();
     moving = true;
-    Promise.resolve().then(() => link.move(at)).catch(() => {}).then(() => { moving = false; send(false); });
+    Promise.resolve().then(() => link.move(at, sel)).catch(() => {}).then(() => { moving = false; send(false); });
   }
 
-  // update lists who is here and asks the document to place every pointer on
-  // this revision; a pointer on another revision is never placed on this one.
+  // update lists who is here and asks the document to place every pointer,
+  // and tint every selection, on this revision; neither is ever drawn on
+  // another revision.
   function update() {
     if (gone) return;
     keys.forEach((k, id) => { if (!peers.has(id)) { keys.delete(id); ids.delete(k); } });
     renderHere();
     const points: Array<{ key: string; at: PointerAt }> = [];
-    peers.forEach((p) => { if (p.revision === revision && p.at && points.length < MAX_POINTERS) points.push({ key: keyOf(p.id), at: p.at }); });
+    const sels: Tinted[] = [];
+    peers.forEach((p) => {
+      if (p.revision !== revision) return;
+      if (p.at && points.length < MAX_POINTERS) points.push({ key: keyOf(p.id), at: p.at });
+      if (p.sel && sels.length < MAX_POINTERS) sels.push({ color: hue(p.user), sel: p.sel });
+    });
     port.send({ type: 'locate', points });
+    // unlike pointers, which glide, a selection changes rarely: the document
+    // tints it again only when it does
+    const s = JSON.stringify(sels);
+    if (s !== tinted) { tinted = s; port.send({ type: 'selections', items: sels }); }
     // a cursor whose peer left, or whose pointer left the plan, goes now,
     // not at the document's next answer
     cursors.forEach((el, k) => {
@@ -264,11 +282,18 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
       mine = at;
       send(false);
     },
+    selection(sel) {
+      mySel = sel;
+      send(false);
+    },
     located(points) {
       placed = points;
       draw();
     },
-    ready: update,
+    ready() {
+      tinted = ''; // a document that loaded again has tinted nothing
+      update();
+    },
     reposition: draw,
     leave() {
       if (gone) return;
@@ -276,6 +301,7 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
       clearTimeout(timer);
       link.leave();
       port.send({ type: 'locate', points: [] });
+      port.send({ type: 'selections', items: [] });
       layer.remove();
       here.textContent = '';
       here.hidden = true;

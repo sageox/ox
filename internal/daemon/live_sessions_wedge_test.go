@@ -82,7 +82,8 @@ type wedgedGit struct {
 // installWedgedGit puts a git shim first on PATH. mode "hang" blocks every
 // call made in or about a Ledger path until release(), then fails it the way a
 // killed git does. mode "network" leaves local git alone but hangs every
-// fetch or pull and rejects every push as non-fast-forward.
+// ls-remote, fetch or pull and rejects every push as non-fast-forward. A call
+// that hangs is logged a second time as "hung :: <args>".
 func installWedgedGit(t *testing.T, mode string) *wedgedGit {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -93,6 +94,7 @@ func installWedgedGit(t *testing.T, mode string) *wedgedGit {
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s :: %%s\n' "$PWD" "$*" >> '%[1]s'
 hang() {
+  printf 'hung :: %%s\n' "$*" >> '%[1]s'
   i=0
   while [ ! -f '%[2]s' ] && [ $i -lt 2400 ]; do sleep 0.05; i=$((i+1)); done
   echo 'fatal: the hung git was killed' >&2
@@ -100,11 +102,11 @@ hang() {
 }
 case '%[3]s' in
 hang)
-  case "$PWD :: $*" in *'%[4]s'*) hang ;; esac ;;
+  case "$PWD :: $*" in *'%[4]s'*) hang "$@" ;; esac ;;
 network)
   for a in "$@"; do
     case "$a" in
-    fetch|pull) hang ;;
+    ls-remote|fetch|pull) hang "$@" ;;
     push) echo ' ! [rejected]        main -> main (non-fast-forward)' >&2; echo 'error: failed to push some refs' >&2; exit 1 ;;
     esac
   done ;;
@@ -294,9 +296,9 @@ func TestLiveStreamWedge_LedgerSyncHungInGitThenMovedAside(t *testing.T) {
 	releaseLock()
 }
 
-// Mode c: the network half of the Ledger is broken. Every fetch and pull
-// hangs and every push is rejected non-fast-forward; the daemon's sync sits
-// in a hung pull holding its Ledger mutex and the repo lock.
+// Mode c: the network half of the Ledger is broken. Every ls-remote, fetch
+// and pull hangs and every push is rejected non-fast-forward; the daemon's
+// sync sits in a hung network call holding its Ledger mutex and the repo lock.
 func TestLiveStreamWedge_FetchHangsAndPushIsRejected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git Ledger and a hung git on PATH")
@@ -318,14 +320,9 @@ func TestLiveStreamWedge_FetchHangsAndPushIsRejected(t *testing.T) {
 	sched := NewSyncScheduler(cfg, discardLogger())
 	pulled := make(chan error, 1)
 	go func() { pulled <- sched.doPull(context.Background(), nil, true, true) }()
-	require.Eventually(t, func() bool {
-		for _, c := range git.calls() {
-			if strings.Contains(c, " fetch") || strings.Contains(c, " pull") {
-				return true
-			}
-		}
-		return false
-	}, 20*time.Second, 20*time.Millisecond, "the sync never reached the network")
+	// the sync's first network call is the remote-unchanged check's ls-remote:
+	// wait until a call is blocked in the shim, not just mentioned
+	git.waitForCall(t, "hung :: ")
 
 	for n := 2; n <= 4; n++ {
 		e.turn(&want, n)
@@ -333,7 +330,7 @@ func TestLiveStreamWedge_FetchHangsAndPushIsRejected(t *testing.T) {
 	requireDelivered(t, e, want.String())
 	select {
 	case <-pulled:
-		t.Fatal("precondition: the Ledger sync should still be hung in a fetch")
+		t.Fatal("precondition: the Ledger sync should still be stuck, holding the Ledger mutex and the repo lock")
 	default:
 	}
 	git.Release()

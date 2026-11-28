@@ -75,3 +75,37 @@ func TestUploadSessionFilesRefusesWhatOnlyCurrentRulesCatch(t *testing.T) {
 	require.ErrorContains(t, err, "LFS publication refused")
 	require.Zero(t, requests, "no upload action may be requested before the current rules pass")
 }
+
+// A refusal names the file it refused, under either catalog, and never echoes
+// the matched bytes.
+// Failure prevented: LFS reconcile logs a nameless "publication refused", every
+// Ledger push stays rejected as "LFS objects are missing", and the coworker has
+// no way to find which session to redact.
+func TestPrepareUploadsRefusalNamesTheFile(t *testing.T) {
+	const secret = "AKIA" + "QWERTYUIOPASDFGH"
+	for _, tc := range []struct {
+		name, path, content string
+		currentOnly         bool
+	}{
+		{"bundled catalog", "sessions/2026-01-01T00-00-avery-OxAAAA/raw.jsonl", `{"content":"` + secret + `"}`, false},
+		{"current-only rule", "data/plans/2026-01-01-plan/plan.html", "notes future_qzxwvjkp", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useBundledSessionRules(t)
+			if tc.currentOnly {
+				data, err := os.ReadFile("../secretguard/gitleaks.toml")
+				require.NoError(t, err)
+				rules, err := secretguard.NewRules(append(data, "\n[[rules]]\nid = \"future-format\"\nregex = '''future_[a-z]{8}'''\n"...))
+				require.NoError(t, err)
+				currentSessionRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+			}
+			_, err := prepareUploads(context.Background(), map[string][]byte{
+				"sessions/clean/summary.md": []byte("ordinary notes"),
+				tc.path:                     []byte(tc.content),
+			})
+			require.ErrorContains(t, err, "LFS publication refused for "+tc.path)
+			require.NotContains(t, err.Error(), secret)
+			require.NotContains(t, err.Error(), "future_qzxwvjkp")
+		})
+	}
+}

@@ -31,6 +31,16 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 ::highlight(rev-q-gold){background-color:rgba(217,182,84,.3)}
 ::highlight(rev-q-faint){background-color:rgba(140,142,126,.22)}
 ::highlight(rev-q-focus){background-color:rgba(217,182,84,.55)}
+/* other reviewers' live selections, in their cursor colors (host.css
+   .rev-c0 … .rev-c7, the same hues), translucent so the words stay readable */
+::highlight(rev-sel-c0){background-color:rgba(153,198,147,.4)}
+::highlight(rev-sel-c1){background-color:rgba(127,179,213,.4)}
+::highlight(rev-sel-c2){background-color:rgba(226,163,111,.4)}
+::highlight(rev-sel-c3){background-color:rgba(179,157,219,.4)}
+::highlight(rev-sel-c4){background-color:rgba(108,196,184,.4)}
+::highlight(rev-sel-c5){background-color:rgba(228,154,192,.4)}
+::highlight(rev-sel-c6){background-color:rgba(217,182,84,.4)}
+::highlight(rev-sel-c7){background-color:rgba(163,184,239,.4)}
 /* drawings: the ink layer covers the document under the review controls. It
    takes the pointer only while the Draw tool is selected, and a pen or finger
    then draws instead of scrolling. */

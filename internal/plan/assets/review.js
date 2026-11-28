@@ -687,6 +687,7 @@
   var TINTS = ["sage", "amber", "red", "gold", "faint"];
   var MAX_POINTERS = 64;
   var MAX_PATH = 16;
+  var COLORS = 8;
   var MAX_TEXT_OFFSET = 1 << 20;
   function obj2(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -711,11 +712,7 @@
   function pointerAt(v) {
     if (!obj2(v) || typeof v.anchor !== "string" || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== "h" || !unit(v.x) || !unit(v.y)) return null;
     const at = { anchor: v.anchor, x: v.x, y: v.y };
-    if (v.nth !== void 0 || v.of !== void 0) {
-      if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return null;
-      at.nth = v.nth;
-      at.of = v.of;
-    }
+    if (!occurrence(v, at)) return null;
     if (v.path !== void 0) {
       if (!Array.isArray(v.path) || !v.path.length || v.path.length > MAX_PATH || !all(v.path, (i) => whole(i, MAX_ITEMS))) return null;
       at.path = v.path.slice();
@@ -725,6 +722,22 @@
       at.text = v.text;
     }
     return at;
+  }
+  function selectionAt(v) {
+    const start = obj2(v) ? textAt(v.start) : null, end = obj2(v) ? textAt(v.end) : null;
+    return start && end ? { start, end } : null;
+  }
+  function textAt(v) {
+    if (!obj2(v) || typeof v.anchor !== "string" || !ANCHOR.test(v.anchor) || v.anchor.charAt(0) !== "h" || !whole(v.text, MAX_TEXT_OFFSET)) return null;
+    const t = { anchor: v.anchor, text: v.text };
+    return occurrence(v, t) ? t : null;
+  }
+  function occurrence(v, out) {
+    if (v.nth === void 0 && v.of === void 0) return true;
+    if (!whole(v.nth, MAX_ITEMS) || !whole(v.of, MAX_ITEMS) || v.of < 2 || v.nth >= v.of) return false;
+    out.nth = v.nth;
+    out.of = v.of;
+    return true;
   }
   function paintItem(it) {
     if (!obj2(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
@@ -810,7 +823,29 @@
     for (let i = 0; n && i < path.length; i++) n = kids(n)[path[i]];
     return n || null;
   }
-  function pointerLayer(selector, exclude, moved, located) {
+  function charsBefore(host, node, off) {
+    let n = 0;
+    const w = words(host);
+    for (let t = w.nextNode(); t; t = w.nextNode()) {
+      if (t === node) return n + nonSpace(node.data.slice(0, off));
+      n += nonSpace(t.data);
+    }
+    return void 0;
+  }
+  function charOf(host, k) {
+    let n = 0, last = null;
+    const w = words(host);
+    for (let t = w.nextNode(); t; t = w.nextNode()) {
+      for (let i = 0; i < t.data.length; i++) {
+        if (/\s/.test(t.data.charAt(i))) continue;
+        if (n++ === k) return { t, i, past: false };
+        last = { t, i, past: true };
+      }
+    }
+    return n === k ? last : null;
+  }
+  function pointerLayer(selector, exclude, moved, located, selected) {
+    const HL = !!(window.CSS && CSS.highlights && window.Highlight);
     let started = false;
     let index = null;
     let stale = false, hashed = 0;
@@ -836,8 +871,18 @@
       }
       return index;
     }
+    function nameOf(el) {
+      const host = el.closest(selector), i = idx();
+      const anchor = host && i.of.get(host);
+      if (!host || !anchor) return null;
+      const same = i.by[anchor];
+      return same.length > 1 ? { host, anchor, nth: same.indexOf(host), of: same.length } : { host, anchor };
+    }
     let point = null;
     let sent = "null";
+    let selDirty = false;
+    let selSent = "null";
+    let held = null;
     let timer;
     let last = 0;
     function share() {
@@ -851,6 +896,13 @@
           sent = s;
           moved(at);
         }
+        if (!selDirty) return;
+        const sel = selectionNow(), j = JSON.stringify(sel);
+        selDirty = stale;
+        if (j !== selSent) {
+          selSent = j;
+          selected(sel);
+        }
       }, Math.max(0, last + STEP - Date.now()));
     }
     function locationAt(cx, cy) {
@@ -860,37 +912,62 @@
         break;
       }
       if (!hit || hit.closest(exclude)) return null;
-      const host = hit.closest(selector), i = idx();
-      const anchor = host && i.of.get(host);
-      if (!host || !anchor) return null;
-      const at = { anchor, x: 0.5, y: 0.5 };
-      const same = i.by[anchor];
-      if (same.length > 1) {
-        at.nth = same.indexOf(host);
-        at.of = same.length;
+      const m = nameOf(hit);
+      if (!m) return null;
+      const host = m.host, at = { anchor: m.anchor, x: 0.5, y: 0.5 };
+      if (m.of) {
+        at.nth = m.nth;
+        at.of = m.of;
       }
       const path = pathTo(host, hit);
       if (path && path.length) at.path = path;
       const r = (path ? hit : host).getBoundingClientRect();
       at.x = frac(cx - r.left, r.width);
       at.y = frac(cy - r.top, r.height);
-      const t = textAt(host, cx, cy);
+      const t = textAt2(host, cx, cy);
       if (t !== void 0) at.text = t;
       return at;
     }
-    function textAt(host, cx, cy) {
+    function textAt2(host, cx, cy) {
       const c = caretAt(cx, cy);
       if (!c || c[0].nodeType !== 3 || !host.contains(c[0])) return void 0;
       const node = c[0], off = c[1];
       const r = charBox(node, off < node.data.length ? off : off - 1);
       if (!r || cy < r.top || cy > r.bottom || cx < r.left - r.height || cx > r.right + r.height) return void 0;
-      let n = 0;
-      const w = words(host);
-      for (let t = w.nextNode(); t; t = w.nextNode()) {
-        if (t === node) return n + nonSpace(node.data.slice(0, off));
-        n += nonSpace(t.data);
+      return charsBefore(host, node, off);
+    }
+    function selectionNow() {
+      const s = getSelection();
+      const own = s && !s.isCollapsed && s.rangeCount ? selOf(s.getRangeAt(0)) : null;
+      return own || (held ? selOf(held) : null);
+    }
+    function selOf(r) {
+      const root = r.commonAncestorContainer;
+      const texts = [];
+      if (root.nodeType === 3) texts.push(root);
+      else for (let w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), t = w.nextNode(); t; t = w.nextNode()) texts.push(t);
+      const parts = [];
+      for (const n of texts) {
+        const t = n;
+        if (!r.intersectsNode(t) || !t.parentElement || t.parentElement.closest(SKIP + ", " + exclude)) continue;
+        const from = t === r.startContainer ? r.startOffset : 0, to = t === r.endContainer ? r.endOffset : t.data.length;
+        if (/\S/.test(t.data.slice(from, to))) parts.push([t, from, to]);
       }
-      return void 0;
+      let start = null, end = null;
+      for (let i = 0; i < parts.length && !start; i++) start = placeOf(parts[i][0], parts[i][1]);
+      for (let i = parts.length - 1; i >= 0 && !end; i--) end = placeOf(parts[i][0], parts[i][2]);
+      return start && end ? { start, end } : null;
+    }
+    function placeOf(node, off) {
+      const m = node.parentElement && nameOf(node.parentElement);
+      const text2 = m ? charsBefore(m.host, node, off) : void 0;
+      if (!m || text2 === void 0) return null;
+      const t = { anchor: m.anchor, text: text2 };
+      if (m.of) {
+        t.nth = m.nth;
+        t.of = m.of;
+      }
+      return t;
     }
     let wanted = [];
     let told = "[]";
@@ -898,6 +975,7 @@
     function answer() {
       frame = 0;
       if (!started) return;
+      if (tinted.length && idx() !== tintedOn) tint();
       const out = [];
       wanted.forEach((p) => {
         const pt = place(p.at);
@@ -925,26 +1003,49 @@
       return [r1(pt[0]), r1(pt[1])];
     }
     function textPoint(host, k) {
-      let n = 0, end = null;
-      const w = words(host);
-      for (let t = w.nextNode(); t; t = w.nextNode()) {
-        const s = t.data;
-        for (let i = 0; i < s.length; i++) {
-          if (/\s/.test(s.charAt(i))) continue;
-          if (n++ < k) {
-            end = [t, i];
-            continue;
-          }
-          const r2 = t.parentElement && shownBox(t.parentElement) ? charBox(t, i) : null;
-          return r2 ? [r2.left, r2.top + r2.height / 2] : null;
+      const c = charOf(host, k);
+      const r = c && c.t.parentElement && shownBox(c.t.parentElement) ? charBox(c.t, c.i) : null;
+      return c && r ? [c.past ? r.right : r.left, r.top + r.height / 2] : null;
+    }
+    let tinted = [];
+    let tintedOn = null;
+    function tint() {
+      tintedOn = idx();
+      if (!HL) return;
+      const by = [];
+      tinted.forEach((s) => {
+        const r = rangeOf(s.sel);
+        if (r) (by[s.color] = by[s.color] || []).push(r);
+      });
+      for (let c = 0; c < COLORS; c++) {
+        if (!by[c]) {
+          CSS.highlights.delete("rev-sel-c" + c);
+          continue;
         }
+        const hl = new Highlight();
+        by[c].forEach((r) => hl.add(r));
+        CSS.highlights.set("rev-sel-c" + c, hl);
       }
-      const r = n === k && end && end[0].parentElement && shownBox(end[0].parentElement) ? charBox(end[0], end[1]) : null;
-      return r ? [r.right, r.top + r.height / 2] : null;
+    }
+    function rangeOf(sel) {
+      const a = placeIn(sel.start, false), b = placeIn(sel.end, true);
+      if (!a || !b) return null;
+      const r = document.createRange();
+      r.setStart(a[0], a[1]);
+      r.setEnd(b[0], b[1]);
+      return r.collapsed ? null : r;
+    }
+    function placeIn(t, isEnd) {
+      const same = idx().by[t.anchor] || [];
+      if (same.length !== (t.of || 1)) return null;
+      const back = isEnd && t.text > 0;
+      const c = charOf(same[t.nth || 0], back ? t.text - 1 : t.text);
+      if (!c || back && c.past) return null;
+      return [c.t, c.past || back ? c.i + 1 : c.i];
     }
     function relayout() {
-      if (wanted.length && !frame) frame = requestAnimationFrame(answer);
-      if (point) share();
+      if ((wanted.length || tinted.length) && !frame) frame = requestAnimationFrame(answer);
+      if (point || selDirty) share();
     }
     document.addEventListener("pointermove", (e) => {
       if (e.pointerType === "touch") return;
@@ -963,6 +1064,10 @@
         share();
       }
     });
+    document.addEventListener("selectionchange", () => {
+      selDirty = true;
+      share();
+    });
     window.addEventListener("pagehide", () => {
       point = null;
       clearTimeout(timer);
@@ -970,6 +1075,10 @@
       if (sent !== "null") {
         sent = "null";
         moved(null);
+      }
+      if (selSent !== "null") {
+        selSent = "null";
+        selected(null);
       }
     });
     document.addEventListener("scroll", relayout, { capture: true, passive: true });
@@ -982,6 +1091,7 @@
         const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
         if (el && el.closest(exclude + ", .rev-ink")) continue;
         stale = true;
+        selDirty = true;
         relayout();
         return;
       }
@@ -993,9 +1103,19 @@
         told = "";
         answer();
       },
+      selections(items) {
+        tinted = items;
+        if (started) tint();
+      },
+      hold(range) {
+        held = range;
+        selDirty = true;
+        share();
+      },
       start() {
         started = true;
         index = null;
+        selDirty = true;
         answer();
         share();
       }
@@ -1055,7 +1175,8 @@
       SELECTOR,
       NOT_PLAN,
       (at) => port.send({ type: "pointer", at }),
-      (points) => port.send({ type: "located", points })
+      (points) => port.send({ type: "located", points }),
+      (sel) => port.send({ type: "selection", sel })
     );
     function paint(next, nextDrawings) {
       items = next;
@@ -1337,6 +1458,7 @@
         case "focus": {
           const h = m.anchor === null ? null : picked && picked.a === m.anchor ? picked.range : qRanges[m.anchor] ? qRanges[m.anchor].range : null;
           focusRange(h);
+          pointers.hold(h);
           break;
         }
         case "reveal":
@@ -1344,6 +1466,9 @@
           break;
         case "locate":
           pointers.locate(m.points);
+          break;
+        case "selections":
+          pointers.selections(m.items);
           break;
       }
     });
@@ -1426,17 +1551,18 @@
 
   // src/presence.ts
   var SEND_EVERY = 200;
-  var COLORS = 8;
   var MAX_NAME = 200;
   var ARROW = '<svg width="16" height="20" viewBox="0 0 16 20" aria-hidden="true"><path d="M1 1l13.5 10.2-6.1.9-3.3 6.4z" fill="currentColor" stroke="#111411" stroke-width="1.2" stroke-linejoin="round"/></svg>';
-  var color = (user) => "rev-c" + parseInt(fnv1a(user), 16) % COLORS;
+  var hue = (user) => parseInt(fnv1a(user), 16) % COLORS;
+  var color = (user) => "rev-c" + hue(user);
   var short = (v, n) => typeof v === "string" && v.length > 0 && v.length <= n;
   function peerOf(v) {
     const p = v;
     if (!p || typeof p !== "object" || !short(p.id, 128) || !short(p.name, MAX_NAME) || !short(p.user, 128) || !short(p.revision, 128)) return null;
     const at = p.at == null ? null : pointerAt(p.at);
-    if (p.at != null && !at) return null;
-    return { id: p.id, name: p.name, user: p.user, revision: p.revision, at };
+    const sel = p.sel == null ? null : selectionAt(p.sel);
+    if (p.at != null && !at || p.sel != null && !sel) return null;
+    return { id: p.id, name: p.name, user: p.user, revision: p.revision, at, sel };
   }
   function startPresence(port, transport, revision, here, frame) {
     let self = "";
@@ -1453,7 +1579,8 @@
     document.body.appendChild(layer);
     const cursors = /* @__PURE__ */ new Map();
     let listed = "";
-    let mine = null, sent = "null", last = 0, moving = false;
+    let tinted = "";
+    let mine = null, mySel = null, sent = "[null,null]", last = 0, moving = false;
     let timer;
     const link = transport.join(revision, on);
     function on(e) {
@@ -1503,12 +1630,12 @@
     }
     function flush() {
       timer = void 0;
-      const at = mine, s = JSON.stringify(at);
+      const at = mine, sel = mySel, s = JSON.stringify([at, sel]);
       if (!live || gone || moving || s === sent) return;
       sent = s;
       last = Date.now();
       moving = true;
-      Promise.resolve().then(() => link.move(at)).catch(() => {
+      Promise.resolve().then(() => link.move(at, sel)).catch(() => {
       }).then(() => {
         moving = false;
         send(false);
@@ -1524,10 +1651,18 @@
       });
       renderHere();
       const points = [];
+      const sels = [];
       peers.forEach((p) => {
-        if (p.revision === revision && p.at && points.length < MAX_POINTERS) points.push({ key: keyOf(p.id), at: p.at });
+        if (p.revision !== revision) return;
+        if (p.at && points.length < MAX_POINTERS) points.push({ key: keyOf(p.id), at: p.at });
+        if (p.sel && sels.length < MAX_POINTERS) sels.push({ color: hue(p.user), sel: p.sel });
       });
       port.send({ type: "locate", points });
+      const s = JSON.stringify(sels);
+      if (s !== tinted) {
+        tinted = s;
+        port.send({ type: "selections", items: sels });
+      }
       cursors.forEach((el, k) => {
         const id = ids.get(k), p = id ? peers.get(id) : void 0;
         if (!p || !p.at) {
@@ -1604,11 +1739,18 @@
         mine = at;
         send(false);
       },
+      selection(sel) {
+        mySel = sel;
+        send(false);
+      },
       located(points) {
         placed = points;
         draw();
       },
-      ready: update,
+      ready() {
+        tinted = "";
+        update();
+      },
       reposition: draw,
       leave() {
         if (gone) return;
@@ -1616,6 +1758,7 @@
         clearTimeout(timer);
         link.leave();
         port.send({ type: "locate", points: [] });
+        port.send({ type: "selections", items: [] });
         layer.remove();
         here.textContent = "";
         here.hidden = true;
@@ -2894,6 +3037,9 @@
         case "located":
           if (presence) presence.located(m.points);
           break;
+        case "selection":
+          if (presence) presence.selection(m.sel);
+          break;
       }
     });
     restoreSync();
@@ -3049,8 +3195,8 @@
         return {
           // a pointer that cannot reach the server is dropped: the stream's
           // own error already says the server is gone
-          move(at) {
-            return fetch(base + "/presence", { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify({ key, at }) }).catch(() => {
+          move(at, sel) {
+            return fetch(base + "/presence", { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify({ key, at, sel }) }).catch(() => {
             });
           },
           leave() {

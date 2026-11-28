@@ -306,7 +306,7 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 		sf, findErr := discoverNativeSessionFile(projectRoot, state)
 		if findErr != nil {
 			return fmt.Errorf("claude session file not found or not accepted for %s (%w); nothing was published.\n%s",
-				firstNonEmpty(state.WorkspacePath, projectRoot), findErr, undiscoveredSessionNextSteps(state))
+				firstNonEmpty(state.WorkspacePath, projectRoot), findErr, undiscoveredSessionNextSteps(state, findErr))
 		}
 		state.SessionFile = sf
 		discovered = true
@@ -328,7 +328,7 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 			// the cache holds no turns, so it cannot stand in for a transcript
 			// that vanished after discovery
 			return fmt.Errorf("claude session file %s cannot be read (%w); nothing was published.\n%s",
-				state.SessionFile, err, undiscoveredSessionNextSteps(state))
+				state.SessionFile, err, undiscoveredSessionNextSteps(state, nil))
 		}
 	}
 
@@ -405,7 +405,7 @@ func recoverViaNormalStopWithRelease(inst *agentinstance.Instance, projectRoot s
 	})
 	if errors.Is(err, errNothingRecovered) {
 		return fmt.Errorf("claude session file %s has no turns since the recording started; nothing was published.\n%s",
-			state.SessionFile, undiscoveredSessionNextSteps(state))
+			state.SessionFile, undiscoveredSessionNextSteps(state, nil))
 	}
 	if err != nil {
 		if errors.Is(err, claudesource.ErrUntrustedSource) {
