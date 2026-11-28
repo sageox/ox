@@ -1,3 +1,7 @@
+---
+description: Load SageOx team context for this AI coworker session.
+allowed-tools: Bash(ox:*)
+---
 Load SageOx team context for this AI coworker session.
 
 Use when:

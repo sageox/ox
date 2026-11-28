@@ -1,3 +1,7 @@
+---
+description: Check SageOx project status including authentication, sync, and daemon health.
+allowed-tools: Bash(ox:*)
+---
 Check SageOx project status including authentication, sync, and daemon health.
 
 Use when:

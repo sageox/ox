@@ -1,3 +1,7 @@
+---
+description: Stop recording and save this agent session to the project ledger.
+allowed-tools: Bash(ox:*)
+---
 Stop recording and save this agent session to the project ledger.
 
 Use when:
