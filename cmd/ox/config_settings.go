@@ -1242,7 +1242,7 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 func setUserConfig(key, value string) error {
 	cfg, err := config.LoadUserConfig()
 	if err != nil {
-		cfg = &config.UserConfig{}
+		return fmt.Errorf("failed to load user config: %w", err)
 	}
 
 	switch key {
@@ -1620,7 +1620,7 @@ func setTeamConfig(key, value, projectRoot string) error {
 func unsetUserConfig(key string) error {
 	cfg, err := config.LoadUserConfig()
 	if err != nil {
-		cfg = &config.UserConfig{}
+		return fmt.Errorf("failed to load user config: %w", err)
 	}
 
 	switch key {
@@ -1936,7 +1936,10 @@ func unsetTeamConfig(key, projectRoot string) error {
 	teamPath := tc.Path
 	cfg, err := config.LoadTeamConfig(teamPath)
 	if err != nil {
-		cfg = &config.TeamConfig{}
+		return fmt.Errorf("failed to load team config: %w", err)
+	}
+	if cfg == nil {
+		return nil // no config.toml yet, so there is nothing to clear
 	}
 
 	switch key {
