@@ -400,7 +400,7 @@ func cachePublishBlocker(dir string) error {
 		return nil
 	}
 	if state.SourceRejected {
-		return fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", name, state.AgentID)
+		return fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine %s' to re-check it", name, state.AgentID, name)
 	}
 	return fmt.Errorf("session %s is still recording; stop it first with 'ox agent %s session stop'", name, state.AgentID)
 }

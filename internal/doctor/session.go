@@ -782,18 +782,40 @@ func (c *SessionQuarantineCheck) Run(_ context.Context, _ bool) CheckResult {
 		}
 	}
 
-	agentIDs := make([]string, 0, len(status.QuarantinedRecordings))
+	var names, lines []string
+	seen := make(map[string]bool)
 	for _, state := range status.QuarantinedRecordings {
-		agentIDs = append(agentIDs, state.AgentID)
+		name := filepath.Base(state.SessionPath)
+		if seen[name] || !releasableByName(c.gitRoot, name, state) {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+		lines = append(lines, fmt.Sprintf("  'ox agent %s session recover --release-quarantine %s'  or  'ox agent %s session abort %s'", state.AgentID, name, state.AgentID, name))
 	}
-	first := status.QuarantinedRecordings[0]
+	if len(names) == 0 {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+	fix := "Nothing is lost. For each session, re-check ownership and upload if it now passes, or discard the captured data:\n" + strings.Join(lines, "\n")
 
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarn,
-		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
-		Fix:     fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine' to re-check ownership and upload if it now passes, or 'ox agent %s session abort %s' to discard the captured data", first.AgentID, first.AgentID, filepath.Base(first.SessionPath)),
+		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(names), strings.Join(names, ", ")),
+		Fix:     fix,
 	}
+}
+
+// releasableByName reports whether 'ox agent <id> session recover
+// --release-quarantine <name>' would act on state. A marker that release by name
+// refuses, such as one in the repository's legacy sessions/ folder, is left out
+// so doctor never prints a command that cannot work.
+func releasableByName(gitRoot, name string, state *session.RecordingState) bool {
+	found, err := session.LoadQuarantinedRecordingNamed(gitRoot, name)
+	return err == nil && found != nil && found.AgentID == state.AgentID && found.SessionID == state.SessionID
 }
 
 // ValidSessionRecordingModesString returns comma-separated list of valid modes.

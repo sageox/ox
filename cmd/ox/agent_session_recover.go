@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -22,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/claudesource"
+	"github.com/spf13/cobra"
 )
 
 // sessionRecoverOutput is the JSON output format for session recover.
@@ -82,22 +84,134 @@ func recheckQuarantinedSource(projectRoot string, state *session.RecordingState)
 	return nil
 }
 
+// loadQuarantinedForAgent lists an agent's quarantined recordings; tests
+// replace it to change what is on disk between two reads.
+var loadQuarantinedForAgent = session.LoadQuarantinedRecordingsForAgent
+
 // releaseAndRecover re-checks a quarantined recording and, only if the check
 // passes, recovers that recording. Its persisted quarantine stays in place
 // until recovery clears the recording, keeping it out of active lookups.
-func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
-	held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID)
-	if err != nil {
-		return fmt.Errorf("no recording state found: %w", err)
+//
+// A session name picks the recording whichever AI coworker made it; without
+// one, the agent's newest quarantined recording is released.
+func releaseAndRecover(inst *agentinstance.Instance, projectRoot, sessionName string) error {
+	var state *session.RecordingState
+	if sessionName != "" {
+		named, err := quarantinedRecordingNamed(projectRoot, sessionName)
+		if err != nil {
+			return err
+		}
+		state = named
+	} else {
+		held, err := loadQuarantinedForAgent(projectRoot, inst.AgentID)
+		if err != nil {
+			return fmt.Errorf("no recording state found: %w", err)
+		}
+		if len(held) == 0 {
+			return fmt.Errorf("no quarantined recording to release for agent %s", inst.AgentID)
+		}
+		state = held[0] // newest; 'ox doctor' lists every one
 	}
-	if len(held) == 0 {
-		return fmt.Errorf("no quarantined recording to release for agent %s", inst.AgentID)
+	return releaseRecording(inst, projectRoot, state)
+}
+
+// releaseRecording re-checks and recovers the quarantined recording state, the
+// one its caller selected, under the agent that made it.
+func releaseRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	if state.AgentID != inst.AgentID {
+		inst = &agentinstance.Instance{AgentID: state.AgentID}
 	}
-	state := held[0] // newest; 'ox doctor' lists every one
 	if err := recheckQuarantinedSource(projectRoot, state); err != nil {
 		return err
 	}
 	return recoverForRelease(inst, projectRoot, state)
+}
+
+// quarantinedRecordingNamed returns the quarantined recording whose folder is
+// sessionName, as 'ox doctor' lists it.
+func quarantinedRecordingNamed(projectRoot, sessionName string) (*session.RecordingState, error) {
+	state, err := session.LoadQuarantinedRecordingNamed(projectRoot, sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("no recording state found: %w", err)
+	}
+	if state != nil {
+		return state, nil
+	}
+	return nil, fmt.Errorf("no quarantined recording named %s\nRun 'ox doctor' to list quarantined recordings", sessionName)
+}
+
+// runForExpiredQuarantineOwner runs the two commands 'ox doctor' prints for a
+// quarantined recording, release and discard by name, when the recording's AI
+// coworker instance has expired. An instance expires a day after its process
+// exits, while a quarantined recording waits for review indefinitely. It
+// reports handled=false, leaving lookupErr to stand, for any other command or
+// an agent ID with no quarantined recording.
+func runForExpiredQuarantineOwner(cmd *cobra.Command, agentID string, args []string, lookupErr error) (handled bool, err error) {
+	if !errors.Is(lookupErr, agentinstance.ErrInstanceNotFound) && !errors.Is(lookupErr, agentinstance.ErrInstanceExpired) {
+		return false, nil
+	}
+	if len(args) < 2 || args[0] != "session" {
+		return false, nil
+	}
+	release, _ := cmd.Flags().GetBool("release-quarantine")
+	sessionName := firstPositional(args[2:])
+	switch {
+	case args[1] == "recover" && release:
+	case args[1] == "abort" && sessionName != "":
+	default:
+		return false, nil
+	}
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return false, nil
+	}
+	inst := &agentinstance.Instance{AgentID: agentID}
+	if sessionName == "" {
+		held, err := loadQuarantinedForAgent(projectRoot, agentID)
+		if err != nil || len(held) == 0 {
+			return false, nil
+		}
+		if len(held) > 1 {
+			return true, fmt.Errorf("agent %s has %d quarantined recordings; name the one to release: ox agent %s session recover --release-quarantine <session>\nRun 'ox doctor' to list them", agentID, len(held), agentID)
+		}
+		return true, releaseRecording(inst, projectRoot, held[0])
+	}
+	// only the agent's own quarantined recording, never another session that
+	// shares the name
+	named, err := quarantinedRecordingNamed(projectRoot, sessionName)
+	if err != nil || named.AgentID != agentID {
+		return false, nil
+	}
+	if args[1] == "abort" {
+		if err := abortResolvesTo(projectRoot, sessionName, named.SessionPath); err != nil {
+			return true, err
+		}
+		return true, runAgentSessionAbort(inst, cmd, []string{sessionName})
+	}
+	return true, releaseAndRecover(inst, projectRoot, sessionName)
+}
+
+// abortResolvesTo refuses a discard by name unless the name resolves to the
+// quarantined recording at want, so another folder sharing the name in a
+// higher-priority store is never deleted under the expired owner's check.
+func abortResolvesTo(projectRoot, sessionName, want string) error {
+	_, got, err := resolveSessionForAbort(projectRoot, sessionName)
+	if err == nil && sameDir(got, want) {
+		return nil
+	}
+	if got == "" {
+		got = "nothing on this machine"
+	}
+	return fmt.Errorf("session %s resolves to %s, not the quarantined recording at %s; nothing was removed", sessionName, got, want)
+}
+
+// firstPositional returns args' leading positional argument, or "" when it is
+// absent or a flag.
+func firstPositional(args []string) string {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return ""
+	}
+	return args[0]
 }
 
 // runAgentSessionRecover recovers a stale/crashed session.
@@ -117,12 +231,18 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 // recoverAgentSession is runAgentSessionRecover, optionally releasing a
 // quarantined recording first (see releaseAndRecover).
 func recoverAgentSession(inst *agentinstance.Instance, releaseQuarantine bool) error {
+	return recoverAgentSessionNamed(inst, releaseQuarantine, "")
+}
+
+// recoverAgentSessionNamed is recoverAgentSession; a release acts on the
+// quarantined recording sessionName names, when given.
+func recoverAgentSessionNamed(inst *agentinstance.Instance, releaseQuarantine bool, sessionName string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 	if releaseQuarantine {
-		return releaseAndRecover(inst, projectRoot)
+		return releaseAndRecover(inst, projectRoot, sessionName)
 	}
 
 	// load stale recording state

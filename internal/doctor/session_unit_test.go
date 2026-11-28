@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -510,21 +511,41 @@ func TestSessionQuarantineCheck_NothingQuarantinedIsSilent(t *testing.T) {
 // A quarantined recording is never uploaded or cleaned up, so doctor is the only
 // place that can say why the session is missing and how to get it back.
 func TestSessionQuarantineCheck_NamesRecordingsAndANonDestructiveWayOut(t *testing.T) {
-	check := NewSessionQuarantineCheck("/tmp/fake")
-	check.SetHealthStatus(&session.HealthStatus{
-		QuarantinedRecordings: []*session.RecordingState{
-			{AgentID: "OxFirst", SourceRejected: true, SessionPath: "/cache/sessions/2026-01-06T14-30-user-OxFirst"},
-			{AgentID: "OxSecond", SourceRejected: true, SessionPath: "/cache/sessions/2026-01-06T14-31-user-OxSecond"},
-		},
-	})
+	cacheDir := t.TempDir()
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"test-repo-quarantine-list"}`), 0o644))
+	var names []string
+	for _, agentID := range []string{"OxFirst", "OxSecond"} {
+		state, err := session.StartRecording(project, session.StartRecordingOptions{AgentID: agentID, AdapterName: "claude-code", Username: "testuser"})
+		require.NoError(t, err)
+		require.NoError(t, session.MarkSourceRejected(project, agentID))
+		names = append(names, filepath.Base(state.SessionPath))
+	}
+	// a marker in the in-repo legacy sessions/ folder, which release refuses
+	legacy := filepath.Join(project, "sessions", "2026-01-06T14-32-user-OxLegacy")
+	require.NoError(t, os.MkdirAll(legacy, 0o755))
+	data, err := json.Marshal(session.RecordingState{AgentID: "OxLegacy", SessionID: "legacy", SessionPath: legacy, SourceRejected: true, StartedAt: time.Now()})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(legacy, ".recording.json"), data, 0o600))
 
-	result := check.Run(context.Background(), false)
+	result := NewSessionQuarantineCheck(project).Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
-	assert.Contains(t, result.Message, "OxFirst")
-	assert.Contains(t, result.Message, "OxSecond")
-	assert.Contains(t, result.Fix, "ox agent OxFirst session recover --release-quarantine")
-	assert.Contains(t, result.Fix, "ox agent OxFirst session abort 2026-01-06T14-30-user-OxFirst", "discarding names the held session, not whichever the agent is recording now")
+	assert.Contains(t, result.Message, "2 recording(s) kept local")
 	assert.Contains(t, result.Fix, "Nothing is lost")
+	assert.NotContains(t, result.Message+result.Fix, "OxLegacy", "a marker release refuses is never listed with a command that cannot work")
+
+	lines := strings.Split(result.Fix, "\n")
+	require.Len(t, lines, 3, "one line per recording, under the intro: %q", result.Fix)
+	for i, agentID := range []string{"OxFirst", "OxSecond"} {
+		line := lines[i+1]
+		assert.Contains(t, result.Message, names[i])
+		assert.Contains(t, line, "ox agent "+agentID+" session recover --release-quarantine "+names[i], "the release names the session, under its own agent ID, so it works after the instance expires")
+		assert.Contains(t, line, "ox agent "+agentID+" session abort "+names[i], "each session's discard sits beside its release")
+	}
 }
 
 // The orphan fix clears the marker of stale recordings that hold content. Run

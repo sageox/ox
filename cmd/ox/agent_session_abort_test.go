@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -495,6 +496,36 @@ func TestResolveSessionForAbort_LedgerCache(t *testing.T) {
 	require.NoError(t, err, "should find session in ledger .sageox/cache/sessions/")
 	assert.Equal(t, sessionName, resolved)
 	assert.Equal(t, sessionPath, resolvedPath)
+}
+
+// Failure prevented: with a Ledger outside the default location, a partial
+// name that matched one session in another process's cache and a different one
+// in the Ledger cache resolved to the other cache first, so confirming the
+// abort discarded a session the coworker did not mean.
+func TestResolveSessionForAbort_LedgerCacheBeforeAnotherProcessCache(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot, ledgerPath := setupLedgerProject(t)
+	t.Chdir(projectRoot)
+	repoID := getRepoIDOrDefault(projectRoot)
+
+	// paths caches the home folder for the life of the process, so ask it where
+	// the default cache is instead of trusting this test's HOME
+	cacheHome := os.Getenv("XDG_CACHE_HOME")
+	t.Setenv("XDG_CACHE_HOME", "")
+	otherBase := paths.SessionCacheDir(repoID)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Cleanup(func() { _ = os.RemoveAll(otherBase) })
+	otherSession := filepath.Join(otherBase, "sessions", "2026-03-21T10-00-testuser-OxShdw")
+	require.NoError(t, os.MkdirAll(otherSession, 0o755))
+	require.Contains(t, paths.AlternateSessionCacheDirs(repoID), otherBase, "precondition: a cache this process does not write to")
+
+	sessionName, sessionPath := makeLedgerCacheOrphanSession(t, ledgerPath, "OxShdw")
+
+	resolved, resolvedPath, err := resolveSessionForAbort(projectRoot, "OxShdw")
+	require.NoError(t, err)
+	assert.Equal(t, sessionName, resolved)
+	assert.Equal(t, sessionPath, resolvedPath)
+	assert.DirExists(t, otherSession)
 }
 
 func TestResolveSessionForAbort_XDGCacheStillWorks(t *testing.T) {

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **MongoDB SRV passwords are redacted in captured sessions** — a `mongodb+srv://user:pass@host` connection string kept its password when the scheme was in capitals (`MONGODB+SRV://`) or the host was not on `mongodb.net`. ox now redacts both, as it already did for lowercase Atlas links, and also redacts a database password that ends in a backslash. A password with a raw double quote and a username made only of commas are redacted too. A database link with a port and no password can still be redacted together with a later `@` on the same line, even past a quote, because ox can't tell the port from a password.
+- **Recover a quarantined recording after its AI coworker has gone** — `ox doctor` now names each held session, and `ox agent <id> session recover --release-quarantine <session>` or `session abort <session>` works even after the AI coworker's instance has expired, instead of failing with "instance not found" (#2029).
 
 ## [0.27.2] - 2026-11-23
 
