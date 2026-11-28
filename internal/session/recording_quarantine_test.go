@@ -335,3 +335,30 @@ func TestLoadQuarantinedRecordingsForAgent_OnlyFromCachesOxWrites(t *testing.T) 
 		t.Fatalf("only the cache recording may be listed, got %d: %+v", len(held), held)
 	}
 }
+
+// A quarantine lookup with nothing to look for is a caller bug, not "none
+// held": an empty answer would let a release or discard go on without a target.
+func TestQuarantineLookupsRefuseAnEmptyKey(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+
+	if _, err := LoadQuarantinedRecordingsForAgent(project, ""); !errors.Is(err, ErrEmptyPath) {
+		t.Fatalf("LoadQuarantinedRecordingsForAgent with no agent ID: err = %v, want ErrEmptyPath", err)
+	}
+	if _, err := LoadQuarantinedRecordingNamed(project, ""); !errors.Is(err, ErrEmptyPath) {
+		t.Fatalf("LoadQuarantinedRecordingNamed with no name: err = %v, want ErrEmptyPath", err)
+	}
+}
+
+// A marker that records no folder of its own cannot be matched to the one it
+// was found in, so it is never trusted for a release or a discard.
+func TestTrustedQuarantineMarkerNeedsARecordedFolder(t *testing.T) {
+	project := setupRecordingTest(t, t.TempDir())
+	dir := t.TempDir()
+
+	if trustedQuarantineMarker(project, dir, &RecordingState{SourceRejected: true}) {
+		t.Fatal("a marker with no SessionPath was trusted")
+	}
+	if !trustedQuarantineMarker(project, dir, &RecordingState{SourceRejected: true, SessionPath: dir}) {
+		t.Fatal("a marker naming the folder it sits in was not trusted")
+	}
+}

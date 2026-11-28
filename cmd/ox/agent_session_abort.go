@@ -380,6 +380,12 @@ func resolveSessionForAbort(projectRoot, nameArg string) (string, string, error)
 	if projectCfg, err := config.LoadProjectConfig(projectRoot); err == nil && projectCfg != nil {
 		addStore(paths.LedgerSessionCacheBase(config.GetRepoID(projectRoot), projectCfg.Endpoint))
 	}
+	// A process with another cache root (a GUI app does not inherit the shell's
+	// XDG_CACHE_HOME) may have saved the recording, and the quarantine lookup
+	// that names it for 'ox doctor' reads those caches without a Ledger too.
+	for _, dir := range paths.AlternateSessionCacheDirs(repoID) {
+		addStore(dir)
+	}
 
 	// 2. Ledger cache, then the other caches a held session can live in
 	// (anything 'ox session list' shows as held can be aborted by name),

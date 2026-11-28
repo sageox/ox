@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -779,6 +781,11 @@ func quarantinedWithoutInstance(t *testing.T) (projectRoot, agentID, sessionName
 	t.Setenv("SAGEOX_TELEMETRY", "false")
 	isolateSessionMarkerDir(t)
 	t.Chdir(projectRoot)
+	// the commands print through the process-wide config, which only a full
+	// CLI start sets; without it these tests pass only after one that left it set
+	prevCfg := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = prevCfg })
 	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
 	held := heldRecording(t, projectRoot, agentID)
 	_, err := resolveInstance(agentID)
@@ -879,6 +886,44 @@ func TestAbortQuarantinedByNameAfterTheInstanceExpires(t *testing.T) {
 
 	_, statErr := os.Stat(held.SessionPath)
 	assert.True(t, os.IsNotExist(statErr), "the quarantined recording is discarded")
+}
+
+// A GUI process and a terminal can resolve different cache folders, so a
+// recording can be quarantined in one this process does not write to. 'ox
+// doctor' lists it there and prints a discard by name, so abort must look there
+// too, with or without a Ledger. Failure prevented: a recording held back for
+// crossing repositories that its owner could see but never discard.
+func TestAbortFindsAQuarantinedRecordingInAnotherProcessCache(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the alternate caches are the macOS and XDG defaults")
+	}
+	projectRoot, agentID, sessionName := quarantinedWithoutInstance(t)
+	held := heldRecording(t, projectRoot, agentID)
+	repoID := getRepoIDOrDefault(projectRoot)
+
+	// paths caches the home folder for the life of the process, so ask it where
+	// the default cache is instead of trusting this test's HOME
+	t.Setenv("XDG_CACHE_HOME", "")
+	otherCache := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+	t.Cleanup(func() { _ = os.RemoveAll(paths.SessionCacheDir(repoID)) })
+	moved := filepath.Join(otherCache, sessionName)
+	require.NoError(t, os.MkdirAll(otherCache, 0o755))
+	require.NoError(t, os.Rename(held.SessionPath, moved))
+	require.NoError(t, session.MutateRecordingStateFile(filepath.Join(moved, ".recording.json"), func(s *session.RecordingState) error {
+		s.SessionPath = moved
+		return nil
+	}))
+	// this process now writes somewhere else, as the terminal does
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	require.Contains(t, paths.AlternateSessionCacheDirs(repoID), filepath.Dir(otherCache), "the recording must sit in a cache this process does not write to")
+	_, ledgerErr := resolveLedgerPath()
+	require.Error(t, ledgerErr, "the case is the one with no Ledger to lead the search")
+	require.Equal(t, moved, heldRecording(t, projectRoot, agentID).SessionPath, "'ox doctor' still lists it")
+
+	require.NoError(t, abortResolvesTo(projectRoot, sessionName, moved))
+	setForceFlag(t, true)
+	require.NoError(t, runWithAgentID(agentCmd, agentID, []string{"session", "abort", sessionName}))
+	assert.NoDirExists(t, moved, "the quarantined recording is discarded")
 }
 
 // The fallback stands only on a quarantined recording. An unknown agent ID, or
