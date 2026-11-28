@@ -43,6 +43,7 @@ import (
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
@@ -1976,7 +1977,11 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 	}
 
 	cacheDirs := s.draftCacheDirs(ledgerPath)
-	orphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs)
+	ownerID, knownOwner := identity.LocalAttributionUserID(endpoint.GetForProject(s.config.ProjectRoot))
+	if !knownOwner {
+		ownerID = ""
+	}
+	orphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs, ownerID)
 	if err != nil || len(orphans) == 0 {
 		return
 	}
@@ -1998,7 +2003,7 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 		// work. Repeat the full orphan predicate now: a peer may have pulled a
 		// fresh cross-machine heartbeat while this reaper waited for the lock.
 		// Rechecking only local cache data would still delete that live draft.
-		currentOrphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs)
+		currentOrphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs, ownerID)
 		if err != nil {
 			return fmt.Errorf("revalidate orphaned drafts: %w", err)
 		}

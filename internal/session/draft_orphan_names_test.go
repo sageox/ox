@@ -1,6 +1,7 @@
 package session
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type namedDraftDir string
+
+func (d namedDraftDir) Name() string               { return string(d) }
+func (d namedDraftDir) IsDir() bool                { return true }
+func (d namedDraftDir) Type() fs.FileMode          { return fs.ModeDir }
+func (d namedDraftDir) Info() (fs.FileInfo, error) { return nil, os.ErrNotExist }
 
 // Ledger directory names arrive from teammates by git. Every name ox
 // generates must pass; separators, control characters, and the wildcard and
@@ -27,17 +35,27 @@ func TestValidateDraftSessionName_AcceptsGeneratedNamesOnly(t *testing.T) {
 func TestFindOrphanedDrafts_SkipsNonconformingNames(t *testing.T) {
 	ledger := t.TempDir()
 	aged := time.Now().Add(-2 * OrphanedDraftAge).UTC()
-	for _, name := range []string{"*", "[v]ictim", "ordinary"} {
+	for _, name := range []string{"2026-01-01T00-00-localuser-OxOrphan"} {
 		dir := filepath.Join(ledger, "sessions", name)
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
 			Version: "1.0", SessionName: name, SessionID: "ses_orphan_test", AgentID: "OxOrphan",
-			CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
+			UserID: "user-local", Username: "Local User", CreatedAt: aged, Draft: true, UpdatedAt: &aged, Files: map[string]lfs.FileRef{},
 		}))
 	}
 
-	orphans, err := FindOrphanedDrafts(ledger, nil)
+	orphans, err := FindOrphanedDrafts(ledger, nil, "user-local")
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"ordinary"}, orphans)
+	assert.Equal(t, []string{"2026-01-01T00-00-localuser-OxOrphan"}, orphans)
+}
+
+func TestDraftDiscoveryFiltersMalformedCandidates(t *testing.T) {
+	valid := "2026-01-01T00-00-localuser-OxOrphan"
+	malformed := "2026-01-01T00-00-localuser*-OxOrphan"
+	entries := []os.DirEntry{namedDraftDir(valid), namedDraftDir(malformed)}
+
+	filtered := validDraftSessionEntries(entries)
+	require.Len(t, filtered, 1, "a malformed candidate with the matching agent suffix must still be excluded")
+	assert.Equal(t, valid, filtered[0].Name())
 }
