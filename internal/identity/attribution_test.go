@@ -252,3 +252,26 @@ func TestLocalAttributionUserID_UsesStoredAccountID(t *testing.T) {
 	assert.True(t, known)
 	assert.Equal(t, "user-stable-123", userID)
 }
+
+// A team token's owner is the AI coworker it acts as, and that is known only
+// once this machine has fetched the token's metadata. The lookup never fetches,
+// so before that the owner is unknown and the caller must reap nothing.
+func TestLocalAttributionUserID_TeamToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"active":true,"principal_kind":"team-service","coworker":{"id":"agt_rip","display_name":"Rip Van Winkle"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+
+	userID, known := LocalAttributionUserID(srv.URL)
+	assert.False(t, known, "metadata was never fetched here, so the owner cannot be named")
+	assert.Empty(t, userID)
+
+	require.True(t, ResolveAttribution(srv.URL, "").AI, "resolving attribution fetches and caches the token's coworker")
+
+	userID, known = LocalAttributionUserID(srv.URL)
+	assert.True(t, known)
+	assert.Equal(t, "agt_rip", userID, "the cached coworker owns what this token publishes")
+}

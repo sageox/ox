@@ -86,3 +86,30 @@ func TestFindOrphanedDrafts_RequiresAgentID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, orphans)
 }
+
+// Ownership needs the stable user ID and a name of the shape this machine
+// generates for that AI coworker. Each refusal below is a name another writer
+// to the shared Ledger could commit to borrow a matching user ID's authority.
+func TestDraftOwnedByUserID_RequiresTheGeneratedNameShape(t *testing.T) {
+	meta := func(agentID string) *lfs.SessionMeta {
+		return &lfs.SessionMeta{UserID: "user-local", AgentID: agentID}
+	}
+	for _, tt := range []struct {
+		name, sessionName string
+		meta              *lfs.SessionMeta
+		want              bool
+	}{
+		{"generated name", "2026-01-01T00-00-ann-OxMine1", meta("OxMine1"), true},
+		{"no metadata", "2026-01-01T00-00-ann-OxMine1", nil, false},
+		{"agent ID that names nothing once sanitized", "2026-01-01T00-00-ann-OxMine1", meta("///"), false},
+		{"only a timestamp", "2026-01-01T00-00", meta("OxMine1"), false},
+		{"no separator after the timestamp", "2026-01-01T00-00_ann-OxMine1", meta("OxMine1"), false},
+		{"not a timestamp", "2026-13-41T99-99-ann-OxMine1", meta("OxMine1"), false},
+		{"another agent's suffix", "2026-01-01T00-00-ann-OxOther", meta("OxMine1"), false},
+		{"no username before the agent ID", "2026-01-01T00-00--OxMine1", meta("OxMine1"), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, draftOwnedByUserID(tt.sessionName, tt.meta, "user-local"))
+		})
+	}
+}
